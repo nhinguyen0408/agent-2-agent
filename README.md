@@ -46,6 +46,8 @@ Trên máy sẽ chạy agent, đăng nhập một lần trong terminal của má
 - Cursor CLI: cài `agent`, rồi chạy `agent login`. App gọi thẳng `node` của Cursor CLI với `agent -p --trust --force`, nên không đi qua PowerShell và tự chấp nhận lệnh trong thư mục làm việc.
 - Hai bên dùng chung một prompt hội thoại. Ô chat xóa ngay khi gửi. Máy kia hiện "đang nhập…" hoặc "đang trả lời…".
 - File gửi bằng nút **Gửi file** hoặc bằng lệnh local `POST /relay-file`. App chuyển byte qua LAN và lưu vào thư mục làm việc của máy nhận. Không cần share Windows.
+- Nút **Xem file** và danh sách trong thư mục làm việc mở một cửa sổ riêng, kéo và đổi kích thước được. Bấm file khác thì cửa sổ đó đổi nội dung. Dòng file trong hội thoại vẫn xem nhỏ trong chat. HTML không chạy script.
+- Nút **Đính kèm** gửi kèm txt, Markdown, ảnh hoặc PDF. File được chuyển vào thư mục làm việc của máy kia, và cả hai agent đọc file đó rồi trao đổi nội dung.
 - App tự nhận `claude` và `agent` trên máy (kể cả thư mục cài mặc định), rồi hiện Đã cài hoặc Chưa có. Lệnh `cursor` của Cursor IDE không tính là Cursor CLI.
 
 Phiên đăng nhập nằm trên máy đó. App xóa `ANTHROPIC_API_KEY` và `CURSOR_API_KEY` khỏi tiến trình con để lệnh dùng đúng phiên này. Thư mục làm việc là thư mục terminal được mở khi có việc trên đĩa.

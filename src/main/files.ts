@@ -1,5 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
+import type { WorkFile } from "../shared/preview";
+import { previewKind } from "../shared/preview";
 
 export const MAX_FILE_BYTES = 32 * 1024 * 1024;
 
@@ -33,6 +35,33 @@ export function resolveInside(workDir: string, requested: string): string {
     throw new Error("File phải nằm trong thư mục làm việc.");
   }
   return target;
+}
+
+export async function listWorkFiles(dir: string): Promise<{ found: boolean; files: WorkFile[] }> {
+  const root = path.resolve(dir);
+  let entries: fs.Dirent[];
+  try {
+    const stat = await fs.promises.stat(root);
+    if (!stat.isDirectory()) return { found: false, files: [] };
+    entries = await fs.promises.readdir(root, { withFileTypes: true });
+  } catch {
+    return { found: false, files: [] };
+  }
+  const files: WorkFile[] = [];
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const full = path.join(root, entry.name);
+    let size = 0;
+    try {
+      size = (await fs.promises.stat(full)).size;
+    } catch {
+      continue;
+    }
+    files.push({ name: entry.name, path: full, preview: previewKind(entry.name), size });
+    if (files.length >= 300) break;
+  }
+  files.sort((a, b) => a.name.localeCompare(b.name, "vi"));
+  return { found: true, files };
 }
 
 export async function readFileLimited(filePath: string, maxBytes: number): Promise<Buffer> {

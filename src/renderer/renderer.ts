@@ -1,5 +1,7 @@
-import type { AppState, CliReport, CliToolState, PeerActivity, PeerView, Settings } from "../shared/types";
+import type { AppState, ChatLine, CliReport, CliToolState, FileRef, PeerActivity, PeerView, Settings, WorkFile } from "../shared/types";
 import { providerLabel } from "../shared/types";
+import { fileRef, type PreviewKind } from "../shared/preview";
+import { renderPreview } from "./previewView";
 
 declare global {
   interface Window {
@@ -11,14 +13,19 @@ declare global {
       disconnect: (peerId: string) => Promise<void>;
       accept: (peerId: string) => Promise<void>;
       reject: (peerId: string) => Promise<void>;
-      send: (peerId: string, text: string) => Promise<void>;
+      send: (peerId: string, text: string, attachmentPath?: string) => Promise<void>;
+      pickDiscuss: () => Promise<string | null>;
       dialogue: (peerId: string, topic: string, replies: number) => Promise<void>;
       stop: (peerId: string) => Promise<void>;
       pickCwd: () => Promise<string | null>;
       rescanClis: () => Promise<AppState>;
       activity: (peerId: string, patch: { typing?: boolean; replying?: boolean }) => Promise<void>;
       sendFile: (peerId: string) => Promise<string | null>;
+      openPreview: () => Promise<FileRef | null>;
+      showPreview: (file: FileRef) => Promise<boolean>;
+      listWorkFiles: (dir: string) => Promise<{ found: boolean; files: WorkFile[] }>;
       onState: (listener: (state: AppState) => void) => () => void;
+      onPreviewFile: (listener: (file: FileRef) => void) => () => void;
     };
   }
 }
@@ -76,6 +83,7 @@ function boot(host: HTMLElement): void {
               <button id="pick-cwd" type="button">Chọn</button>
             </span>
           </label>
+          <div id="workdir-files" class="workdir-files"></div>
           <label class="check"><input id="set-auto" type="checkbox" /> Tự chấp nhận máy trong LAN</label>
           <div id="tools" class="tools"></div>
           <p class="hint">Không dùng API key. Hai bên dùng chung một prompt hội thoại. File gửi qua nút Gửi file, hoặc nhờ agent gửi file trong thư mục làm việc: file đi qua app, không cần share Windows. Lệnh cursor của Cursor IDE không được tính là Cursor CLI.</p>
@@ -111,9 +119,15 @@ function boot(host: HTMLElement): void {
           <p id="typing" class="typing" hidden></p>
           <form id="composer" class="composer">
             <textarea id="draft" rows="3" placeholder="Nhắn cho agent máy kia…"></textarea>
+            <div id="attach-chip" class="attach-chip" hidden>
+              <span id="attach-name"></span>
+              <button id="attach-clear" type="button" class="ghost">Bỏ</button>
+            </div>
             <div class="composer-actions">
               <button id="send" type="submit">Gửi</button>
+              <button id="attach" type="button" class="ghost">Đính kèm</button>
               <button id="send-file" type="button" class="ghost">Gửi file</button>
+              <button id="open-preview" type="button" class="ghost">Xem file</button>
               <label class="replies">Lượt
                 <input id="replies" type="number" min="1" max="8" value="4" />
               </label>
@@ -139,6 +153,10 @@ function boot(host: HTMLElement): void {
   let active: string | null = null;
   let settingsReady = false;
   let toastTimer = 0;
+  let lastFiles: WorkFile[] = [];
+  let selectedFile = "";
+  let filesTimer = 0;
+  let filesKey = "";
 
   peersEl.addEventListener("click", (event) => {
     const row = (event.target as HTMLElement).closest<HTMLElement>("[data-peer]");
@@ -173,10 +191,96 @@ function boot(host: HTMLElement): void {
     });
   });
 
+  function scheduleFiles(): void {
+    window.clearTimeout(filesTimer);
+    filesTimer = window.setTimeout(() => void refreshFiles(), 250);
+  }
+
+  async function refreshFiles(): Promise<void> {
+    const dir = must<HTMLInputElement>("#set-cwd").value.trim();
+    const box = must<HTMLElement>("#workdir-files");
+    if (!dir) {
+      lastFiles = [];
+      filesKey = "";
+      box.textContent = "Chưa chọn thư mục.";
+      return;
+    }
+    try {
+      const listed = await window.lan.listWorkFiles(dir);
+      if (must<HTMLInputElement>("#set-cwd").value.trim() !== dir) return;
+      if (!listed.found) {
+        lastFiles = [];
+        filesKey = "";
+        box.textContent = "Không thấy thư mục này.";
+        return;
+      }
+      lastFiles = listed.files;
+      paintFileList(listed.files);
+    } catch (err) {
+      box.textContent = messageOf(err);
+    }
+  }
+
+  function paintFileList(files: WorkFile[]): void {
+    const box = must<HTMLElement>("#workdir-files");
+    const key = files.map((file) => `${file.path}:${file.size}`).join("|");
+    if (key === filesKey && box.querySelector("[data-file]")) {
+      for (const button of Array.from(box.querySelectorAll<HTMLButtonElement>("[data-file]"))) {
+        button.classList.toggle("active", button.dataset.file === selectedFile);
+      }
+      return;
+    }
+    filesKey = key;
+    box.replaceChildren();
+    if (!files.length) {
+      box.textContent = "Thư mục chưa có file.";
+      return;
+    }
+    for (const file of files) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `workdir-file${file.path === selectedFile ? " active" : ""}`;
+      button.dataset.file = file.path;
+      button.dataset.name = file.name;
+      button.dataset.preview = file.preview ?? "";
+      const name = document.createElement("span");
+      name.textContent = file.name;
+      const meta = document.createElement("small");
+      meta.textContent = `${kindLabel(file.preview)} · ${formatFileSize(file.size)}`;
+      button.append(name, meta);
+      box.append(button);
+    }
+  }
+
   must<HTMLButtonElement>("#pick-cwd").addEventListener("click", () => {
     void guard(async () => {
       const picked = await window.lan.pickCwd();
-      if (picked) must<HTMLInputElement>("#set-cwd").value = picked;
+      if (picked) {
+        must<HTMLInputElement>("#set-cwd").value = picked;
+        void refreshFiles();
+      }
+    });
+  });
+
+  must<HTMLInputElement>("#set-cwd").addEventListener("input", () => scheduleFiles());
+  must<HTMLElement>("#workdir-files").addEventListener("click", (event) => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-file]");
+    if (!button?.dataset.file) return;
+    const kind = button.dataset.preview;
+    if (kind !== "image" && kind !== "html" && kind !== "markdown" && kind !== "audio" && kind !== "video") {
+      flash("Loại file này chưa xem trước được.");
+      return;
+    }
+    selectedFile = button.dataset.file;
+    paintFileList(lastFiles);
+    showDock({ name: button.dataset.name || button.dataset.file, path: button.dataset.file, preview: kind });
+  });
+  window.setInterval(() => void refreshFiles(), 4000);
+
+  must<HTMLButtonElement>("#open-preview").addEventListener("click", () => {
+    void guard(async () => {
+      const file = await window.lan.openPreview();
+      if (file) showDock(file);
     });
   });
 
@@ -296,9 +400,7 @@ function boot(host: HTMLElement): void {
     banner.hidden = peer.status !== "pending-in";
     must<HTMLElement>("#banner-text").textContent = `${peer.name} muốn nối vào máy này.`;
     const lines = next.transcripts[active] ?? [];
-    const stick = nearBottom(messagesEl);
-    messagesEl.replaceChildren(...lines.map((line) => renderLine(line, next.self.peerId)));
-    if (stick) messagesEl.scrollTop = messagesEl.scrollHeight;
+    paintMessages(messagesEl, lines, next.self.peerId, nearBottom(messagesEl));
     const canSend = connected || Boolean(peer.token);
     must<HTMLButtonElement>("#send").disabled = !canSend;
     must<HTMLButtonElement>("#send-file").disabled = !canSend;
@@ -324,6 +426,7 @@ function boot(host: HTMLElement): void {
     must<HTMLInputElement>("#set-cwd").value = settings.workDir;
     must<HTMLInputElement>("#set-auto").checked = settings.autoAccept;
     settingsReady = true;
+    void refreshFiles();
   }
 
   function readSettings(): Settings {
@@ -358,14 +461,38 @@ function boot(host: HTMLElement): void {
     typingTimer = window.setTimeout(() => noteTyping(false), 900);
   }
 
+  let attached = "";
+
+  function paintAttach(): void {
+    const chip = must<HTMLElement>("#attach-chip");
+    chip.hidden = !attached;
+    must<HTMLElement>("#attach-name").textContent = attached ? attached.split(/[/\\]/).pop() || attached : "";
+  }
+
+  must<HTMLButtonElement>("#attach").addEventListener("click", () => {
+    void guard(async () => {
+      const picked = await window.lan.pickDiscuss();
+      if (!picked) return;
+      attached = picked;
+      paintAttach();
+    });
+  });
+  must<HTMLButtonElement>("#attach-clear").addEventListener("click", () => {
+    attached = "";
+    paintAttach();
+  });
+
   async function sendDraft(): Promise<void> {
     if (!active) return;
     const text = draft.value;
-    if (!text.trim()) return;
+    const file = attached;
+    if (!text.trim() && !file) return;
     const peerId = active;
     draft.value = "";
+    attached = "";
+    paintAttach();
     noteTyping(false);
-    await guard(() => window.lan.send(peerId, text));
+    await guard(() => window.lan.send(peerId, text, file || undefined));
   }
 
   async function guard(action: () => Promise<unknown>): Promise<void> {
@@ -374,6 +501,10 @@ function boot(host: HTMLElement): void {
     } catch (err) {
       flash(messageOf(err));
     }
+  }
+
+  function showDock(file: FileRef): void {
+    void guard(() => window.lan.showPreview(file));
   }
 
   function flash(text: string): void {
@@ -387,7 +518,35 @@ function boot(host: HTMLElement): void {
   }
 }
 
-function renderLine(line: AppState["transcripts"][string][number], selfId: string): HTMLElement {
+function paintMessages(host: HTMLElement, lines: ChatLine[], selfId: string, stick: boolean): void {
+  const ids = new Set(lines.map((line) => line.id));
+  for (const child of Array.from(host.children)) {
+    const id = child.getAttribute("data-id");
+    if (!id || !ids.has(id)) child.remove();
+  }
+  let changed = false;
+  for (const line of lines) {
+    const article = host.querySelector<HTMLElement>(`[data-id="${line.id}"]`);
+    const text = line.text || (line.pending ? "…" : "");
+    if (!article) {
+      const created = renderLine(line, selfId);
+      created.dataset.id = line.id;
+      host.append(created);
+      changed = true;
+      continue;
+    }
+    const body = article.querySelector("p");
+    if (body && body.textContent !== text) {
+      body.textContent = text;
+      changed = true;
+    }
+    body?.classList.toggle("pending", line.pending);
+    host.append(article);
+  }
+  if (changed && stick) host.scrollTop = host.scrollHeight;
+}
+
+function renderLine(line: ChatLine, selfId: string): HTMLElement {
   const article = document.createElement("article");
   const mine = line.fromPeerId === selfId && line.kind !== "system";
   article.className = `line ${line.kind}${mine ? " mine" : ""}`;
@@ -406,7 +565,36 @@ function renderLine(line: AppState["transcripts"][string][number], selfId: strin
   body.textContent = line.text || (line.pending ? "…" : "");
   if (line.pending) body.classList.add("pending");
   article.append(body);
+  if (line.attachment) {
+    const note = document.createElement("p");
+    note.className = "attach-note";
+    note.textContent = `Đính kèm: ${line.attachment.name}`;
+    article.append(note);
+  }
+  const attached = attachment(line);
+  if (attached) article.append(renderPreview(attached));
   return article;
+}
+
+function kindLabel(kind: PreviewKind | null): string {
+  if (kind === "image") return "ảnh";
+  if (kind === "html") return "html";
+  if (kind === "markdown") return "markdown";
+  if (kind === "audio") return "âm thanh";
+  if (kind === "video") return "video";
+  return "file";
+}
+
+function formatFileSize(size: number): string {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function attachment(line: ChatLine): FileRef | null {
+  if (line.file?.path && line.file.preview) return line.file;
+  const saved = line.text.match(/Lưu tại\s+([A-Za-z]:\\.*)$/);
+  return saved?.[1] ? fileRef(saved[1].trim()) : null;
 }
 
 function paintTools(report: CliReport | undefined): void {

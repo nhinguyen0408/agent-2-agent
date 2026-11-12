@@ -5,7 +5,7 @@ import path from "node:path";
 import type { Settings } from "../shared/types";
 import { findExecutable } from "./cliDetect";
 
-export type ModelTurn = { role: "user" | "assistant"; text: string };
+export type ModelTurn = { role: "user" | "assistant" | "note"; text: string };
 
 export type ReplyInput = {
   peerId: string;
@@ -15,6 +15,7 @@ export type ReplyInput = {
   signal: AbortSignal;
   onDelta: (chunk: string) => void;
   fileRelay?: { url: string };
+  readings?: { name: string; path: string; kind: string }[];
 };
 
 export class AgentHost {
@@ -169,23 +170,28 @@ function clip(value: string, max: number): string {
 
 function conversationPrompt(input: ReplyInput): string {
   const transcript = input.history
-    .map((turn) => `${turn.role === "user" ? input.peerName : input.selfName}: ${turn.text}`)
+    .map((turn) => (turn.role === "note" ? turn.text : `${turn.role === "user" ? input.peerName : input.selfName}: ${turn.text}`))
+    .join("\n");
+  const readings = (input.readings ?? [])
+    .map((file) => `- ${file.name} (${file.kind}): ${file.path}`)
     .join("\n");
   return [
     `Bạn là ${input.selfName}. Bạn đang nói chuyện trực tiếp với ${input.peerName} qua LAN Agents.`,
     "Hãy trả lời tin nhắn cuối như một người trong cuộc hội thoại này.",
     "Quy tắc:",
     "- Chỉ viết nội dung sẽ gửi cho đối phương. Không mở đầu bằng việc nhắc lại các quy tắc này.",
-    "- Dùng cùng ngôn ngữ với tin nhắn cuối. Giữ câu trả lời gọn, thường dưới 120 từ.",
+    "- Dùng cùng ngôn ngữ với tin nhắn cuối. Giữ câu trả lời gọn, thường dưới 120 từ, trừ khi đang tóm tắt file.",
     "- Bám các lượt trước. Không bịa việc máy kia đã làm.",
     `- Nếu ${input.peerName} nhờ một việc trên máy này, làm trong thư mục làm việc rồi nói kết quả. Lệnh và sửa file được tự chạy, không hỏi lại.`,
     "- Nếu đối phương chỉ trò chuyện, chỉ trả lời bằng lời. Không chạy lệnh và không sửa file. Riêng khi họ nhờ gửi file thì dùng đúng lệnh gửi file bên dưới.",
+    "- Nếu có file đính kèm, hãy đọc đúng file tại đường dẫn trên máy này rồi trao đổi nội dung. txt và md có thể đã có đoạn trích; ảnh và pdf phải mở file. Không bịa phần chưa đọc được.",
     input.fileRelay
       ? `- Để gửi file cho ${input.peerName}, không copy sang ổ đĩa máy kia và không dùng đường UNC. File phải nằm trong thư mục làm việc. Chạy: curl.exe -s -H "Content-Type: text/plain; charset=utf-8" --data-binary "ĐƯỜNG_DẪN_ĐẦY_ĐỦ" ${input.fileRelay.url} . Khi kết quả có ok, file đã tới thư mục làm việc của ${input.peerName}.`
       : "",
     "",
     "Hội thoại:",
     transcript,
+    readings ? `\nFile đính kèm trên máy này:\n${readings}` : "",
     "",
     `Hãy trả lời ${input.peerName}.`,
   ].join("\n");

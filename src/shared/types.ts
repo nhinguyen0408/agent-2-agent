@@ -1,3 +1,9 @@
+import type { DiscussFile } from "./discuss";
+import type { FileRef, WorkFile } from "./preview";
+
+export type { DiscussFile, DiscussKind } from "./discuss";
+export type { FileRef, WorkFile } from "./preview";
+
 export const DEFAULT_PORT = 3940;
 export const PORT_SPAN = 30;
 export const DISCOVERY_PORT = 41234;
@@ -13,12 +19,17 @@ export const IPC = {
   accept: "lan:accept",
   reject: "lan:reject",
   send: "lan:send",
+  pickDiscuss: "lan:pick-discuss",
   dialogue: "lan:dialogue",
   stop: "lan:stop",
   pickCwd: "lan:pick-cwd",
   rescanClis: "lan:rescan-clis",
   activity: "lan:activity",
   sendFile: "lan:send-file",
+  openPreview: "lan:open-preview",
+  showPreview: "lan:show-preview",
+  previewFile: "lan:preview-file",
+  listWorkFiles: "lan:list-work-files",
 } as const;
 
 export type ActivityPatch = {
@@ -83,6 +94,8 @@ export type ChatLine = {
   text: string;
   pending: boolean;
   createdAt: number;
+  file?: FileRef;
+  attachment?: DiscussFile;
 };
 
 export type AppState = {
@@ -110,6 +123,7 @@ export type WireChat = {
   text: string;
   createdAt: number;
   dialogue?: { repliesLeft: number };
+  attachment?: { name: string; kind: DiscussFile["kind"]; excerpt: string };
 };
 
 export type WireDelta = {
@@ -141,14 +155,19 @@ export type LanApi = {
   disconnect: (peerId: string) => Promise<void>;
   accept: (peerId: string) => Promise<void>;
   reject: (peerId: string) => Promise<void>;
-  send: (peerId: string, text: string) => Promise<void>;
+  send: (peerId: string, text: string, attachmentPath?: string) => Promise<void>;
+  pickDiscuss: () => Promise<string | null>;
   dialogue: (peerId: string, topic: string, replies: number) => Promise<void>;
   stop: (peerId: string) => Promise<void>;
   pickCwd: () => Promise<string | null>;
   rescanClis: () => Promise<AppState>;
   activity: (peerId: string, patch: ActivityPatch) => Promise<void>;
   sendFile: (peerId: string) => Promise<string | null>;
+  openPreview: () => Promise<FileRef | null>;
+  showPreview: (file: FileRef) => Promise<boolean>;
+  listWorkFiles: (dir: string) => Promise<{ found: boolean; files: WorkFile[] }>;
   onState: (listener: (state: AppState) => void) => () => void;
+  onPreviewFile: (listener: (file: FileRef) => void) => () => void;
 };
 
 export function normalizeProvider(value: string): ProviderId {

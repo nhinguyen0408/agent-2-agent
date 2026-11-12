@@ -9,6 +9,7 @@ import type {
   AppState,
   ChatLine,
   CliReport,
+  DiscussFile,
   HelloAck,
   HelloPayload,
   LinkStatus,
@@ -23,6 +24,9 @@ import { AgentHost, type ModelTurn } from "./agents";
 import { detectLocalClis, installedCliList, parseCliList } from "./cliDetect";
 import { Discovery, lanIPv4, normalizeIp } from "./discovery";
 import { fileNameFromHeader, formatBytes, MAX_FILE_BYTES, readFileLimited, resolveInside, safeFileName, saveReceivedFile } from "./files";
+import { allowPreview } from "./preview";
+import { discussExcerpt, discussKind } from "../shared/discuss";
+import { fileRef, type FileRef } from "../shared/preview";
 import { bearer, listen, readBody, readJson, remoteIp, sendJson } from "./httpUtil";
 import { Store, sanitizeSettings } from "./store";
 
@@ -340,14 +344,35 @@ export class AppCore {
     this.system(peerId, "Đã từ chối kết nối.");
   }
 
-  async sendHuman(peerId: string, text: string): Promise<void> {
+  async sendHuman(peerId: string, text: string, attachmentPath?: string): Promise<void> {
     const clean = text.trim().slice(0, LINE_CAP);
-    if (!clean) return;
-    const line = this.makeLine(peerId, this.store.peerId, this.store.settings.name, "human", clean);
-    this.appendLine(peerId, line);
-    if (this.sendTo(peerId, "chat", this.toWire(line))) return;
+    let attachment: DiscussFile | undefined;
     try {
-      const reply = await this.httpTrigger(peerId, clean);
+      if (attachmentPath?.trim()) attachment = await this.deliverDiscuss(peerId, attachmentPath);
+    } catch (err) {
+      this.system(peerId, err instanceof Error ? err.message : "Không gửi được file đính kèm.");
+      return;
+    }
+    const spoken = clean || (attachment ? `Đọc file đính kèm ${attachment.name} và trao đổi nội dung.` : "");
+    if (!spoken) return;
+    const line = this.makeLine(peerId, this.store.peerId, this.store.settings.name, "human", spoken);
+    if (attachment) {
+      line.attachment = attachment;
+      const preview = fileRef(attachment.path);
+      if (preview) {
+        line.file = preview;
+        allowPreview(attachment.path);
+      }
+    }
+    this.appendLine(peerId, line);
+    const wire = this.toWire(line);
+    if (this.sendTo(peerId, "chat", wire)) return;
+    if (attachment) {
+      this.system(peerId, "File đã tới máy kia, nhưng cần kết nối đang mở thì agent mới đọc và trao đổi.");
+      return;
+    }
+    try {
+      const reply = await this.httpTrigger(peerId, spoken);
       const name = this.endpoints.get(peerId)?.name || this.store.trusted[peerId]?.name || "Máy kia";
       this.appendLine(peerId, this.makeLine(peerId, peerId, name, "agent", reply));
     } catch (err) {
@@ -685,7 +710,9 @@ export class AppCore {
     const data = await readFileLimited(resolved, MAX_FILE_BYTES);
     const name = safeFileName(path.basename(resolved));
     await this.postFile(peerId, name, data);
-    this.system(peerId, `Đã gửi file ${name} (${formatBytes(data.length)}) sang máy kia.`);
+    const ref = fileRef(resolved);
+    if (ref) allowPreview(resolved);
+    this.system(peerId, `Đã gửi file ${name} (${formatBytes(data.length)}) sang máy kia.`, ref ?? undefined);
   }
 
   private async onRelayFile(req: http.IncomingMessage, res: http.ServerResponse, peerId: string): Promise<void> {
@@ -726,12 +753,35 @@ export class AppCore {
     }
     const name = fileNameFromHeader(req.headers["x-file-name"]);
     const saved = await saveReceivedFile(this.store.settings.workDir, name, data);
-    const from = this.endpoints.get(peerId)?.name || this.store.trusted[peerId]?.name || "Máy kia";
-    this.system(peerId, `${from} đã gửi file ${path.basename(saved)} (${formatBytes(data.length)}). Lưu tại ${saved}`);
+    const discuss = req.headers["x-discuss"] === "1";
+    if (!discuss) {
+      const from = this.endpoints.get(peerId)?.name || this.store.trusted[peerId]?.name || "Máy kia";
+      this.system(peerId, `${from} đã gửi file ${path.basename(saved)} (${formatBytes(data.length)}). Lưu tại ${saved}`, fileRef(saved) ?? undefined);
+    } else if (fileRef(saved)) {
+      allowPreview(saved);
+    }
     sendJson(res, 200, { ok: true, name: path.basename(saved), bytes: data.length });
   }
 
-  private async postFile(peerId: string, name: string, data: Buffer): Promise<void> {
+  private async deliverDiscuss(peerId: string, filePath: string): Promise<DiscussFile> {
+    const resolved = path.resolve(filePath);
+    const kind = discussKind(resolved);
+    if (!kind) throw new Error("Chỉ đính kèm được txt, md, ảnh hoặc pdf.");
+    const data = await readFileLimited(resolved, MAX_FILE_BYTES);
+    const root = path.resolve(this.store.settings.workDir);
+    const rel = path.relative(root, resolved);
+    const localPath = rel && !rel.startsWith("..") && !path.isAbsolute(rel) ? resolved : await saveReceivedFile(root, path.basename(resolved), data);
+    const remoteName = await this.postFile(peerId, path.basename(localPath), data, true);
+    return {
+      name: path.basename(localPath),
+      path: localPath,
+      kind,
+      excerpt: discussExcerpt(localPath, data),
+      remoteName,
+    };
+  }
+
+  private async postFile(peerId: string, name: string, data: Buffer, discuss = false): Promise<string> {
     const endpoint = this.endpoints.get(peerId) ?? this.endpointFromTrusted(peerId);
     const token = this.store.trusted[peerId]?.token;
     if (!endpoint?.host || !endpoint.port || !token) throw new Error("Hãy nối máy kia trước khi gửi file.");
@@ -743,6 +793,7 @@ export class AppCore {
           authorization: `Bearer ${token}`,
           "content-type": "application/octet-stream",
           "x-file-name": encodeURIComponent(name),
+          ...(discuss ? { "x-discuss": "1" } : {}),
         },
         body: new Uint8Array(data),
         signal: AbortSignal.timeout(120_000),
@@ -750,9 +801,10 @@ export class AppCore {
     } catch (err) {
       throw new Error(err instanceof Error ? err.message : "Không gửi được file qua LAN.");
     }
-    const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+    const body = (await res.json().catch(() => ({}))) as { ok?: boolean; name?: string; error?: string };
     if (res.status === 404) throw new Error("Máy kia cần cài bản LAN Agents mới thì mới nhận được file.");
     if (!res.ok || !body.ok) throw new Error(body.error || `Máy kia không nhận file (HTTP ${res.status}).`);
+    return body.name || name;
   }
 
   private async onTrigger(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -781,6 +833,7 @@ export class AppCore {
   private async onWireChat(peerId: string, msg: WireChat): Promise<void> {
     if (!msg?.id || msg.fromPeerId === this.store.peerId || msg.fromPeerId !== peerId) return;
     const text = String(msg.text ?? "").slice(0, 100_000);
+    const attachment = this.localDiscuss(msg.attachment);
     this.upsertLine(peerId, {
       id: msg.id,
       fromPeerId: msg.fromPeerId,
@@ -789,6 +842,8 @@ export class AppCore {
       text,
       pending: false,
       createdAt: msg.createdAt || Date.now(),
+      attachment,
+      file: attachment ? fileRef(attachment.path) ?? undefined : undefined,
     });
     if (!this.remember(msg.id)) {
       this.pushNow();
@@ -851,6 +906,7 @@ export class AppCore {
           history: this.modelHistory(peerId),
           signal: controller.signal,
           fileRelay: { url: `http://127.0.0.1:${this.port}/relay-file/${peerId}` },
+          readings: this.readings(peerId),
           onDelta: (chunk) => {
             if ((this.epochs.get(peerId) ?? 0) !== epoch) return;
             const line = this.findLine(peerId, id);
@@ -989,14 +1045,56 @@ export class AppCore {
     const lines = this.store.transcripts[peerId] ?? [];
     const items: ModelTurn[] = [];
     for (const line of lines) {
-      if (line.pending || line.kind === "system" || !line.text.trim()) continue;
+      if (line.pending || line.kind === "system") continue;
+      const text = this.turnText(line);
+      if (!text.trim()) continue;
+      if (line.kind === "human" && line.fromPeerId === this.store.peerId) {
+        if (!line.attachment) continue;
+        items.push({ role: "note", text: `${line.fromName} gửi: ${text}` });
+        continue;
+      }
       if (line.kind === "agent" && line.fromPeerId === this.store.peerId) {
         items.push({ role: "assistant", text: line.text });
       } else if (line.fromPeerId !== this.store.peerId) {
-        items.push({ role: "user", text: line.text });
+        items.push({ role: "user", text });
       }
     }
     return items;
+  }
+
+  private turnText(line: ChatLine): string {
+    const note = line.attachment ? this.attachmentNote(line.attachment) : "";
+    return `${line.text.trim()}${note}`.trim();
+  }
+
+  private attachmentNote(file: DiscussFile): string {
+    const body = file.excerpt
+      ? `\nNội dung đã đọc:\n${file.excerpt}`
+      : "\nHãy mở file tại đường dẫn trên và đọc nội dung trước khi trả lời.";
+    return `\n\n[File đính kèm ${file.name}]\nĐường dẫn: ${file.path}${body}`;
+  }
+
+  private readings(peerId: string): { name: string; path: string; kind: string }[] {
+    const lines = this.store.transcripts[peerId] ?? [];
+    const found: { name: string; path: string; kind: string }[] = [];
+    for (const line of lines) {
+      if (!line.attachment?.path) continue;
+      found.push({ name: line.attachment.name, path: line.attachment.path, kind: line.attachment.kind });
+    }
+    return found.slice(-4);
+  }
+
+  private localDiscuss(raw: WireChat["attachment"]): DiscussFile | undefined {
+    if (!raw || (raw.kind !== "text" && raw.kind !== "markdown" && raw.kind !== "image" && raw.kind !== "pdf")) return;
+    const name = safeFileName(String(raw.name || ""));
+    const saved = path.join(path.resolve(this.store.settings.workDir), name);
+    if (fileRef(saved)) allowPreview(saved);
+    return {
+      name,
+      path: saved,
+      kind: raw.kind,
+      excerpt: String(raw.excerpt ?? "").slice(0, 12_000),
+    };
   }
 
   private upsertEndpoint(peerId: string, next: Endpoint, preferHost = false): void {
@@ -1254,8 +1352,10 @@ export class AppCore {
     return this.store.transcripts[peerId]?.find((line) => line.id === id);
   }
 
-  private system(peerId: string, text: string): void {
-    this.appendLine(peerId, this.makeLine(peerId, this.store.peerId, this.store.settings.name, "system", text));
+  private system(peerId: string, text: string, file?: FileRef): void {
+    const line = this.makeLine(peerId, this.store.peerId, this.store.settings.name, "system", text);
+    if (file) line.file = file;
+    this.appendLine(peerId, line);
   }
 
   private toWire(line: ChatLine): WireChat {
@@ -1266,6 +1366,13 @@ export class AppCore {
       kind: line.kind === "agent" ? "agent" : "human",
       text: line.text,
       createdAt: line.createdAt,
+      attachment: line.attachment
+        ? {
+            name: line.attachment.remoteName || line.attachment.name,
+            kind: line.attachment.kind,
+            excerpt: line.attachment.excerpt,
+          }
+        : undefined,
     };
   }
 

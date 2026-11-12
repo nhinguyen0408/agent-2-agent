@@ -1,7 +1,12 @@
 import path from "node:path";
-import { app, BrowserWindow, dialog, ipcMain } from "electron";
-import { IPC, type Settings } from "../shared/types";
+import { app, BrowserWindow, dialog, ipcMain, screen, type OpenDialogOptions } from "electron";
+import { IPC, type FileRef, type Settings } from "../shared/types";
+import { fileRef } from "../shared/preview";
+import { listWorkFiles } from "./files";
 import { AppCore } from "./core";
+import { allowPreview, attachPreviewProtocol, registerPreviewScheme } from "./preview";
+
+registerPreviewScheme();
 
 const profileArg = process.argv.find((arg) => arg.startsWith("--profile="));
 const profile = (profileArg?.slice("--profile=".length) || "default").replace(/[^a-zA-Z0-9_-]/g, "") || "default";
@@ -25,13 +30,77 @@ if (!gotLock) {
   app.quit();
 } else {
   let core: AppCore | null = null;
+  let mainWindow: BrowserWindow | null = null;
+  let previewWindow: BrowserWindow | null = null;
+  let pendingPreview: FileRef | null = null;
 
   const broadcast = () => {
-    if (!core) return;
-    const state = core.snapshot();
-    for (const win of BrowserWindow.getAllWindows()) {
-      if (!win.webContents.isDestroyed()) win.webContents.send(IPC.state, state);
+    if (!core || !mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.webContents.send(IPC.state, core.snapshot());
+  };
+
+  const dialogHost = (): BrowserWindow | undefined => {
+    const win = BrowserWindow.getFocusedWindow() ?? mainWindow;
+    return win && !win.isDestroyed() ? win : undefined;
+  };
+
+  const choosePath = async (options: OpenDialogOptions): Promise<string | null> => {
+    const win = dialogHost();
+    const result = win ? await dialog.showOpenDialog(win, options) : await dialog.showOpenDialog(options);
+    if (result.canceled) return null;
+    return result.filePaths[0] ?? null;
+  };
+
+  const openPreviewWindow = (file: FileRef) => {
+    pendingPreview = file;
+    if (previewWindow && !previewWindow.isDestroyed()) {
+      previewWindow.setTitle(file.name);
+      if (previewWindow.isMinimized()) previewWindow.restore();
+      previewWindow.show();
+      previewWindow.focus();
+      previewWindow.webContents.send(IPC.previewFile, file);
+      return;
     }
+    const win = new BrowserWindow({
+      width: 860,
+      height: 640,
+      minWidth: 420,
+      minHeight: 320,
+      backgroundColor: "#12150e",
+      title: file.name,
+      autoHideMenuBar: true,
+      show: false,
+      webPreferences: {
+        preload: path.join(__dirname, "preload.js"),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
+    });
+    previewWindow = win;
+    win.removeMenu();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      const bounds = mainWindow.getBounds();
+      const area = screen.getDisplayMatching(bounds).workArea;
+      let x = bounds.x + bounds.width + 12;
+      let y = bounds.y;
+      if (x + 860 > area.x + area.width) x = Math.max(area.x, bounds.x + 36);
+      if (y + 640 > area.y + area.height) y = area.y + Math.max(0, area.height - 640);
+      win.setPosition(Math.round(x), Math.round(y));
+    }
+    win.once("ready-to-show", () => {
+      if (!win.isDestroyed()) win.show();
+    });
+    win.webContents.on("did-finish-load", () => {
+      const current = pendingPreview;
+      if (!current || win.isDestroyed()) return;
+      win.setTitle(current.name);
+      win.webContents.send(IPC.previewFile, current);
+    });
+    win.on("closed", () => {
+      if (previewWindow === win) previewWindow = null;
+    });
+    void win.loadFile(path.join(__dirname, "preview.html"));
   };
 
   const createWindow = async () => {
@@ -54,7 +123,12 @@ if (!gotLock) {
         sandbox: true,
       },
     });
+    mainWindow = win;
     win.removeMenu();
+    win.on("closed", () => {
+      if (mainWindow === win) mainWindow = null;
+      if (previewWindow && !previewWindow.isDestroyed()) previewWindow.close();
+    });
     win.once("ready-to-show", () => win.show());
     win.webContents.on("did-finish-load", () => {
       if (!core) return;
@@ -65,8 +139,8 @@ if (!gotLock) {
   };
 
   app.on("second-instance", () => {
-    const win = BrowserWindow.getAllWindows()[0];
-    if (!win) return;
+    const win = mainWindow;
+    if (!win || win.isDestroyed()) return;
     if (win.isMinimized()) win.restore();
     win.focus();
   });
@@ -81,8 +155,7 @@ if (!gotLock) {
       ipcMain.handle(IPC.saveSettings, (_event, settings: Settings) => {
         if (!core) throw new Error("App chưa sẵn sàng");
         const state = core.saveSettings(settings);
-        const win = BrowserWindow.getAllWindows()[0];
-        if (win) win.setTitle(`LAN Agents — ${state.self.name}`);
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setTitle(`LAN Agents — ${state.self.name}`);
         return state;
       });
       ipcMain.handle(IPC.connect, (_event, peerId: string) => core?.connect(peerId));
@@ -90,7 +163,21 @@ if (!gotLock) {
       ipcMain.handle(IPC.disconnect, (_event, peerId: string) => core?.disconnect(peerId));
       ipcMain.handle(IPC.accept, (_event, peerId: string) => core?.accept(peerId));
       ipcMain.handle(IPC.reject, (_event, peerId: string) => core?.reject(peerId));
-      ipcMain.handle(IPC.send, (_event, peerId: string, text: string) => core?.sendHuman(peerId, text));
+      ipcMain.handle(IPC.send, (_event, peerId: string, text: string, attachmentPath?: string) =>
+        core?.sendHuman(peerId, text, attachmentPath),
+      );
+      ipcMain.handle(IPC.pickDiscuss, async () => {
+        const picked = await choosePath({
+          properties: ["openFile"],
+          filters: [
+            {
+              name: "File để trao đổi",
+              extensions: ["txt", "md", "markdown", "png", "jpg", "jpeg", "gif", "webp", "bmp", "pdf"],
+            },
+          ],
+        });
+        return picked;
+      });
       ipcMain.handle(IPC.dialogue, (_event, peerId: string, topic: string, replies: number) =>
         core?.startDialogue(peerId, topic, replies),
       );
@@ -102,22 +189,45 @@ if (!gotLock) {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.rescanClis();
       });
+      attachPreviewProtocol(() => core?.store.settings.workDir ?? "");
+      ipcMain.handle(IPC.listWorkFiles, async (_event, dir: string) => {
+        if (typeof dir !== "string" || !dir.trim()) return { found: false, files: [] };
+        const listed = await listWorkFiles(dir);
+        for (const file of listed.files) {
+          if (file.preview) allowPreview(file.path);
+        }
+        return listed;
+      });
+      ipcMain.handle(IPC.showPreview, (_event, raw: unknown) => {
+        const picked = raw && typeof raw === "object" && "path" in raw ? fileRef(String((raw as { path: unknown }).path)) : null;
+        if (!picked) return false;
+        allowPreview(picked.path);
+        openPreviewWindow(picked);
+        return true;
+      });
+      ipcMain.handle(IPC.openPreview, async () => {
+        const picked = await choosePath({
+          properties: ["openFile"],
+          filters: [
+            {
+              name: "Xem trước",
+              extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "html", "htm", "md", "markdown", "mp3", "wav", "ogg", "m4a", "flac", "mp4", "webm", "mov", "ogv"],
+            },
+          ],
+        });
+        const ref = picked ? fileRef(picked) : null;
+        if (!ref) return null;
+        allowPreview(ref.path);
+        return ref;
+      });
       ipcMain.handle(IPC.sendFile, async (_event, peerId: string) => {
         if (!core) throw new Error("App chưa sẵn sàng");
-        const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
-        const result = await dialog.showOpenDialog(win, { properties: ["openFile"] });
-        if (result.canceled) return null;
-        const filePath = result.filePaths[0];
+        const filePath = await choosePath({ properties: ["openFile"] });
         if (!filePath) return null;
         await core.sendFile(peerId, filePath, true);
         return filePath;
       });
-      ipcMain.handle(IPC.pickCwd, async () => {
-        const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
-        const result = await dialog.showOpenDialog(win, { properties: ["openDirectory"] });
-        if (result.canceled) return null;
-        return result.filePaths[0] ?? null;
-      });
+      ipcMain.handle(IPC.pickCwd, () => choosePath({ properties: ["openDirectory"] }));
       return createWindow();
     })
     .catch((err) => {

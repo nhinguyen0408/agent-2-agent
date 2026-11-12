@@ -182,7 +182,36 @@ label { display: flex; flex-direction: column; gap: 0.25rem; margin-top: 0.55rem
   min-height: 4.5rem;
 }
 
-.chat { min-height: 0; display: flex; }
+.workdir-files {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  max-height: 12rem;
+  overflow: auto;
+  margin-top: 0.35rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.workdir-file {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  width: 100%;
+  text-align: left;
+  border-radius: 8px;
+  padding: 0.35rem 0.5rem;
+  background: transparent;
+  color: var(--text);
+  border: 1px solid transparent;
+  font-weight: 500;
+}
+
+.workdir-file small { color: var(--muted); font-weight: 450; }
+
+.workdir-file.active, .workdir-file:hover { background: #222916; border-color: var(--line); }
+
+.chat { min-height: 0; display: flex; flex-direction: column; }
 
 .chat-panel, .empty {
   flex: 1;
@@ -283,6 +312,89 @@ label { display: flex; flex-direction: column; gap: 0.25rem; margin-top: 0.55rem
 .line.mine .pending::after { color: var(--ink); }
 
 @keyframes blink { 50% { opacity: 0; } }
+
+.preview {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--bg-2);
+  overflow: hidden;
+}
+
+body.preview-app { overflow: hidden; }
+
+.preview-stage {
+  height: 100%;
+  display: flex;
+  min-height: 0;
+}
+
+.preview-stage .preview,
+.preview-fill {
+  flex: 1;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.preview-fill img,
+.preview-fill video,
+.preview-fill iframe,
+.preview-fill .markdown {
+  width: 100%;
+  height: 100%;
+  max-height: none;
+}
+
+.preview-fill audio { width: min(100%, 36rem); }
+
+.preview img, .preview video {
+  display: block;
+  width: 100%;
+  max-height: 280px;
+  object-fit: contain;
+  background: #0c0e09;
+}
+
+.preview audio { width: 100%; }
+
+.preview iframe {
+  width: 100%;
+  height: 280px;
+  border: 0;
+  background: white;
+}
+
+.preview .markdown {
+  max-height: 280px;
+  overflow: auto;
+  padding: 0.7rem 0.85rem;
+  font-size: 0.9rem;
+}
+
+.preview .markdown :first-child { margin-top: 0; }
+
+.preview .markdown pre {
+  white-space: pre-wrap;
+  background: #0c0e09;
+  padding: 0.5rem 0.65rem;
+  border-radius: 8px;
+}
+
+.line .preview { margin-top: 0.35rem; }
+
+.attach-chip, .attach-note {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0.45rem 0 0;
+  color: var(--lime-2);
+  font-size: 0.85rem;
+}
+
+.attach-note { display: block; }
 
 .composer { border-top: 1px solid var(--line); }
 
