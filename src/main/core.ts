@@ -8,6 +8,7 @@ import type {
   ActivityPatch,
   AppState,
   ChatLine,
+  ChatSession,
   CliReport,
   DiscussFile,
   HelloAck,
@@ -80,6 +81,7 @@ export class AppCore {
   private readonly remoteClis = new Map<string, string>();
   private readonly activity = new Map<string, PeerActivity>();
   private readonly activityTimers = new Map<string, NodeJS.Timeout>();
+  private readonly unread = new Set<string>();
   private sweepTimer: NodeJS.Timeout | null = null;
   private scanTimer: NodeJS.Timeout | null = null;
   private cliTimer: NodeJS.Timeout | null = null;
@@ -177,7 +179,7 @@ export class AppCore {
     const ids = new Set<string>([
       ...this.endpoints.keys(),
       ...Object.keys(this.store.trusted),
-      ...Object.keys(this.store.transcripts),
+      ...Object.keys(this.store.sessions),
       ...this.pendingHello.keys(),
       ...this.knockWait.keys(),
     ]);
@@ -187,7 +189,8 @@ export class AppCore {
       const trusted = this.store.trusted[peerId];
       const discovered = Boolean(endpoint?.discovered && now - endpoint.lastSeen < 10_000);
       const link = this.statusOf(peerId);
-      if (!discovered && link === "none" && !trusted && !this.store.transcripts[peerId]) continue;
+      const hasHistory = (this.store.sessions[peerId] ?? []).length > 0;
+      if (!discovered && link === "none" && !trusted && !hasHistory) continue;
       peers.push({
         peerId,
         name: endpoint?.name || trusted?.name || "Máy",
@@ -220,6 +223,9 @@ export class AppCore {
       localClis: this.localClis,
       activity: Object.fromEntries(this.activity),
       peers,
+      sessions: Object.values(this.store.sessions).flat(),
+      openSession: { ...this.store.openSessions },
+      unreadSessions: [...this.unread],
       transcripts: this.store.transcripts,
       logs: [...this.logs],
     };
@@ -355,6 +361,8 @@ export class AppCore {
     }
     const spoken = clean || (attachment ? `Đọc file đính kèm ${attachment.name} và trao đổi nội dung.` : "");
     if (!spoken) return;
+    const sessionId = this.ensureSession(peerId);
+    this.nameSession(peerId, sessionId, spoken);
     const line = this.makeLine(peerId, this.store.peerId, this.store.settings.name, "human", spoken);
     if (attachment) {
       line.attachment = attachment;
@@ -364,8 +372,8 @@ export class AppCore {
         allowPreview(attachment.path);
       }
     }
-    this.appendLine(peerId, line);
-    const wire = this.toWire(line);
+    this.appendLine(sessionId, line);
+    const wire = this.toWire(line, sessionId);
     if (this.sendTo(peerId, "chat", wire)) return;
     if (attachment) {
       this.system(peerId, "File đã tới máy kia, nhưng cần kết nối đang mở thì agent mới đọc và trao đổi.");
@@ -374,7 +382,7 @@ export class AppCore {
     try {
       const reply = await this.httpTrigger(peerId, spoken);
       const name = this.endpoints.get(peerId)?.name || this.store.trusted[peerId]?.name || "Máy kia";
-      this.appendLine(peerId, this.makeLine(peerId, peerId, name, "agent", reply));
+      this.appendLine(sessionId, this.makeLine(peerId, peerId, name, "agent", reply));
     } catch (err) {
       this.system(peerId, err instanceof Error ? err.message : "Không gửi được.");
     }
@@ -389,9 +397,11 @@ export class AppCore {
     }
     this.halt(peerId, true);
     const left = Math.max(1, Math.min(DIALOGUE_CAP, Math.round(replies) || 4));
+    const sessionId = this.ensureSession(peerId);
+    this.nameSession(peerId, sessionId, clean);
     const line = this.makeLine(peerId, this.store.peerId, this.store.settings.name, "human", clean);
-    this.appendLine(peerId, line);
-    const wire = this.toWire(line);
+    this.appendLine(sessionId, line);
+    const wire = this.toWire(line, sessionId);
     wire.dialogue = { repliesLeft: left };
     this.sendTo(peerId, "chat", wire);
   }
@@ -446,6 +456,10 @@ export class AppCore {
         const result = this.onHello(socket, hello);
         bound = result.bound;
         respond(result.ack);
+      });
+      socket.on("session", (body: { id?: string; title?: string; createdAt?: number }) => {
+        if (!bound) return;
+        this.onRemoteSession(bound, body);
       });
       socket.on("chat", (msg: WireChat) => {
         if (!bound || !this.isLinked(bound)) return;
@@ -556,6 +570,7 @@ export class AppCore {
       this.system(peerId, `${endpoint.name} đã từ chối kết nối.`);
       socket.disconnect();
     });
+    socket.on("session", (body: { id?: string; title?: string; createdAt?: number }) => this.onRemoteSession(peerId, body));
     socket.on("chat", (msg: WireChat) => void this.onWireChat(peerId, msg));
     socket.on("delta", (msg: WireDelta) => this.onWireDelta(peerId, msg));
     socket.on("halt", () => this.halt(peerId, false));
@@ -820,9 +835,11 @@ export class AppCore {
       return;
     }
     const name = this.endpoints.get(peerId)?.name || this.store.trusted[peerId]?.name || "Máy kia";
-    this.appendLine(peerId, this.makeLine(peerId, peerId, name, "human", text));
+    const sessionId = this.ensureSession(peerId);
+    this.nameSession(peerId, sessionId, text);
+    this.appendLine(sessionId, this.makeLine(peerId, peerId, name, "human", text));
     this.sendTo(peerId, "aside", { text: `Lệnh HTTP: ${text.slice(0, 500)}` });
-    const reply = await this.enqueueReply(peerId);
+    const reply = await this.enqueueReply(peerId, sessionId);
     if (!reply) {
       sendJson(res, 500, { ok: false, error: this.lastError.get(peerId) || "Agent không trả lời" });
       return;
@@ -833,8 +850,9 @@ export class AppCore {
   private async onWireChat(peerId: string, msg: WireChat): Promise<void> {
     if (!msg?.id || msg.fromPeerId === this.store.peerId || msg.fromPeerId !== peerId) return;
     const text = String(msg.text ?? "").slice(0, 100_000);
+    const sessionId = this.adoptSession(peerId, msg.sessionId, msg.sessionTitle);
     const attachment = this.localDiscuss(msg.attachment);
-    this.upsertLine(peerId, {
+    this.upsertLine(sessionId, {
       id: msg.id,
       fromPeerId: msg.fromPeerId,
       fromName: msg.fromName || "Máy kia",
@@ -845,6 +863,7 @@ export class AppCore {
       attachment,
       file: attachment ? fileRef(attachment.path) ?? undefined : undefined,
     });
+    if (this.store.openSessions[peerId] !== sessionId) this.unread.add(sessionId);
     if (!this.remember(msg.id)) {
       this.pushNow();
       return;
@@ -853,14 +872,16 @@ export class AppCore {
     const shouldReply = dialogue ? dialogue.repliesLeft > 0 : msg.kind === "human";
     this.pushNow();
     if (!shouldReply) return;
-    await this.enqueueReply(peerId, dialogue);
+    await this.enqueueReply(peerId, sessionId, dialogue);
   }
 
   private onWireDelta(peerId: string, delta: WireDelta): void {
     if (!delta?.id || delta.fromPeerId === this.store.peerId || delta.fromPeerId !== peerId) return;
-    const existing = this.findLine(peerId, delta.id);
+    const located = delta.sessionId ? undefined : this.locate(peerId, delta.id);
+    const sessionId = delta.sessionId || located?.sessionId || this.ensureSession(peerId);
+    const existing = this.findLine(sessionId, delta.id);
     if (existing && !existing.pending) return;
-    this.upsertLine(peerId, {
+    this.upsertLine(sessionId, {
       id: delta.id,
       fromPeerId: delta.fromPeerId,
       fromName: delta.fromName || "Máy kia",
@@ -872,7 +893,7 @@ export class AppCore {
     this.push();
   }
 
-  private enqueueReply(peerId: string, dialogue?: { repliesLeft: number }): Promise<string> {
+  private enqueueReply(peerId: string, sessionId: string, dialogue?: { repliesLeft: number }): Promise<string> {
     const epoch = this.epochs.get(peerId) ?? 0;
     let resolveOut: (text: string) => void = () => undefined;
     const result = new Promise<string>((resolve) => {
@@ -887,7 +908,7 @@ export class AppCore {
       this.aborts.set(peerId, controller);
       const id = randomUUID();
       const createdAt = Date.now();
-      this.upsertLine(peerId, {
+      this.upsertLine(sessionId, {
         id,
         fromPeerId: this.store.peerId,
         fromName: this.store.settings.name,
@@ -903,24 +924,24 @@ export class AppCore {
           peerId,
           selfName: this.store.settings.name,
           peerName: this.endpoints.get(peerId)?.name || this.store.trusted[peerId]?.name || "máy kia",
-          history: this.modelHistory(peerId),
+          history: this.modelHistory(sessionId),
           signal: controller.signal,
           fileRelay: { url: `http://127.0.0.1:${this.port}/relay-file/${peerId}` },
-          readings: this.readings(peerId),
+          readings: this.readings(sessionId),
           onDelta: (chunk) => {
             if ((this.epochs.get(peerId) ?? 0) !== epoch) return;
-            const line = this.findLine(peerId, id);
+            const line = this.findLine(sessionId, id);
             if (!line?.pending) return;
             line.text += chunk;
-            this.scheduleDelta(peerId, id);
+            this.scheduleDelta(peerId, sessionId, id);
           },
         });
         if ((this.epochs.get(peerId) ?? 0) !== epoch || controller.signal.aborted) {
-          this.finishAborted(peerId, id);
+          this.finishAborted(sessionId, id);
           resolveOut("");
           return;
         }
-        const line = this.findLine(peerId, id);
+        const line = this.findLine(sessionId, id);
         if (line) {
           line.text = text;
           line.pending = false;
@@ -933,6 +954,8 @@ export class AppCore {
           kind: "agent",
           text,
           createdAt,
+          sessionId,
+          sessionTitle: this.sessionTitle(sessionId),
           dialogue: dialogue && left > 0 ? { repliesLeft: left } : undefined,
         };
         this.sendTo(peerId, "chat", wire);
@@ -942,13 +965,13 @@ export class AppCore {
         resolveOut(text);
       } catch (err) {
         if (isAbort(err) || (this.epochs.get(peerId) ?? 0) !== epoch) {
-          this.finishAborted(peerId, id);
+          this.finishAborted(sessionId, id);
           resolveOut("");
           return;
         }
         const message = err instanceof Error ? err.message : "Agent lỗi";
         this.lastError.set(peerId, message);
-        this.upsertLine(peerId, {
+        this.upsertLine(sessionId, {
           id,
           fromPeerId: this.store.peerId,
           fromName: this.store.settings.name,
@@ -1041,8 +1064,8 @@ export class AppCore {
     }
   }
 
-  private modelHistory(peerId: string): ModelTurn[] {
-    const lines = this.store.transcripts[peerId] ?? [];
+  private modelHistory(sessionId: string): ModelTurn[] {
+    const lines = this.store.transcripts[sessionId] ?? [];
     const items: ModelTurn[] = [];
     for (const line of lines) {
       if (line.pending || line.kind === "system") continue;
@@ -1074,8 +1097,8 @@ export class AppCore {
     return `\n\n[File đính kèm ${file.name}]\nĐường dẫn: ${file.path}${body}`;
   }
 
-  private readings(peerId: string): { name: string; path: string; kind: string }[] {
-    const lines = this.store.transcripts[peerId] ?? [];
+  private readings(sessionId: string): { name: string; path: string; kind: string }[] {
+    const lines = this.store.transcripts[sessionId] ?? [];
     const found: { name: string; path: string; kind: string }[] = [];
     for (const line of lines) {
       if (!line.attachment?.path) continue;
@@ -1238,16 +1261,158 @@ export class AppCore {
     if (tellPeer) this.sendTo(peerId, "halt", {});
   }
 
-  private finishAborted(peerId: string, id: string): void {
-    const line = this.findLine(peerId, id);
-    if (line && !line.text.trim()) {
-      const list = this.store.transcripts[peerId] ?? [];
-      this.store.transcripts[peerId] = list.filter((item) => item.id !== id);
-    } else if (line) {
+  createSession(peerId: string): AppState {
+    const session = this.addSession(peerId);
+    this.store.openSessions[peerId] = session.id;
+    this.unread.delete(session.id);
+    this.sendTo(peerId, "session", { id: session.id, title: session.title, createdAt: session.createdAt });
+    this.scheduleSave();
+    this.pushNow();
+    return this.snapshot();
+  }
+
+  openSession(peerId: string, sessionId: string): AppState {
+    const known = (this.store.sessions[peerId] ?? []).some((session) => session.id === sessionId);
+    if (known) {
+      this.store.openSessions[peerId] = sessionId;
+      this.unread.delete(sessionId);
+      this.scheduleSave();
+      this.pushNow();
+    }
+    return this.snapshot();
+  }
+
+  renameSession(peerId: string, sessionId: string, title: string): AppState {
+    const session = (this.store.sessions[peerId] ?? []).find((item) => item.id === sessionId);
+    const clean = title.replace(/\s+/g, " ").trim().slice(0, 42);
+    if (!session || !clean) return this.snapshot();
+    session.title = clean;
+    session.pinned = true;
+    session.updatedAt = Date.now();
+    this.sendTo(peerId, "session", { id: session.id, title: session.title, createdAt: session.createdAt });
+    this.scheduleSave();
+    this.pushNow();
+    return this.snapshot();
+  }
+
+  private ensureSession(peerId: string): string {
+    const open = this.store.openSessions[peerId];
+    const list = this.store.sessions[peerId] ?? [];
+    if (open && list.some((session) => session.id === open)) return open;
+    if (list.length) {
+      const latest = [...list].sort((a, b) => b.updatedAt - a.updatedAt)[0];
+      this.store.openSessions[peerId] = latest.id;
+      return latest.id;
+    }
+    return this.addSession(peerId).id;
+  }
+
+  private addSession(peerId: string, id?: string, title?: string): ChatSession {
+    const list = this.store.sessions[peerId] ?? [];
+    const session: ChatSession = {
+      id: id || randomUUID(),
+      peerId,
+      title: title || `Phiên ${list.length + 1}`,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    this.store.sessions[peerId] = [...list, session];
+    this.store.transcripts[session.id] = this.store.transcripts[session.id] ?? [];
+    this.store.openSessions[peerId] = session.id;
+    return session;
+  }
+
+  private adoptSession(peerId: string, sessionId?: string, title?: string): string {
+    if (!sessionId) return this.ensureSession(peerId);
+    const list = this.store.sessions[peerId] ?? [];
+    const found = list.find((session) => session.id === sessionId);
+    if (found) {
+      if (title && !found.pinned && /^Phiên \d+$/.test(found.title)) found.title = title.slice(0, 42);
+      found.updatedAt = Date.now();
+      if (!this.store.openSessions[peerId]) this.store.openSessions[peerId] = found.id;
+      return found.id;
+    }
+    this.foldEmptySession(peerId, sessionId);
+    const previous = this.store.openSessions[peerId];
+    const session = this.addSession(peerId, sessionId, title?.slice(0, 42));
+    if (previous && previous !== session.id) this.store.openSessions[peerId] = previous;
+    return session.id;
+  }
+
+  private onRemoteSession(peerId: string, body: { id?: string; title?: string; createdAt?: number }): void {
+    if (!body?.id || body.id.length > 80) return;
+    const list = this.store.sessions[peerId] ?? [];
+    const existing = list.find((session) => session.id === body.id);
+    const nextTitle = body.title?.replace(/\s+/g, " ").trim().slice(0, 42);
+    if (existing) {
+      if (nextTitle && nextTitle !== existing.title) {
+        existing.title = nextTitle;
+        existing.pinned = true;
+        this.scheduleSave();
+        this.pushNow();
+      }
+      return;
+    }
+    this.foldEmptySession(peerId, body.id);
+    const previous = this.store.openSessions[peerId];
+    this.addSession(peerId, body.id, body.title);
+    if (previous && previous !== body.id) {
+      this.store.openSessions[peerId] = previous;
+      this.unread.add(body.id);
+    }
+    this.scheduleSave();
+    this.pushNow();
+  }
+
+  private foldEmptySession(peerId: string, intoId: string): void {
+    const open = this.store.openSessions[peerId];
+    if (!open || open === intoId) return;
+    const lines = this.store.transcripts[open] ?? [];
+    if (lines.some((line) => line.kind !== "system")) return;
+    const target = this.store.transcripts[intoId] ?? [];
+    this.store.transcripts[intoId] = [...lines, ...target];
+    delete this.store.transcripts[open];
+    this.store.sessions[peerId] = (this.store.sessions[peerId] ?? []).filter((session) => session.id !== open);
+    this.store.openSessions[peerId] = intoId;
+  }
+
+  private nameSession(peerId: string, sessionId: string, text: string): void {
+    const session = (this.store.sessions[peerId] ?? []).find((item) => item.id === sessionId);
+    if (!session) return;
+    session.updatedAt = Date.now();
+    if (session.pinned || !/^Phiên \d+$/.test(session.title)) return;
+    const title = text.replace(/\s+/g, " ").trim().slice(0, 42);
+    if (title) session.title = title;
+  }
+
+  private sessionTitle(sessionId: string): string {
+    for (const list of Object.values(this.store.sessions)) {
+      const session = list.find((item) => item.id === sessionId);
+      if (session) return session.title;
+    }
+    return "";
+  }
+
+  private locate(peerId: string, lineId: string): { sessionId: string; line: ChatLine } | undefined {
+    for (const session of this.store.sessions[peerId] ?? []) {
+      const line = this.store.transcripts[session.id]?.find((item) => item.id === lineId);
+      if (line) return { sessionId: session.id, line };
+    }
+    return undefined;
+  }
+
+  private finishAborted(sessionId: string, id: string): void {
+    const line = this.findLine(sessionId, id);
+    if (!line) return;
+    if (!line.text.trim()) {
+      const list = this.store.transcripts[sessionId] ?? [];
+      this.store.transcripts[sessionId] = list.filter((item) => item.id !== id);
+    } else {
       line.pending = false;
       line.text = `${line.text}\n(đã dừng)`;
     }
-    this.system(peerId, "Đã dừng.");
+    const note = this.makeLine(sessionId, this.store.peerId, this.store.settings.name, "system", "Đã dừng.");
+    this.appendLine(sessionId, note);
   }
 
   notifyActivity(peerId: string, patch: ActivityPatch): void {
@@ -1294,13 +1459,13 @@ export class AppCore {
     return false;
   }
 
-  private scheduleDelta(peerId: string, id: string): void {
+  private scheduleDelta(peerId: string, sessionId: string, id: string): void {
     this.push();
     const key = `${peerId}:${id}`;
     if (this.deltaTimers.has(key)) return;
     const timer = setTimeout(() => {
       this.deltaTimers.delete(key);
-      const line = this.findLine(peerId, id);
+      const line = this.findLine(sessionId, id);
       if (!line) return;
       const delta: WireDelta = {
         id,
@@ -1308,6 +1473,7 @@ export class AppCore {
         fromName: this.store.settings.name,
         text: line.text,
         createdAt: line.createdAt,
+        sessionId,
       };
       this.sendTo(peerId, "delta", delta);
     }, 80);
@@ -1333,32 +1499,32 @@ export class AppCore {
     };
   }
 
-  private appendLine(peerId: string, line: ChatLine): void {
-    this.upsertLine(peerId, line);
+  private appendLine(sessionId: string, line: ChatLine): void {
+    this.upsertLine(sessionId, line);
     this.pushNow();
     this.scheduleSave();
   }
 
-  private upsertLine(peerId: string, line: ChatLine): void {
-    const list = this.store.transcripts[peerId] ?? [];
+  private upsertLine(sessionId: string, line: ChatLine): void {
+    const list = this.store.transcripts[sessionId] ?? [];
     const index = list.findIndex((item) => item.id === line.id);
     if (index >= 0) list[index] = line;
     else list.push(line);
     while (list.length > MAX_LINES) list.shift();
-    this.store.transcripts[peerId] = list;
+    this.store.transcripts[sessionId] = list;
   }
 
-  private findLine(peerId: string, id: string): ChatLine | undefined {
-    return this.store.transcripts[peerId]?.find((line) => line.id === id);
+  private findLine(sessionId: string, id: string): ChatLine | undefined {
+    return this.store.transcripts[sessionId]?.find((line) => line.id === id);
   }
 
   private system(peerId: string, text: string, file?: FileRef): void {
     const line = this.makeLine(peerId, this.store.peerId, this.store.settings.name, "system", text);
     if (file) line.file = file;
-    this.appendLine(peerId, line);
+    this.appendLine(this.ensureSession(peerId), line);
   }
 
-  private toWire(line: ChatLine): WireChat {
+  private toWire(line: ChatLine, sessionId: string): WireChat {
     return {
       id: line.id,
       fromPeerId: line.fromPeerId,
@@ -1366,6 +1532,8 @@ export class AppCore {
       kind: line.kind === "agent" ? "agent" : "human",
       text: line.text,
       createdAt: line.createdAt,
+      sessionId,
+      sessionTitle: this.sessionTitle(sessionId),
       attachment: line.attachment
         ? {
             name: line.attachment.remoteName || line.attachment.name,

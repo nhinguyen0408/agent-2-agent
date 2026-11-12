@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { app } from "electron";
-import type { ChatLine, Settings } from "../shared/types";
+import type { ChatLine, ChatSession, Settings } from "../shared/types";
 import { normalizeProvider } from "../shared/types";
 
 export type TrustedPeer = {
@@ -18,6 +18,8 @@ type Disk = {
   peerId: string;
   settings: Settings;
   trusted: Record<string, TrustedPeer>;
+  sessions?: Record<string, ChatSession[]>;
+  openSessions?: Record<string, string>;
   transcripts: Record<string, ChatLine[]>;
 };
 
@@ -38,6 +40,8 @@ export class Store {
   peerId: string;
   settings: Settings;
   trusted: Record<string, TrustedPeer>;
+  sessions: Record<string, ChatSession[]>;
+  openSessions: Record<string, string>;
   transcripts: Record<string, ChatLine[]>;
 
   constructor(profile: string) {
@@ -47,7 +51,10 @@ export class Store {
     this.peerId = disk?.peerId || randomUUID();
     this.settings = sanitizeSettings(disk?.settings ?? fresh, fresh.name);
     this.trusted = disk?.trusted ?? {};
-    this.transcripts = disk?.transcripts ?? {};
+    const history = migrateHistory(disk);
+    this.sessions = history.sessions;
+    this.openSessions = history.openSessions;
+    this.transcripts = history.transcripts;
     for (const lines of Object.values(this.transcripts)) {
       for (const line of lines) {
         if (line.pending) {
@@ -63,6 +70,8 @@ export class Store {
       peerId: this.peerId,
       settings: this.settings,
       trusted: this.trusted,
+      sessions: this.sessions,
+      openSessions: this.openSessions,
       transcripts: this.transcripts,
     };
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
@@ -97,4 +106,34 @@ function readDisk(file: string): Disk | null {
   } catch {
     return null;
   }
+}
+
+function migrateHistory(disk: Disk | null): {
+  sessions: Record<string, ChatSession[]>;
+  openSessions: Record<string, string>;
+  transcripts: Record<string, ChatLine[]>;
+} {
+  const raw = disk?.transcripts ?? {};
+  if (disk?.sessions) {
+    return {
+      sessions: disk.sessions,
+      openSessions: disk.openSessions ?? {},
+      transcripts: raw,
+    };
+  }
+  const sessions: Record<string, ChatSession[]> = {};
+  const transcripts: Record<string, ChatLine[]> = {};
+  const openSessions: Record<string, string> = {};
+  for (const [peerId, lines] of Object.entries(raw)) {
+    if (!Array.isArray(lines)) continue;
+    const id = `legacy-${peerId}`;
+    const createdAt = lines[0]?.createdAt || Date.now();
+    const updatedAt = lines[lines.length - 1]?.createdAt || createdAt;
+    const first = lines.find((line) => line.kind === "human" && line.text.trim());
+    const title = first ? first.text.replace(/\s+/g, " ").trim().slice(0, 42) : "Phiên 1";
+    sessions[peerId] = [{ id, peerId, title, createdAt, updatedAt }];
+    transcripts[id] = lines;
+    openSessions[peerId] = id;
+  }
+  return { sessions, openSessions, transcripts };
 }

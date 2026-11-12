@@ -4,6 +4,8 @@ Hai cửa sổ (hoặc hai máy Windows trong cùng LAN) tự tìm nhau. Máy nh
 
 Runtime mặc định là **Echo**: trả lại đúng câu nhận được. Claude và Cursor dùng terminal đã đăng nhập trên từng máy, không dùng API key.
 
+Chi tiết khung chat, hội thoại hai agent, đính kèm và lệnh HTTP: [docs/chat.md](docs/chat.md).
+
 ## Chạy thử trên một máy
 
 ```bash
@@ -48,6 +50,7 @@ Trên máy sẽ chạy agent, đăng nhập một lần trong terminal của má
 - File gửi bằng nút **Gửi file** hoặc bằng lệnh local `POST /relay-file`. App chuyển byte qua LAN và lưu vào thư mục làm việc của máy nhận. Không cần share Windows.
 - Nút **Xem file** và danh sách trong thư mục làm việc mở một cửa sổ riêng, kéo và đổi kích thước được. Bấm file khác thì cửa sổ đó đổi nội dung. Dòng file trong hội thoại vẫn xem nhỏ trong chat. HTML không chạy script.
 - Nút **Đính kèm** gửi kèm txt, Markdown, ảnh hoặc PDF. File được chuyển vào thư mục làm việc của máy kia, và cả hai agent đọc file đó rồi trao đổi nội dung.
+- Mục **Phiên chat** tạo nhiều phiên với cùng một máy. Mỗi phiên giữ lịch sử riêng. Ô **Tên phiên** hoặc nút **Sửa** đổi tên, máy kia nhận tên đó. Agent chỉ đọc phiên đang mở. Tin của phiên khác hiện chữ "mới" cho đến khi mở phiên đó.
 - App tự nhận `claude` và `agent` trên máy (kể cả thư mục cài mặc định), rồi hiện Đã cài hoặc Chưa có. Lệnh `cursor` của Cursor IDE không tính là Cursor CLI.
 
 Phiên đăng nhập nằm trên máy đó. App xóa `ANTHROPIC_API_KEY` và `CURSOR_API_KEY` khỏi tiến trình con để lệnh dùng đúng phiên này. Thư mục làm việc là thư mục terminal được mở khi có việc trên đĩa.

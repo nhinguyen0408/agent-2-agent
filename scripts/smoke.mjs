@@ -190,7 +190,7 @@ function dialogueScript() {
     document.querySelector("#send")?.click();
     while (Date.now() < deadline) {
       const state = await window.lan.getState();
-      const lines = state.transcripts[peer.peerId] || [];
+      const lines = Object.values(state.transcripts).flat();
       const reply = lines.find((line) => line.kind === "agent" && !line.pending && line.text.includes("Echo"));
       if (reply) {
         const tools = document.querySelector("#tools")?.textContent || "";
@@ -203,6 +203,6 @@ function dialogueScript() {
       await sleep(200);
     }
     const state = await window.lan.getState();
-    return { ok: false, stage: "reply", lines: state.transcripts[peer.peerId] || [], logs: state.logs };
+    return { ok: false, stage: "reply", lines: Object.values(state.transcripts).flat(), logs: state.logs };
   })()`;
 }

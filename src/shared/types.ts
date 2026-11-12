@@ -30,6 +30,9 @@ export const IPC = {
   showPreview: "lan:show-preview",
   previewFile: "lan:preview-file",
   listWorkFiles: "lan:list-work-files",
+  createSession: "lan:create-session",
+  openSession: "lan:open-session",
+  renameSession: "lan:rename-session",
 } as const;
 
 export type ActivityPatch = {
@@ -86,6 +89,15 @@ export type PeerView = {
   token: string | null;
 };
 
+export type ChatSession = {
+  id: string;
+  peerId: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  pinned?: boolean;
+};
+
 export type ChatLine = {
   id: string;
   fromPeerId: string;
@@ -111,6 +123,9 @@ export type AppState = {
   localClis: CliReport;
   activity: Record<string, PeerActivity>;
   peers: PeerView[];
+  sessions: ChatSession[];
+  openSession: Record<string, string>;
+  unreadSessions: string[];
   transcripts: Record<string, ChatLine[]>;
   logs: string[];
 };
@@ -123,6 +138,8 @@ export type WireChat = {
   text: string;
   createdAt: number;
   dialogue?: { repliesLeft: number };
+  sessionId?: string;
+  sessionTitle?: string;
   attachment?: { name: string; kind: DiscussFile["kind"]; excerpt: string };
 };
 
@@ -132,6 +149,7 @@ export type WireDelta = {
   fromName: string;
   text: string;
   createdAt: number;
+  sessionId?: string;
 };
 
 export type HelloPayload = {
@@ -166,6 +184,9 @@ export type LanApi = {
   openPreview: () => Promise<FileRef | null>;
   showPreview: (file: FileRef) => Promise<boolean>;
   listWorkFiles: (dir: string) => Promise<{ found: boolean; files: WorkFile[] }>;
+  createSession: (peerId: string) => Promise<AppState>;
+  openSession: (peerId: string, sessionId: string) => Promise<AppState>;
+  renameSession: (peerId: string, sessionId: string, title: string) => Promise<AppState>;
   onState: (listener: (state: AppState) => void) => () => void;
   onPreviewFile: (listener: (file: FileRef) => void) => () => void;
 };

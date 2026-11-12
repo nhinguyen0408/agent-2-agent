@@ -190,6 +190,18 @@ if (!gotLock) {
         return core.rescanClis();
       });
       attachPreviewProtocol(() => core?.store.settings.workDir ?? "");
+      ipcMain.handle(IPC.createSession, (_event, peerId: string) => {
+        if (!core) throw new Error("App chưa sẵn sàng");
+        return core.createSession(String(peerId));
+      });
+      ipcMain.handle(IPC.openSession, (_event, peerId: string, sessionId: string) => {
+        if (!core) throw new Error("App chưa sẵn sàng");
+        return core.openSession(String(peerId), String(sessionId));
+      });
+      ipcMain.handle(IPC.renameSession, (_event, peerId: string, sessionId: string, title: string) => {
+        if (!core) throw new Error("App chưa sẵn sàng");
+        return core.renameSession(String(peerId), String(sessionId), String(title ?? ""));
+      });
       ipcMain.handle(IPC.listWorkFiles, async (_event, dir: string) => {
         if (typeof dir !== "string" || !dir.trim()) return { found: false, files: [] };
         const listed = await listWorkFiles(dir);

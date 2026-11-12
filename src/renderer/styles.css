@@ -211,6 +211,61 @@ label { display: flex; flex-direction: column; gap: 0.25rem; margin-top: 0.55rem
 
 .workdir-file.active, .workdir-file:hover { background: #222916; border-color: var(--line); }
 
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  max-height: 14rem;
+  overflow: auto;
+  margin-top: 0.45rem;
+}
+
+.history-row { display: flex; gap: 0.35rem; align-items: stretch; }
+
+.history-open {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.1rem;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  border-radius: 10px;
+  padding: 0.4rem 0.55rem;
+  background: transparent;
+  color: var(--text);
+  border: 1px solid var(--line);
+  font-weight: 500;
+}
+
+.history-open small {
+  color: var(--muted);
+  font-weight: 450;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.history-open.active, .history-open:hover { background: #222916; }
+
+.history-rename { padding: 0.25rem 0.55rem; font-size: 0.78rem; }
+
+.session-name {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.28rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.session-name input { width: 14rem; padding: 0.28rem 0.5rem; }
+
+.line.hit { outline: 1px solid var(--lime); border-radius: 12px; }
+
+.meta { display: flex; gap: 0.45rem; align-items: center; }
+
 .chat { min-height: 0; display: flex; flex-direction: column; }
 
 .chat-panel, .empty {

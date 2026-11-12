@@ -16,6 +16,9 @@ declare global {
       send: (peerId: string, text: string, attachmentPath?: string) => Promise<void>;
       pickDiscuss: () => Promise<string | null>;
       dialogue: (peerId: string, topic: string, replies: number) => Promise<void>;
+      createSession: (peerId: string) => Promise<AppState>;
+      openSession: (peerId: string, sessionId: string) => Promise<AppState>;
+      renameSession: (peerId: string, sessionId: string, title: string) => Promise<AppState>;
       stop: (peerId: string) => Promise<void>;
       pickCwd: () => Promise<string | null>;
       rescanClis: () => Promise<AppState>;
@@ -65,6 +68,12 @@ function boot(host: HTMLElement): void {
           <input id="manual-port" inputmode="numeric" value="3940" aria-label="Cổng" />
           <button type="submit">Nối</button>
         </form>
+        <details id="history-panel" open>
+          <summary>Phiên chat</summary>
+          <input id="history-query" placeholder="Tìm trong các phiên" autocomplete="off" />
+          <div id="history-list" class="history-list"></div>
+          <button id="new-session" type="button">Phiên mới</button>
+        </details>
         <details open>
           <summary>Cài đặt agent</summary>
           <label>Tên máy này<input id="set-name" maxlength="40" /></label>
@@ -104,6 +113,9 @@ function boot(host: HTMLElement): void {
           <header class="chat-head">
             <div>
               <h2 id="chat-title"></h2>
+              <label class="session-name">Tên phiên
+                <input id="session-title" maxlength="42" spellcheck="false" />
+              </label>
               <p id="chat-status"></p>
             </div>
             <button id="link" type="button">Kết nối</button>
@@ -157,6 +169,9 @@ function boot(host: HTMLElement): void {
   let selectedFile = "";
   let filesTimer = 0;
   let filesKey = "";
+
+  let historyQuery = "";
+  let focusLine = "";
 
   peersEl.addEventListener("click", (event) => {
     const row = (event.target as HTMLElement).closest<HTMLElement>("[data-peer]");
@@ -349,6 +364,7 @@ function boot(host: HTMLElement): void {
     fillSettings(next.settings);
     paintTools(next.localClis);
     paintPeers(next);
+    paintHistory(next);
     paintChat(next);
     must<HTMLPreElement>("#logs").textContent = next.logs.slice(-14).join("\n");
   }
@@ -380,9 +396,6 @@ function boot(host: HTMLElement): void {
     if (!peer || !active) return;
     must<HTMLElement>("#chat-title").textContent = peer.name;
     const where = peer.viaLocalhost ? "cùng máy" : `${peer.host}:${peer.port}`;
-    must<HTMLElement>("#chat-status").textContent = [providerLabel(peer.provider), where, peerCliNote(peer.clis), statusText(peer)]
-      .filter(Boolean)
-      .join(" · ");
     const typing = must<HTMLElement>("#typing");
     const activityText = activitySentence(peer.name, next.activity[peer.peerId]);
     typing.hidden = !activityText;
@@ -399,8 +412,21 @@ function boot(host: HTMLElement): void {
     const banner = must<HTMLElement>("#banner");
     banner.hidden = peer.status !== "pending-in";
     must<HTMLElement>("#banner-text").textContent = `${peer.name} muốn nối vào máy này.`;
-    const lines = next.transcripts[active] ?? [];
-    paintMessages(messagesEl, lines, next.self.peerId, nearBottom(messagesEl));
+    const sessionId = next.openSession[active] ?? "";
+    const session = next.sessions.find((item) => item.id === sessionId);
+    const lines = next.transcripts[sessionId] ?? [];
+    const nameInput = must<HTMLInputElement>("#session-title");
+    nameInput.disabled = !session;
+    if (document.activeElement !== nameInput) nameInput.value = session?.title ?? "";
+    must<HTMLElement>("#chat-status").textContent = [session?.title, providerLabel(peer.provider), where, peerCliNote(peer.clis), statusText(peer)]
+      .filter(Boolean)
+      .join(" · ");
+    paintMessages(messagesEl, lines, next.self.peerId, nearBottom(messagesEl), historyQuery);
+    if (focusLine) {
+      const hit = messagesEl.querySelector<HTMLElement>(`[data-id="${cssEscape(focusLine)}"]`);
+      focusLine = "";
+      hit?.scrollIntoView({ block: "center" });
+    }
     const canSend = connected || Boolean(peer.token);
     must<HTMLButtonElement>("#send").disabled = !canSend;
     must<HTMLButtonElement>("#send-file").disabled = !canSend;
@@ -507,6 +533,113 @@ function boot(host: HTMLElement): void {
     void guard(() => window.lan.showPreview(file));
   }
 
+  function paintHistory(next: AppState): void {
+    const box = must<HTMLElement>("#history-list");
+    const query = historyQuery.trim().toLowerCase();
+    const mine = active ? next.sessions.filter((session) => session.peerId === active) : next.sessions;
+    const openId = active ? next.openSession[active] : "";
+    const rows = mine
+      .map((session) => {
+        const lines = next.transcripts[session.id] ?? [];
+        const peer = next.peers.find((item) => item.peerId === session.peerId);
+        const blob = `${session.title}\n${peer?.name ?? ""}\n${lines.map((line) => line.text).join("\n")}`.toLowerCase();
+        const matched = query ? lines.find((line) => line.text.toLowerCase().includes(query)) : undefined;
+        const last = [...lines].reverse().find((line) => line.text.trim());
+        return { session, lines, peer, matched, last, shown: !query || blob.includes(query) };
+      })
+      .filter((row) => row.shown)
+      .sort((a, b) => b.session.updatedAt - a.session.updatedAt);
+    box.replaceChildren();
+    must<HTMLButtonElement>("#new-session").disabled = !active;
+    if (!active) {
+      box.textContent = "Chọn một máy để xem các phiên chat.";
+      return;
+    }
+    if (!rows.length) {
+      box.textContent = query ? "Không thấy phiên nào khớp." : "Chưa có phiên. Gửi tin hoặc bấm Phiên mới.";
+      return;
+    }
+    for (const row of rows) {
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = `history-open${row.session.id === openId ? " active" : ""}`;
+      open.dataset.session = row.session.id;
+      open.dataset.peer = row.session.peerId;
+      if (row.matched) open.dataset.line = row.matched.id;
+      const title = document.createElement("strong");
+      title.textContent = `${row.session.title}${next.unreadSessions.includes(row.session.id) ? " · mới" : ""}`;
+      const meta = document.createElement("small");
+      const when = new Date(row.session.updatedAt).toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" });
+      const preview = (row.matched?.text || row.last?.text || "").replace(/\s+/g, " ").trim().slice(0, 72);
+      meta.textContent = `${row.lines.length} dòng · ${when}${preview ? ` · ${preview}` : ""}`;
+      open.append(title, meta);
+      const edit = document.createElement("button");
+      edit.type = "button";
+      edit.className = "ghost history-rename";
+      edit.dataset.editSession = row.session.id;
+      edit.dataset.peer = row.session.peerId;
+      edit.textContent = "Sửa";
+      const item = document.createElement("div");
+      item.className = "history-row";
+      item.append(open, edit);
+      box.append(item);
+    }
+  }
+
+  must<HTMLInputElement>("#history-query").addEventListener("input", (event) => {
+    historyQuery = (event.target as HTMLInputElement).value;
+    if (!state) return;
+    paintHistory(state);
+    const sessionId = active ? state.openSession[active] : "";
+    if (sessionId) paintMessages(messagesEl, state.transcripts[sessionId] ?? [], state.self.peerId, false, historyQuery);
+  });
+  must<HTMLInputElement>("#session-title").addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    must<HTMLInputElement>("#session-title").blur();
+  });
+  must<HTMLInputElement>("#session-title").addEventListener("change", () => {
+    const peerId = active;
+    const sessionId = peerId ? state?.openSession[peerId] : "";
+    if (!peerId || !sessionId) return;
+    const title = must<HTMLInputElement>("#session-title").value;
+    void guard(() => window.lan.renameSession(peerId, sessionId, title));
+  });
+  must<HTMLElement>("#history-list").addEventListener("click", (event) => {
+    const edit = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-edit-session]");
+    if (edit?.dataset.editSession && edit.dataset.peer) {
+      const peerId = edit.dataset.peer;
+      const sessionId = edit.dataset.editSession;
+      active = peerId;
+      void guard(async () => {
+        const next = await window.lan.openSession(peerId, sessionId);
+        paint(next);
+        const input = must<HTMLInputElement>("#session-title");
+        input.focus();
+        input.select();
+      });
+      return;
+    }
+    const open = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-session]");
+    if (!open?.dataset.session || !open.dataset.peer) return;
+    const peerId = open.dataset.peer;
+    const sessionId = open.dataset.session;
+    active = peerId;
+    focusLine = open.dataset.line || "";
+    void guard(async () => {
+      const next = await window.lan.openSession(peerId, sessionId);
+      paint(next);
+    });
+  });
+  must<HTMLButtonElement>("#new-session").addEventListener("click", () => {
+    const peerId = active;
+    if (!peerId) return;
+    void guard(async () => {
+      const next = await window.lan.createSession(peerId);
+      paint(next);
+    });
+  });
+
   function flash(text: string): void {
     const toast = must<HTMLDivElement>("#toast");
     toast.hidden = false;
@@ -518,7 +651,7 @@ function boot(host: HTMLElement): void {
   }
 }
 
-function paintMessages(host: HTMLElement, lines: ChatLine[], selfId: string, stick: boolean): void {
+function paintMessages(host: HTMLElement, lines: ChatLine[], selfId: string, stick: boolean, query = ""): void {
   const ids = new Set(lines.map((line) => line.id));
   for (const child of Array.from(host.children)) {
     const id = child.getAttribute("data-id");
@@ -541,6 +674,7 @@ function paintMessages(host: HTMLElement, lines: ChatLine[], selfId: string, sti
       changed = true;
     }
     body?.classList.toggle("pending", line.pending);
+    article.classList.toggle("hit", Boolean(query.trim()) && line.text.toLowerCase().includes(query.trim().toLowerCase()));
     host.append(article);
   }
   if (changed && stick) host.scrollTop = host.scrollHeight;
@@ -662,6 +796,10 @@ function statusText(peer: PeerView): string {
   if (peer.status === "connecting") return "đang nối";
   if (peer.discovered) return "đang online";
   return "ngoại tuyến";
+}
+
+function cssEscape(value: string): string {
+  return typeof CSS !== "undefined" && CSS.escape ? CSS.escape(value) : value.replace(/"/g, "");
 }
 
 function shortId(id: string): string {

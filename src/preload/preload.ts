@@ -22,6 +22,10 @@ const api: LanApi = {
   openPreview: () => ipcRenderer.invoke(IPC.openPreview),
   showPreview: (file: FileRef) => ipcRenderer.invoke(IPC.showPreview, file) as Promise<boolean>,
   listWorkFiles: (dir) => ipcRenderer.invoke(IPC.listWorkFiles, dir),
+  createSession: (peerId) => ipcRenderer.invoke(IPC.createSession, peerId) as Promise<AppState>,
+  openSession: (peerId, sessionId) => ipcRenderer.invoke(IPC.openSession, peerId, sessionId) as Promise<AppState>,
+  renameSession: (peerId, sessionId, title) =>
+    ipcRenderer.invoke(IPC.renameSession, peerId, sessionId, title) as Promise<AppState>,
   onState: (listener) => {
     const wrapped = (_event: unknown, state: AppState) => listener(state);
     ipcRenderer.on(IPC.state, wrapped);
