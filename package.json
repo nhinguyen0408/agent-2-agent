@@ -1,0 +1,53 @@
+{
+  "name": "lan-agents",
+  "productName": "LAN Agents",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Hai agent local tren mang LAN, goi Claude Code hoac Cursor CLI da dang nhap.",
+  "main": "dist/main.js",
+  "author": "LAN Agents",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "node scripts/dev-one.mjs A",
+    "dev:b": "node scripts/dev-one.mjs B",
+    "dev:pair": "node scripts/dev-pair.mjs",
+    "start": "node scripts/build.mjs && electron .",
+    "typecheck": "tsc --noEmit",
+    "smoke": "node scripts/smoke.mjs",
+    "dist": "node scripts/build.mjs && electron-builder --win"
+  },
+  "dependencies": {
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.25.11",
+    "typescript": "^5.9.3",
+    "ws": "^8.18.3"
+  },
+  "build": {
+    "appId": "local.lanagents.app",
+    "productName": "LAN Agents",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "asar": false,
+    "npmRebuild": false,
+    "win": {
+      "target": "nsis",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}
