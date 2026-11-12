@@ -181,7 +181,13 @@ function dialogueScript() {
       const state = await window.lan.getState();
       return { ok: false, stage: "connect", peers: state.peers, logs: state.logs };
     }
-    await window.lan.send(peer.peerId, "ping tu may A");
+    const draft = document.querySelector("#draft");
+    const panel = document.querySelector("#chat-panel");
+    const readyAt = Date.now() + 5000;
+    while (Date.now() < readyAt && (panel?.hidden || !draft)) await sleep(100);
+    if (!draft) return { ok: false, stage: "draft" };
+    draft.value = "ping tu may A";
+    document.querySelector("#send")?.click();
     while (Date.now() < deadline) {
       const state = await window.lan.getState();
       const lines = state.transcripts[peer.peerId] || [];
@@ -191,6 +197,7 @@ function dialogueScript() {
         if (!tools.includes("Claude CLI") || !tools.includes("Cursor CLI")) {
           return { ok: false, stage: "clis", tools };
         }
+        if (draft.value !== "") return { ok: false, stage: "clear", draft: draft.value };
         return { ok: true, reply: reply.text, ui: document.querySelector("#self-name")?.textContent || "", tools };
       }
       await sleep(200);

@@ -15,6 +15,8 @@ const api: LanApi = {
   stop: (peerId: string) => ipcRenderer.invoke(IPC.stop, peerId) as Promise<void>,
   pickCwd: () => ipcRenderer.invoke(IPC.pickCwd) as Promise<string | null>,
   rescanClis: () => ipcRenderer.invoke(IPC.rescanClis) as Promise<AppState>,
+  activity: (peerId, patch) => ipcRenderer.invoke(IPC.activity, peerId, patch) as Promise<void>,
+  sendFile: (peerId) => ipcRenderer.invoke(IPC.sendFile, peerId) as Promise<string | null>,
   onState: (listener) => {
     const wrapped = (_event: unknown, state: AppState) => listener(state);
     ipcRenderer.on(IPC.state, wrapped);

@@ -1,4 +1,4 @@
-import type { AppState, CliReport, CliToolState, PeerView, Settings } from "../shared/types";
+import type { AppState, CliReport, CliToolState, PeerActivity, PeerView, Settings } from "../shared/types";
 import { providerLabel } from "../shared/types";
 
 declare global {
@@ -16,6 +16,8 @@ declare global {
       stop: (peerId: string) => Promise<void>;
       pickCwd: () => Promise<string | null>;
       rescanClis: () => Promise<AppState>;
+      activity: (peerId: string, patch: { typing?: boolean; replying?: boolean }) => Promise<void>;
+      sendFile: (peerId: string) => Promise<string | null>;
       onState: (listener: (state: AppState) => void) => () => void;
     };
   }
@@ -76,7 +78,7 @@ function boot(host: HTMLElement): void {
           </label>
           <label class="check"><input id="set-auto" type="checkbox" /> Tự chấp nhận máy trong LAN</label>
           <div id="tools" class="tools"></div>
-          <p class="hint">Không dùng API key. Máy này gọi Claude Code hoặc Cursor CLI bằng phiên đăng nhập sẵn. Trên mỗi máy chạy một lần: claude auth login hoặc agent login. Lệnh cursor của Cursor IDE không được tính là Cursor CLI.</p>
+          <p class="hint">Không dùng API key. Hai bên dùng chung một prompt hội thoại. File gửi qua nút Gửi file, hoặc nhờ agent gửi file trong thư mục làm việc: file đi qua app, không cần share Windows. Lệnh cursor của Cursor IDE không được tính là Cursor CLI.</p>
           <div class="save-row">
             <button id="save" type="button">Lưu cài đặt</button>
             <button id="rescan" type="button" class="ghost">Kiểm tra lại</button>
@@ -106,10 +108,12 @@ function boot(host: HTMLElement): void {
             </span>
           </div>
           <div id="messages" class="messages"></div>
+          <p id="typing" class="typing" hidden></p>
           <form id="composer" class="composer">
             <textarea id="draft" rows="3" placeholder="Nhắn cho agent máy kia…"></textarea>
             <div class="composer-actions">
               <button id="send" type="submit">Gửi</button>
+              <button id="send-file" type="button" class="ghost">Gửi file</button>
               <label class="replies">Lượt
                 <input id="replies" type="number" min="1" max="8" value="4" />
               </label>
@@ -176,6 +180,15 @@ function boot(host: HTMLElement): void {
     });
   });
 
+  must<HTMLButtonElement>("#send-file").addEventListener("click", () => {
+    if (!active) return;
+    const peerId = active;
+    void guard(async () => {
+      const picked = await window.lan.sendFile(peerId);
+      if (picked) flash(`Đã gửi file ${picked.split(/[/\\]/).pop()}`);
+    });
+  });
+
   must<HTMLFormElement>("#composer").addEventListener("submit", (event) => {
     event.preventDefault();
     void sendDraft();
@@ -186,14 +199,15 @@ function boot(host: HTMLElement): void {
       void sendDraft();
     }
   });
+  draft.addEventListener("input", () => noteTyping(true));
   must<HTMLButtonElement>("#dialogue").addEventListener("click", () => {
     if (!active) return;
+    const peerId = active;
     const topic = draft.value.trim() || "Xin chào. Hãy giới thiệu bạn đang chạy trên máy nào, trong một đoạn ngắn.";
     const replies = Number(must<HTMLInputElement>("#replies").value);
-    void guard(async () => {
-      await window.lan.dialogue(active as string, topic, replies);
-      draft.value = "";
-    });
+    draft.value = "";
+    noteTyping(false);
+    void guard(() => window.lan.dialogue(peerId, topic, replies));
   });
   must<HTMLButtonElement>("#stop").addEventListener("click", () => {
     if (!active) return;
@@ -247,7 +261,7 @@ function boot(host: HTMLElement): void {
       title.textContent = peer.name;
       const meta = document.createElement("span");
       const where = peer.viaLocalhost ? "cùng máy" : peer.host || "chưa có IP";
-      meta.textContent = [providerLabel(peer.provider), where, peerCliNote(peer.clis), statusText(peer)].filter(Boolean).join(" · ");
+      meta.textContent = [providerLabel(peer.provider), where, peerCliNote(peer.clis), activityNote(next.activity[peer.peerId]), statusText(peer)].filter(Boolean).join(" · ");
       button.append(title, meta);
       peersEl.append(button);
     }
@@ -265,6 +279,10 @@ function boot(host: HTMLElement): void {
     must<HTMLElement>("#chat-status").textContent = [providerLabel(peer.provider), where, peerCliNote(peer.clis), statusText(peer)]
       .filter(Boolean)
       .join(" · ");
+    const typing = must<HTMLElement>("#typing");
+    const activityText = activitySentence(peer.name, next.activity[peer.peerId]);
+    typing.hidden = !activityText;
+    typing.textContent = activityText;
     const link = must<HTMLButtonElement>("#link");
     const connected = peer.status === "connected";
     link.textContent = connected ? "Ngắt" : peer.status === "pending-out" ? "Đang chờ" : peer.status === "connecting" ? "Đang nối" : "Kết nối";
@@ -283,6 +301,7 @@ function boot(host: HTMLElement): void {
     if (stick) messagesEl.scrollTop = messagesEl.scrollHeight;
     const canSend = connected || Boolean(peer.token);
     must<HTMLButtonElement>("#send").disabled = !canSend;
+    must<HTMLButtonElement>("#send-file").disabled = !canSend;
     must<HTMLButtonElement>("#dialogue").disabled = !connected;
     must<HTMLButtonElement>("#stop").disabled = !lines.some((line) => line.pending);
     const snippet = peer.token
@@ -319,14 +338,34 @@ function boot(host: HTMLElement): void {
     };
   }
 
+  let typingOn = false;
+  let typingTimer = 0;
+
+  function noteTyping(activeNow: boolean): void {
+    const peerId = active;
+    if (!peerId) return;
+    window.clearTimeout(typingTimer);
+    if (!activeNow) {
+      if (!typingOn) return;
+      typingOn = false;
+      void window.lan.activity(peerId, { typing: false });
+      return;
+    }
+    if (!typingOn) {
+      typingOn = true;
+      void window.lan.activity(peerId, { typing: true });
+    }
+    typingTimer = window.setTimeout(() => noteTyping(false), 900);
+  }
+
   async function sendDraft(): Promise<void> {
     if (!active) return;
     const text = draft.value;
     if (!text.trim()) return;
-    await guard(async () => {
-      await window.lan.send(active as string, text);
-      draft.value = "";
-    });
+    const peerId = active;
+    draft.value = "";
+    noteTyping(false);
+    await guard(() => window.lan.send(peerId, text));
   }
 
   async function guard(action: () => Promise<unknown>): Promise<void> {
@@ -406,6 +445,18 @@ function installedNote(report: CliReport | undefined): string {
   if (report.claude.installed) names.push("Claude CLI");
   if (report.cursor.installed) names.push("Cursor CLI");
   return names.length ? `có ${names.join(", ")}` : "";
+}
+
+function activityNote(activity: PeerActivity | undefined): string {
+  if (activity?.replying) return "đang trả lời";
+  if (activity?.typing) return "đang nhập";
+  return "";
+}
+
+function activitySentence(name: string, activity: PeerActivity | undefined): string {
+  if (activity?.replying) return `${name} đang trả lời…`;
+  if (activity?.typing) return `${name} đang nhập…`;
+  return "";
 }
 
 function peerCliNote(clis: string | undefined): string {

@@ -17,7 +17,19 @@ export const IPC = {
   stop: "lan:stop",
   pickCwd: "lan:pick-cwd",
   rescanClis: "lan:rescan-clis",
+  activity: "lan:activity",
+  sendFile: "lan:send-file",
 } as const;
+
+export type ActivityPatch = {
+  typing?: boolean;
+  replying?: boolean;
+};
+
+export type PeerActivity = {
+  typing: boolean;
+  replying: boolean;
+};
 
 export type ProviderId = "echo" | "claude-cli" | "cursor-cli";
 
@@ -84,6 +96,7 @@ export type AppState = {
   };
   settings: Settings;
   localClis: CliReport;
+  activity: Record<string, PeerActivity>;
   peers: PeerView[];
   transcripts: Record<string, ChatLine[]>;
   logs: string[];
@@ -133,6 +146,8 @@ export type LanApi = {
   stop: (peerId: string) => Promise<void>;
   pickCwd: () => Promise<string | null>;
   rescanClis: () => Promise<AppState>;
+  activity: (peerId: string, patch: ActivityPatch) => Promise<void>;
+  sendFile: (peerId: string) => Promise<string | null>;
   onState: (listener: (state: AppState) => void) => () => void;
 };
 

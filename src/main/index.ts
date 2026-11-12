@@ -95,9 +95,22 @@ if (!gotLock) {
         core?.startDialogue(peerId, topic, replies),
       );
       ipcMain.handle(IPC.stop, (_event, peerId: string) => core?.stopTalk(peerId));
+      ipcMain.handle(IPC.activity, (_event, peerId: string, patch: { typing?: boolean; replying?: boolean }) => {
+        core?.notifyActivity(peerId, patch);
+      });
       ipcMain.handle(IPC.rescanClis, () => {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.rescanClis();
+      });
+      ipcMain.handle(IPC.sendFile, async (_event, peerId: string) => {
+        if (!core) throw new Error("App chưa sẵn sàng");
+        const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+        const result = await dialog.showOpenDialog(win, { properties: ["openFile"] });
+        if (result.canceled) return null;
+        const filePath = result.filePaths[0];
+        if (!filePath) return null;
+        await core.sendFile(peerId, filePath, true);
+        return filePath;
       });
       ipcMain.handle(IPC.pickCwd, async () => {
         const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];

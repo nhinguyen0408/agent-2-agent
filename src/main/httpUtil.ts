@@ -12,7 +12,7 @@ export function sendJson(res: http.ServerResponse, code: number, body: unknown):
   res.writeHead(code, {
     "content-type": "application/json; charset=utf-8",
     "access-control-allow-origin": "*",
-    "access-control-allow-headers": "content-type, authorization",
+    "access-control-allow-headers": "content-type, authorization, x-file-name",
     "access-control-allow-methods": "GET, POST, OPTIONS",
     "content-length": Buffer.byteLength(payload),
   });
@@ -23,6 +23,24 @@ export function bearer(req: http.IncomingMessage): string {
   const header = req.headers.authorization ?? "";
   const match = /^Bearer\s+(.+)$/i.exec(header);
   return (match?.[1] ?? "").trim();
+}
+
+export function readBody(req: http.IncomingMessage, maxBytes: number): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    req.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        reject(new Error("Nội dung quá lớn"));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
 }
 
 export function readJson(req: http.IncomingMessage): Promise<Record<string, unknown>> {

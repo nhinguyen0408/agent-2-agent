@@ -1,14 +1,18 @@
+import fs from "node:fs";
 import http from "node:http";
+import path from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
 import { Server, type Socket } from "socket.io";
 import { io as ioClient, type Socket as ClientSocket } from "socket.io-client";
 import type {
+  ActivityPatch,
   AppState,
   ChatLine,
   CliReport,
   HelloAck,
   HelloPayload,
   LinkStatus,
+  PeerActivity,
   PeerView,
   Settings,
   WireChat,
@@ -18,7 +22,8 @@ import { DEFAULT_PORT, PORT_SPAN } from "../shared/types";
 import { AgentHost, type ModelTurn } from "./agents";
 import { detectLocalClis, installedCliList, parseCliList } from "./cliDetect";
 import { Discovery, lanIPv4, normalizeIp } from "./discovery";
-import { bearer, listen, readJson, remoteIp, sendJson } from "./httpUtil";
+import { fileNameFromHeader, formatBytes, MAX_FILE_BYTES, readFileLimited, resolveInside, safeFileName, saveReceivedFile } from "./files";
+import { bearer, listen, readBody, readJson, remoteIp, sendJson } from "./httpUtil";
 import { Store, sanitizeSettings } from "./store";
 
 const MAX_LINES = 200;
@@ -69,6 +74,8 @@ export class AppCore {
   };
   private cliSignature = "";
   private readonly remoteClis = new Map<string, string>();
+  private readonly activity = new Map<string, PeerActivity>();
+  private readonly activityTimers = new Map<string, NodeJS.Timeout>();
   private sweepTimer: NodeJS.Timeout | null = null;
   private scanTimer: NodeJS.Timeout | null = null;
   private cliTimer: NodeJS.Timeout | null = null;
@@ -142,6 +149,8 @@ export class AppCore {
     if (this.sweepTimer) clearInterval(this.sweepTimer);
     if (this.scanTimer) clearInterval(this.scanTimer);
     if (this.cliTimer) clearInterval(this.cliTimer);
+    for (const timer of this.activityTimers.values()) clearTimeout(timer);
+    this.activityTimers.clear();
     for (const timer of this.deltaTimers.values()) clearTimeout(timer);
     this.deltaTimers.clear();
     this.discovery?.stop();
@@ -205,6 +214,7 @@ export class AppCore {
       },
       settings: this.store.settings,
       localClis: this.localClis,
+      activity: Object.fromEntries(this.activity),
       peers,
       transcripts: this.store.transcripts,
       logs: [...this.logs],
@@ -428,6 +438,10 @@ export class AppCore {
         if (!bound || !body?.text) return;
         this.system(bound, body.text.slice(0, 500));
       });
+      socket.on("activity", (body: ActivityPatch) => {
+        if (!bound) return;
+        this.noteActivity(bound, body);
+      });
       socket.on("disconnect", () => {
         if (!bound) return;
         this.onSocketDown(bound, socket);
@@ -523,6 +537,7 @@ export class AppCore {
     socket.on("aside", (body: { text?: string }) => {
       if (body?.text) this.system(peerId, body.text.slice(0, 500));
     });
+    socket.on("activity", (body: ActivityPatch) => this.noteActivity(peerId, body));
     socket.on("disconnect", () => this.onSocketDown(peerId, socket));
     socket.on("connect_error", (err: Error) => {
       this.log(`Lỗi nối ${endpoint.name}: ${err.message}`);
@@ -564,7 +579,7 @@ export class AppCore {
       if (req.method === "OPTIONS") {
         res.writeHead(204, {
           "access-control-allow-origin": "*",
-          "access-control-allow-headers": "content-type, authorization",
+          "access-control-allow-headers": "content-type, authorization, x-file-name",
           "access-control-allow-methods": "GET, POST, OPTIONS",
         });
         res.end();
@@ -606,6 +621,15 @@ export class AppCore {
       }
       if (req.method === "POST" && url.pathname === "/trigger") {
         await this.onTrigger(req, res);
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/inbox-file") {
+        await this.onInboxFile(req, res);
+        return;
+      }
+      const relay = /^\/relay-file\/([^/]+)$/.exec(decodeURIComponent(url.pathname));
+      if (req.method === "POST" && relay) {
+        await this.onRelayFile(req, res, relay[1]);
         return;
       }
       sendJson(res, 404, { ok: false, error: "Không có route này" });
@@ -653,6 +677,82 @@ export class AppCore {
       this.pushNow();
     }
     sendJson(res, 200, { ok: true });
+  }
+
+  async sendFile(peerId: string, filePath: string, allowOutside = false): Promise<void> {
+    const resolved = allowOutside ? path.resolve(filePath) : resolveInside(this.store.settings.workDir, filePath);
+    if (!fs.existsSync(resolved)) throw new Error("Không thấy file.");
+    const data = await readFileLimited(resolved, MAX_FILE_BYTES);
+    const name = safeFileName(path.basename(resolved));
+    await this.postFile(peerId, name, data);
+    this.system(peerId, `Đã gửi file ${name} (${formatBytes(data.length)}) sang máy kia.`);
+  }
+
+  private async onRelayFile(req: http.IncomingMessage, res: http.ServerResponse, peerId: string): Promise<void> {
+    if (remoteIp(req) !== "127.0.0.1") {
+      sendJson(res, 403, { ok: false, error: "Chỉ máy này mới gửi file đi được." });
+      return;
+    }
+    const raw = await readBody(req, 32_000);
+    const type = String(req.headers["content-type"] || "");
+    let requested = raw.toString("utf8").replace(/^\uFEFF/, "").trim();
+    if (type.includes("application/json")) {
+      try {
+        const parsed = JSON.parse(requested) as { path?: unknown };
+        requested = String(parsed.path ?? "").trim();
+      } catch {
+        sendJson(res, 400, { ok: false, error: "JSON không hợp lệ" });
+        return;
+      }
+    }
+    if (!requested) {
+      sendJson(res, 400, { ok: false, error: "Thiếu đường dẫn file" });
+      return;
+    }
+    await this.sendFile(peerId, requested, false);
+    sendJson(res, 200, { ok: true, name: path.basename(requested) });
+  }
+
+  private async onInboxFile(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const peerId = this.peerIdForToken(bearer(req));
+    if (!peerId) {
+      sendJson(res, 401, { ok: false, error: "Sai token ghép nối" });
+      return;
+    }
+    const data = await readBody(req, MAX_FILE_BYTES);
+    if (!data.length) {
+      sendJson(res, 400, { ok: false, error: "File rỗng" });
+      return;
+    }
+    const name = fileNameFromHeader(req.headers["x-file-name"]);
+    const saved = await saveReceivedFile(this.store.settings.workDir, name, data);
+    const from = this.endpoints.get(peerId)?.name || this.store.trusted[peerId]?.name || "Máy kia";
+    this.system(peerId, `${from} đã gửi file ${path.basename(saved)} (${formatBytes(data.length)}). Lưu tại ${saved}`);
+    sendJson(res, 200, { ok: true, name: path.basename(saved), bytes: data.length });
+  }
+
+  private async postFile(peerId: string, name: string, data: Buffer): Promise<void> {
+    const endpoint = this.endpoints.get(peerId) ?? this.endpointFromTrusted(peerId);
+    const token = this.store.trusted[peerId]?.token;
+    if (!endpoint?.host || !endpoint.port || !token) throw new Error("Hãy nối máy kia trước khi gửi file.");
+    let res: Response;
+    try {
+      res = await fetch(`http://${endpoint.host}:${endpoint.port}/inbox-file`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/octet-stream",
+          "x-file-name": encodeURIComponent(name),
+        },
+        body: new Uint8Array(data),
+        signal: AbortSignal.timeout(120_000),
+      });
+    } catch (err) {
+      throw new Error(err instanceof Error ? err.message : "Không gửi được file qua LAN.");
+    }
+    const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+    if (res.status === 404) throw new Error("Máy kia cần cài bản LAN Agents mới thì mới nhận được file.");
+    if (!res.ok || !body.ok) throw new Error(body.error || `Máy kia không nhận file (HTTP ${res.status}).`);
   }
 
   private async onTrigger(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -742,6 +842,7 @@ export class AppCore {
         createdAt,
       });
       this.pushNow();
+      this.notifyActivity(peerId, { replying: true });
       try {
         const text = await this.agents.reply({
           peerId,
@@ -749,6 +850,7 @@ export class AppCore {
           peerName: this.endpoints.get(peerId)?.name || this.store.trusted[peerId]?.name || "máy kia",
           history: this.modelHistory(peerId),
           signal: controller.signal,
+          fileRelay: { url: `http://127.0.0.1:${this.port}/relay-file/${peerId}` },
           onDelta: (chunk) => {
             if ((this.epochs.get(peerId) ?? 0) !== epoch) return;
             const line = this.findLine(peerId, id);
@@ -804,6 +906,7 @@ export class AppCore {
         this.scheduleSave();
         resolveOut("");
       } finally {
+        this.notifyActivity(peerId, { replying: false });
         if (this.aborts.get(peerId) === controller) this.aborts.delete(peerId);
       }
     };
@@ -1023,6 +1126,10 @@ export class AppCore {
     if (!this.isLinked(peerId)) {
       const reconnecting = Boolean(this.outbound.get(peerId)?.active);
       this.status.set(peerId, reconnecting ? "connecting" : "none");
+      this.activity.delete(peerId);
+      const timer = this.activityTimers.get(peerId);
+      if (timer) clearTimeout(timer);
+      this.activityTimers.delete(peerId);
     }
     this.push();
   }
@@ -1043,6 +1150,36 @@ export class AppCore {
       line.text = `${line.text}\n(đã dừng)`;
     }
     this.system(peerId, "Đã dừng.");
+  }
+
+  notifyActivity(peerId: string, patch: ActivityPatch): void {
+    if (!peerId || !this.isLinked(peerId)) return;
+    this.sendTo(peerId, "activity", patch);
+  }
+
+  private noteActivity(peerId: string, patch: ActivityPatch | undefined): void {
+    const current = this.activity.get(peerId) ?? { typing: false, replying: false };
+    const next: PeerActivity = {
+      typing: typeof patch?.typing === "boolean" ? patch.typing : current.typing,
+      replying: typeof patch?.replying === "boolean" ? patch.replying : current.replying,
+    };
+    const timer = this.activityTimers.get(peerId);
+    if (timer) clearTimeout(timer);
+    this.activityTimers.delete(peerId);
+    if (!next.typing && !next.replying) this.activity.delete(peerId);
+    else this.activity.set(peerId, next);
+    if (next.typing) {
+      const expire = setTimeout(() => {
+        const live = this.activity.get(peerId);
+        if (!live) return;
+        live.typing = false;
+        if (!live.replying) this.activity.delete(peerId);
+        this.activityTimers.delete(peerId);
+        this.push();
+      }, 2500);
+      this.activityTimers.set(peerId, expire);
+    }
+    this.push();
   }
 
   private sendTo(peerId: string, event: string, payload: unknown): boolean {

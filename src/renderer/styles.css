@@ -225,6 +225,13 @@ label { display: flex; flex-direction: column; gap: 0.25rem; margin-top: 0.55rem
   color: var(--warn);
 }
 
+.typing {
+  margin: 0;
+  padding: 0 1rem 0.35rem;
+  color: var(--lime);
+  font-size: 0.82rem;
+}
+
 .messages {
   overflow: auto;
   padding: 1rem;

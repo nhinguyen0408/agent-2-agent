@@ -14,6 +14,7 @@ export type ReplyInput = {
   history: ModelTurn[];
   signal: AbortSignal;
   onDelta: (chunk: string) => void;
+  fileRelay?: { url: string };
 };
 
 export class AgentHost {
@@ -48,21 +49,23 @@ export class AgentHost {
       cwd: settings.workDir,
       missing: "Không tìm thấy lệnh claude. Cài Claude Code, rồi chạy `claude auth login` một lần trên máy này.",
       attempts: [
-        ["-p", prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-mode", "dontAsk"],
+        ["-p", prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-mode", "bypassPermissions"],
+        ["-p", prompt, "--output-format", "text", "--permission-mode", "bypassPermissions"],
         ["-p", prompt, "--output-format", "text", "--permission-mode", "dontAsk"],
       ],
     });
   }
 
   private cursorCli(input: ReplyInput, settings: Settings): Promise<string> {
-    const prompt = oneLine(conversationPrompt(input));
+    const prompt = clip(conversationPrompt(input), 12000);
     return this.runCli(input, {
       command: settings.cursorCommand || "agent",
       cwd: settings.workDir,
       missing: "Không tìm thấy lệnh agent. Cài Cursor CLI, rồi chạy `agent login` một lần trên máy này.",
       attempts: [
-        ["-p", "--output-format", "stream-json", "--stream-partial-output", prompt],
-        ["-p", prompt],
+        ["-p", "--trust", "--force", "--output-format", "stream-json", "--stream-partial-output", prompt],
+        ["-p", "--trust", "--force", prompt],
+        ["-p", "--trust", prompt],
       ],
     });
   }
@@ -155,28 +158,56 @@ export class AgentHost {
 }
 
 function oneLine(value: string): string {
-  const flat = value.replace(/\s+/g, " ").trim();
-  if (flat.length <= 4000) return flat;
-  return `${flat.slice(0, 1800)} ... ${flat.slice(-1800)}`;
+  return clip(value.replace(/\s+/g, " ").trim(), 4000);
+}
+
+function clip(value: string, max: number): string {
+  if (value.length <= max) return value;
+  const head = Math.floor(max * 0.45);
+  return `${value.slice(0, head)}\n...\n${value.slice(-(max - head - 5))}`;
 }
 
 function conversationPrompt(input: ReplyInput): string {
-  const lines = input.history.map((turn) => `${turn.role === "user" ? input.peerName : input.selfName}: ${turn.text}`);
+  const transcript = input.history
+    .map((turn) => `${turn.role === "user" ? input.peerName : input.selfName}: ${turn.text}`)
+    .join("\n");
   return [
-    `Bạn là ${input.selfName}, đang nói chuyện với ${input.peerName} qua mạng LAN.`,
-    "Trả lời cùng ngôn ngữ với tin nhắn cuối. Chỉ trả lời bằng văn bản.",
-    "Không sửa file và không chạy lệnh trừ khi tin nhắn cuối yêu cầu rõ một việc trên máy này.",
+    `Bạn là ${input.selfName}. Bạn đang nói chuyện trực tiếp với ${input.peerName} qua LAN Agents.`,
+    "Hãy trả lời tin nhắn cuối như một người trong cuộc hội thoại này.",
+    "Quy tắc:",
+    "- Chỉ viết nội dung sẽ gửi cho đối phương. Không mở đầu bằng việc nhắc lại các quy tắc này.",
+    "- Dùng cùng ngôn ngữ với tin nhắn cuối. Giữ câu trả lời gọn, thường dưới 120 từ.",
+    "- Bám các lượt trước. Không bịa việc máy kia đã làm.",
+    `- Nếu ${input.peerName} nhờ một việc trên máy này, làm trong thư mục làm việc rồi nói kết quả. Lệnh và sửa file được tự chạy, không hỏi lại.`,
+    "- Nếu đối phương chỉ trò chuyện, chỉ trả lời bằng lời. Không chạy lệnh và không sửa file. Riêng khi họ nhờ gửi file thì dùng đúng lệnh gửi file bên dưới.",
+    input.fileRelay
+      ? `- Để gửi file cho ${input.peerName}, không copy sang ổ đĩa máy kia và không dùng đường UNC. File phải nằm trong thư mục làm việc. Chạy: curl.exe -s -H "Content-Type: text/plain; charset=utf-8" --data-binary "ĐƯỜNG_DẪN_ĐẦY_ĐỦ" ${input.fileRelay.url} . Khi kết quả có ok, file đã tới thư mục làm việc của ${input.peerName}.`
+      : "",
     "",
     "Hội thoại:",
-    lines.join("\n\n"),
+    transcript,
+    "",
+    `Hãy trả lời ${input.peerName}.`,
   ].join("\n");
 }
 
 function launch(command: string, args: string[], cwd: string): ChildProcess {
   const env = cliEnv();
+  const runtime = cursorRuntime(command);
+  if (runtime) {
+    env.CURSOR_INVOKED_AS = "agent";
+    return spawn(runtime.node, [runtime.index, ...args], {
+      cwd,
+      env,
+      windowsHide: true,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  }
+  const safeArgs = args.map((arg) => arg.replace(/\s+/g, " ").trim());
   if (process.platform === "win32" && /\.(cmd|bat)$/i.test(command)) {
     const comspec = process.env.ComSpec || "cmd.exe";
-    const line = [command, ...args].map(quoteCmd).join(" ");
+    const line = [command, ...safeArgs].map(quoteCmd).join(" ");
     return spawn(comspec, ["/d", "/s", "/c", line], {
       cwd,
       env,
@@ -184,13 +215,53 @@ function launch(command: string, args: string[], cwd: string): ChildProcess {
       stdio: ["ignore", "pipe", "pipe"],
     });
   }
-  return spawn(command, args, {
+  return spawn(command, safeArgs, {
     cwd,
     env,
     windowsHide: true,
     shell: false,
     stdio: ["ignore", "pipe", "pipe"],
   });
+}
+
+function cursorRuntime(command: string): { node: string; index: string } | null {
+  const base = path.basename(command).toLowerCase();
+  const shim = base === "agent" || base === "agent.cmd" || base === "agent.ps1" || base === "cursor-agent" || base === "cursor-agent.cmd" || base === "cursor-agent.ps1";
+  if (!shim && !command.toLowerCase().includes(`${path.sep}cursor-agent${path.sep}`)) return null;
+  const beside = path.dirname(path.resolve(command));
+  const roots = [
+    beside,
+    path.join(process.env.LOCALAPPDATA || "", "cursor-agent"),
+  ];
+  for (const root of roots) {
+    const directNode = path.join(root, "node.exe");
+    const directIndex = path.join(root, "index.js");
+    if (fs.existsSync(directNode) && fs.existsSync(directIndex)) return { node: directNode, index: directIndex };
+    const versions = path.join(root, "versions");
+    let entries: string[] = [];
+    try {
+      entries = fs.readdirSync(versions);
+    } catch {
+      continue;
+    }
+    const ranked = entries
+      .filter((name) => /^\d{4}\.\d{1,2}\.\d{1,2}(?:-\d{2}-\d{2}-\d{2})?-[a-f0-9]+$/.test(name))
+      .map((name) => ({ name, rank: versionRank(name) }))
+      .sort((a, b) => b.rank - a.rank);
+    for (const item of ranked) {
+      const node = path.join(versions, item.name, "node.exe");
+      const index = path.join(versions, item.name, "index.js");
+      if (fs.existsSync(node) && fs.existsSync(index)) return { node, index };
+    }
+  }
+  return null;
+}
+
+function versionRank(name: string): number {
+  const match = /^(\d{4})\.(\d{1,2})\.(\d{1,2})(?:-(\d{2})-(\d{2})-(\d{2}))?/.exec(name);
+  if (!match) return 0;
+  const [, year, month, day, hour = "0", minute = "0", second = "0"] = match;
+  return Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), Number(second));
 }
 
 function cliEnv(): NodeJS.ProcessEnv {
