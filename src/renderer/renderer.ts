@@ -43,39 +43,50 @@ if (!window.lan) {
 
 function boot(host: HTMLElement): void {
   host.innerHTML = `
-    <header class="top">
-      <div class="brand">
-        <span class="mark" aria-hidden="true"></span>
-        <div>
-          <p class="kicker">Mạng nội bộ</p>
-          <h1>LAN Agents</h1>
+    ${iconSprite()}
+    <div class="shell">
+      <nav class="rail" id="rail">
+        ${iconButton("nav-toggle", "sidebar", "Thu gọn thanh bên")}
+        ${iconButton("", "people", "Máy trong LAN", "peers")}
+        ${iconButton("", "bubble", "Phiên chat", "sessions", `<span id="nav-unread" class="badge" hidden></span>`)}
+        ${iconButton("", "folder", "Thư mục làm việc", "files")}
+        <span class="spacer"></span>
+        ${iconButton("", "gear", "Cài đặt", "settings")}
+        ${iconButton("", "list", "Nhật ký", "logs")}
+      </nav>
+      <aside class="panel" id="panel">
+        <div class="panel-head">
+          <strong id="self-name"></strong>
+          <span id="self-meta"></span>
         </div>
-      </div>
-      <div class="self">
-        <strong id="self-name"></strong>
-        <span id="self-meta"></span>
-      </div>
-    </header>
-    <main>
-      <aside>
-        <section>
-          <div class="section-label">Máy trong LAN</div>
+        <h2 id="pane-title" class="pane-title">Máy trong LAN</h2>
+        <div class="panel-body" data-pane="peers">
           <div id="peers" class="peers"></div>
-          <p id="peers-empty" class="hint">Đang dò multicast và các cổng local 3940–3969.</p>
-        </section>
-        <form id="manual" class="manual">
-          <input id="manual-host" placeholder="IP hoặc tên máy" autocomplete="off" />
-          <input id="manual-port" inputmode="numeric" value="3940" aria-label="Cổng" />
-          <button type="submit">Nối</button>
-        </form>
-        <details id="history-panel" open>
-          <summary>Phiên chat</summary>
-          <input id="history-query" placeholder="Tìm trong các phiên" autocomplete="off" />
+          <p id="peers-empty" class="hint">Đang dò máy trong LAN và các cổng 3940–3969.</p>
+          <form id="manual" class="manual">
+            <input id="manual-host" placeholder="IP hoặc tên máy" autocomplete="off" data-tip="Địa chỉ máy kia" aria-label="Địa chỉ máy kia" />
+            <input id="manual-port" inputmode="numeric" value="3940" data-tip="Cổng" aria-label="Cổng" />
+            ${iconButton("", "link", "Nối tới địa chỉ này", "", "", "submit")}
+          </form>
+        </div>
+        <div class="panel-body" data-pane="sessions" hidden>
+          <div class="search">
+            ${icon("search")}
+            <input id="history-query" placeholder="Tìm trong các phiên" autocomplete="off" aria-label="Tìm trong các phiên" />
+          </div>
           <div id="history-list" class="history-list"></div>
-          <button id="new-session" type="button">Phiên mới</button>
-        </details>
-        <details open>
-          <summary>Cài đặt agent</summary>
+          <div class="pane-tools">${iconButton("new-session", "plus", "Phiên mới với máy đang chọn")}</div>
+        </div>
+        <div class="panel-body" data-pane="files" hidden>
+          <label class="cwd">Thư mục làm việc
+            <span>
+              <input id="set-cwd" spellcheck="false" data-tip="Thư mục agent đọc và ghi file" aria-label="Thư mục làm việc" />
+              ${iconButton("pick-cwd", "folder", "Chọn thư mục")}
+            </span>
+          </label>
+          <div id="workdir-files" class="workdir-files"></div>
+        </div>
+        <div class="panel-body" data-pane="settings" hidden>
           <label>Tên máy này<input id="set-name" maxlength="40" /></label>
           <label>Runtime
             <select id="set-provider">
@@ -86,45 +97,38 @@ function boot(host: HTMLElement): void {
           </label>
           <label>Lệnh Claude<input id="set-claude-command" spellcheck="false" /></label>
           <label>Lệnh Cursor<input id="set-cursor-command" spellcheck="false" /></label>
-          <label class="cwd">Thư mục làm việc
-            <span>
-              <input id="set-cwd" spellcheck="false" />
-              <button id="pick-cwd" type="button">Chọn</button>
-            </span>
-          </label>
-          <div id="workdir-files" class="workdir-files"></div>
           <label class="check"><input id="set-auto" type="checkbox" /> Tự chấp nhận máy trong LAN</label>
           <div id="tools" class="tools"></div>
-          <p class="hint">Không dùng API key. Hai bên dùng chung một prompt hội thoại. File gửi qua nút Gửi file, hoặc nhờ agent gửi file trong thư mục làm việc: file đi qua app, không cần share Windows. Lệnh cursor của Cursor IDE không được tính là Cursor CLI.</p>
+          <p class="hint">Không dùng API key. File đi qua app, không cần share Windows. Lệnh cursor của Cursor IDE không được tính là Cursor CLI.</p>
           <div class="save-row">
-            <button id="save" type="button">Lưu cài đặt</button>
-            <button id="rescan" type="button" class="ghost">Kiểm tra lại</button>
+            ${iconButton("save", "check", "Lưu cài đặt", "", "", "button", "icon-btn primary")}
+            ${iconButton("rescan", "refresh", "Kiểm tra lại CLI")}
             <span id="saved"></span>
           </div>
-        </details>
-        <pre id="logs" class="logs" aria-live="polite"></pre>
+        </div>
+        <div class="panel-body" data-pane="logs" hidden>
+          <pre id="logs" class="logs" aria-live="polite"></pre>
+        </div>
       </aside>
       <section class="chat">
         <div id="chat-empty" class="empty">
           <h2>Chưa chọn máy</h2>
-          <p>Mở app trên máy thứ hai trong cùng LAN, hoặc chạy thêm một cửa sổ với profile B. Hai bên sẽ hiện trong danh sách.</p>
+          <p>Mở app trên máy thứ hai trong cùng LAN. Máy đó hiện ở mục Máy trong LAN.</p>
         </div>
         <div id="chat-panel" class="chat-panel" hidden>
           <header class="chat-head">
-            <div>
+            <div class="chat-id">
               <h2 id="chat-title"></h2>
-              <label class="session-name">Tên phiên
-                <input id="session-title" maxlength="42" spellcheck="false" />
-              </label>
+              <input id="session-title" maxlength="42" spellcheck="false" placeholder="Tên phiên" data-tip="Tên phiên. Enter để lưu." aria-label="Tên phiên" />
               <p id="chat-status"></p>
             </div>
-            <button id="link" type="button">Kết nối</button>
+            ${iconButton("link", "link", "Kết nối")}
           </header>
           <div id="banner" class="banner" hidden>
             <span id="banner-text"></span>
             <span>
-              <button id="accept" type="button">Chấp nhận</button>
-              <button id="reject" type="button" class="ghost">Từ chối</button>
+              ${iconButton("accept", "check", "Chấp nhận", "", "", "button", "icon-btn ok")}
+              ${iconButton("reject", "x", "Từ chối")}
             </span>
           </div>
           <div id="messages" class="messages"></div>
@@ -132,31 +136,81 @@ function boot(host: HTMLElement): void {
           <form id="composer" class="composer">
             <textarea id="draft" rows="3" placeholder="Nhắn cho agent máy kia…"></textarea>
             <div id="attach-chip" class="attach-chip" hidden>
+              ${icon("paperclip")}
               <span id="attach-name"></span>
-              <button id="attach-clear" type="button" class="ghost">Bỏ</button>
+              ${iconButton("attach-clear", "x", "Bỏ file đính kèm")}
             </div>
             <div class="composer-actions">
-              <button id="send" type="submit">Gửi</button>
-              <button id="attach" type="button" class="ghost">Đính kèm</button>
-              <button id="send-file" type="button" class="ghost">Gửi file</button>
-              <button id="open-preview" type="button" class="ghost">Xem file</button>
-              <label class="replies">Lượt
-                <input id="replies" type="number" min="1" max="8" value="4" />
+              ${iconButton("attach", "paperclip", "Đính kèm txt, Markdown, ảnh hoặc PDF")}
+              ${iconButton("send-file", "file", "Gửi file sang máy kia")}
+              ${iconButton("open-preview", "eye", "Mở cửa sổ xem file")}
+              ${iconButton("dialogue", "dialogue", "Cho hai agent nói với nhau")}
+              <label class="replies" data-tip="Số lượt hai agent trao đổi">
+                ${icon("hash")}
+                <input id="replies" type="number" min="1" max="8" value="4" aria-label="Số lượt" />
               </label>
-              <button id="dialogue" type="button" class="ghost">Cho hai agent nói</button>
-              <button id="stop" type="button" class="ghost">Dừng</button>
+              <span class="spacer"></span>
+              ${iconButton("stop", "stop", "Dừng agent đang trả lời")}
+              ${iconButton("send", "send", "Gửi", "", "", "submit", "icon-btn primary")}
             </div>
           </form>
           <details class="http">
-            <summary>Lệnh HTTP tới agent máy kia</summary>
+            <summary>${icon("terminal")} Lệnh HTTP</summary>
             <pre id="http-snippet"></pre>
-            <button id="copy-http" type="button" class="ghost">Chép lệnh</button>
+            ${iconButton("copy-http", "copy", "Chép lệnh")}
           </details>
         </div>
       </section>
-    </main>
+    </div>
+    <div id="tip" class="tip" hidden></div>
     <div id="toast" class="toast" hidden></div>
   `;
+
+  const navIds = ["peers", "sessions", "files", "settings", "logs"] as const;
+  type NavId = (typeof navIds)[number];
+  const navTitles: Record<NavId, string> = {
+    peers: "Máy trong LAN",
+    sessions: "Phiên chat",
+    files: "Thư mục làm việc",
+    settings: "Cài đặt",
+    logs: "Nhật ký",
+  };
+  let nav: NavId = navIds.includes(localStorage.getItem("lan-nav") as NavId) ? (localStorage.getItem("lan-nav") as NavId) : "peers";
+  let navOpen = localStorage.getItem("lan-nav-open") !== "0";
+
+  function applyNav(): void {
+    document.body.dataset.collapsed = navOpen ? "0" : "1";
+    for (const pane of Array.from(document.querySelectorAll<HTMLElement>("[data-pane]"))) {
+      pane.hidden = pane.dataset.pane !== nav;
+    }
+    for (const button of Array.from(document.querySelectorAll<HTMLButtonElement>("[data-nav]"))) {
+      button.classList.toggle("active", button.dataset.nav === nav);
+    }
+    must<HTMLElement>("#pane-title").textContent = navTitles[nav];
+    setIcon(must("#nav-toggle"), "sidebar", navOpen ? "Thu gọn thanh bên" : "Mở thanh bên");
+    localStorage.setItem("lan-nav", nav);
+    localStorage.setItem("lan-nav-open", navOpen ? "1" : "0");
+  }
+
+  must<HTMLElement>("#rail").addEventListener("click", (event) => {
+    const toggle = (event.target as HTMLElement).closest<HTMLButtonElement>("#nav-toggle");
+    if (toggle) {
+      navOpen = !navOpen;
+      applyNav();
+      return;
+    }
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-nav]");
+    const next = button?.dataset.nav;
+    if (!next || !navIds.includes(next as NavId)) return;
+    if (nav === next && navOpen) navOpen = false;
+    else {
+      nav = next as NavId;
+      navOpen = true;
+    }
+    applyNav();
+  });
+  applyNav();
+  bindTips(host);
 
   const peersEl = must<HTMLDivElement>("#peers");
   const messagesEl = must<HTMLDivElement>("#messages");
@@ -258,6 +312,8 @@ function boot(host: HTMLElement): void {
       button.dataset.file = file.path;
       button.dataset.name = file.name;
       button.dataset.preview = file.preview ?? "";
+      button.dataset.tip = file.preview ? `Xem ${file.name}` : `${file.name} — chưa xem trước được`;
+      button.setAttribute("aria-label", file.name);
       const name = document.createElement("span");
       name.textContent = file.name;
       const meta = document.createElement("small");
@@ -358,9 +414,11 @@ function boot(host: HTMLElement): void {
     }
     must<HTMLElement>("#self-name").textContent = next.self.name;
     const localNote = installedNote(next.localClis);
-    must<HTMLElement>("#self-meta").textContent = [providerLabel(next.self.provider), `${next.self.host}:${next.self.port}`, shortId(next.self.peerId), localNote]
-      .filter(Boolean)
-      .join(" · ");
+    const meta = must<HTMLElement>("#self-meta");
+    const fullMeta = [providerLabel(next.self.provider), `${next.self.host}:${next.self.port}`, shortId(next.self.peerId), localNote].filter(Boolean).join(" · ");
+    meta.textContent = `${providerLabel(next.self.provider)} · ${next.self.host}:${next.self.port}`;
+    meta.dataset.tip = fullMeta;
+    must<HTMLElement>("#nav-unread").hidden = next.unreadSessions.length === 0;
     fillSettings(next.settings);
     paintTools(next.localClis);
     paintPeers(next);
@@ -377,12 +435,17 @@ function boot(host: HTMLElement): void {
       button.type = "button";
       button.dataset.peer = peer.peerId;
       button.className = `peer${peer.peerId === active ? " active" : ""}`;
+      const dot = document.createElement("i");
+      dot.className = `dot ${peer.status === "none" && peer.discovered ? "online" : peer.status}`;
+      const who = document.createElement("span");
+      who.className = "who";
       const title = document.createElement("strong");
       title.textContent = peer.name;
       const meta = document.createElement("span");
       const where = peer.viaLocalhost ? "cùng máy" : peer.host || "chưa có IP";
       meta.textContent = [providerLabel(peer.provider), where, peerCliNote(peer.clis), activityNote(next.activity[peer.peerId]), statusText(peer)].filter(Boolean).join(" · ");
-      button.append(title, meta);
+      who.append(title, meta);
+      button.append(dot, who);
       peersEl.append(button);
     }
   }
@@ -402,7 +465,8 @@ function boot(host: HTMLElement): void {
     typing.textContent = activityText;
     const link = must<HTMLButtonElement>("#link");
     const connected = peer.status === "connected";
-    link.textContent = connected ? "Ngắt" : peer.status === "pending-out" ? "Đang chờ" : peer.status === "connecting" ? "Đang nối" : "Kết nối";
+    const linkTip = connected ? "Ngắt kết nối" : peer.status === "pending-out" ? "Đang chờ máy kia chấp nhận" : peer.status === "connecting" ? "Đang nối" : "Kết nối";
+    setIcon(link, connected ? "unlink" : "link", linkTip);
     link.disabled = peer.status === "connecting" || peer.status === "pending-out";
     link.onclick = () => {
       const peerId = active;
@@ -575,10 +639,12 @@ function boot(host: HTMLElement): void {
       open.append(title, meta);
       const edit = document.createElement("button");
       edit.type = "button";
-      edit.className = "ghost history-rename";
+      edit.className = "icon-btn history-rename";
       edit.dataset.editSession = row.session.id;
       edit.dataset.peer = row.session.peerId;
-      edit.textContent = "Sửa";
+      edit.dataset.tip = "Sửa tên phiên";
+      edit.setAttribute("aria-label", "Sửa tên phiên");
+      edit.innerHTML = icon("pencil");
       const item = document.createElement("div");
       item.className = "history-row";
       item.append(open, edit);
@@ -812,6 +878,92 @@ function nearBottom(element: HTMLElement): boolean {
 
 function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : "Có lỗi";
+}
+
+function icon(name: string): string {
+  return `<svg class="icon" aria-hidden="true"><use href="#i-${name}"></use></svg>`;
+}
+
+function iconButton(id: string, name: string, tip: string, nav = "", extra = "", type = "button", className = "icon-btn"): string {
+  const idAttr = id ? ` id="${id}"` : "";
+  const navAttr = nav ? ` data-nav="${nav}"` : "";
+  return `<button${idAttr} type="${type}" class="${className}" data-tip="${tip}" aria-label="${tip}"${navAttr}>${icon(name)}${extra}</button>`;
+}
+
+function setIcon(button: HTMLElement, name: string, tip: string): void {
+  button.querySelector("use")?.setAttribute("href", `#i-${name}`);
+  button.dataset.tip = tip;
+  button.setAttribute("aria-label", tip);
+}
+
+function bindTips(host: HTMLElement): void {
+  const tip = must<HTMLDivElement>("#tip");
+  const place = (el: HTMLElement) => {
+    const text = el.dataset.tip;
+    if (!text) return;
+    tip.textContent = text;
+    tip.hidden = false;
+    const rect = el.getBoundingClientRect();
+    const box = tip.getBoundingClientRect();
+    const pad = 8;
+    let left = rect.left + rect.width / 2 - box.width / 2;
+    let top = rect.bottom + 6;
+    if (rect.left < 90) {
+      left = rect.right + 8;
+      top = rect.top + rect.height / 2 - box.height / 2;
+    } else if (top + box.height > window.innerHeight - pad) {
+      top = rect.top - box.height - 6;
+    }
+    tip.style.left = `${Math.max(pad, Math.min(left, window.innerWidth - box.width - pad))}px`;
+    tip.style.top = `${Math.max(pad, top)}px`;
+  };
+  host.addEventListener("mouseover", (event) => {
+    const el = (event.target as HTMLElement).closest<HTMLElement>("[data-tip]");
+    if (el) place(el);
+  });
+  host.addEventListener("mouseout", (event) => {
+    const el = (event.target as HTMLElement).closest<HTMLElement>("[data-tip]");
+    if (!el) return;
+    const next = event.relatedTarget;
+    if (next instanceof Node && el.contains(next)) return;
+    tip.hidden = true;
+  });
+  host.addEventListener("pointerdown", () => {
+    tip.hidden = true;
+  });
+  window.addEventListener("scroll", () => {
+    tip.hidden = true;
+  }, true);
+}
+
+function iconSprite(): string {
+  const stroke = `fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"`;
+  const item = (id: string, body: string) => `<symbol id="i-${id}" viewBox="0 0 24 24"><g ${stroke}>${body}</g></symbol>`;
+  return `<svg class="sprite" aria-hidden="true">${[
+    item("sidebar", `<rect x="3.5" y="4" width="17" height="16" rx="2"/><path d="M9 4v16"/>`),
+    item("people", `<circle cx="9" cy="8" r="2.2"/><path d="M4.8 18c.5-2.3 2.2-3.5 4.2-3.5s3.7 1.2 4.2 3.5"/><circle cx="16.2" cy="9" r="1.7"/><path d="M14.2 14.8c1.1-.4 2.2-.5 3.2-.2 1.3.4 2.2 1.4 2.6 2.9"/>`),
+    item("bubble", `<path d="M5 16.2V7.8A2.3 2.3 0 0 1 7.3 5.5h9.4A2.3 2.3 0 0 1 19 7.8v5.6a2.3 2.3 0 0 1-2.3 2.3H9.2L5 18.5z"/>`),
+    item("folder", `<path d="M3.5 8.2V7A1.5 1.5 0 0 1 5 5.5h3.8l1.6 1.6H19A1.5 1.5 0 0 1 20.5 8.6v8A1.5 1.5 0 0 1 19 18.1H5A1.5 1.5 0 0 1 3.5 16.6z"/>`),
+    item("gear", `<path d="M4 8h11M15 8a2 2 0 1 0 4 0 2 2 0 0 0-4 0zM20 16H9M9 16a2 2 0 1 0-4 0 2 2 0 0 0 4 0z"/>`),
+    item("list", `<path d="M9 7h10M9 12h10M9 17h10"/><circle cx="5" cy="7" r="0.8"/><circle cx="5" cy="12" r="0.8"/><circle cx="5" cy="17" r="0.8"/>`),
+    item("plus", `<path d="M12 5v14M5 12h14"/>`),
+    item("search", `<circle cx="11" cy="11" r="5.5"/><path d="M15.5 15.5L20 20"/>`),
+    item("link", `<path d="M9 16H7.5a4 4 0 0 1 0-8H9"/><path d="M15 8h1.5a4 4 0 0 1 0 8H15"/><path d="M8 12h8"/>`),
+    item("unlink", `<path d="M9 16H7.5a4 4 0 0 1 0-8H9"/><path d="M15 8h1.5a4 4 0 0 1 0 8H15"/><path d="M8 12h3M13 12h3"/><path d="M5 5l14 14"/>`),
+    item("check", `<path d="M5 12.5l4.2 4.2L19 7"/>`),
+    item("x", `<path d="M7 7l10 10M17 7L7 17"/>`),
+    item("paperclip", `<path d="M8.2 12.6V7.4a2.4 2.4 0 0 1 4.8 0v8.6a3.6 3.6 0 0 1-7.2 0V8.6"/>`),
+    item("file", `<path d="M7 3.8h6.2L19 9.2v11H7z"/><path d="M13.2 3.8V9.2H19"/>`),
+    item("eye", `<path d="M2.8 12S6.2 6.8 12 6.8 21.2 12 21.2 12 17.8 17.2 12 17.2 2.8 12 2.8 12z"/><circle cx="12" cy="12" r="2.2"/>`),
+    item("send", `<path d="M12 19V6M7 11l5-5 5 5"/>`),
+    item("dialogue", `<path d="M3.8 14.2V8A1.8 1.8 0 0 1 5.6 6.2h7A1.8 1.8 0 0 1 14.4 8v4a1.8 1.8 0 0 1-1.8 1.8H7.2z"/><path d="M10.2 16.2v.6A1.7 1.7 0 0 0 11.9 18.5h5.2l2.6 2v-6.2"/>`),
+    item("stop", `<rect x="7" y="7" width="10" height="10" rx="1.6"/>`),
+    item("pencil", `<path d="M13.2 6.4l4.4 4.4L8 20.4H3.6V16z"/><path d="M11.6 8l4.4 4.4"/>`),
+    item("refresh", `<path d="M19 12a7 7 0 1 1-2.1-4.9"/><path d="M19 4.6V9h-4.4"/>`),
+    item("copy", `<rect x="8" y="8" width="10" height="11.5" rx="1.5"/><path d="M6 16H5.5A1.5 1.5 0 0 1 4 14.5v-9A1.5 1.5 0 0 1 5.5 4H14"/>`),
+    item("hash", `<path d="M9 4.5L7.5 19.5M16.5 4.5L15 19.5M5 9h14M4.5 15h14"/>`),
+    item("terminal", `<path d="M5 8l4 4-4 4M12 16h7"/>`),
+  ].join("")}</svg>`;
 }
 
 function must<T extends HTMLElement>(selector: string): T {

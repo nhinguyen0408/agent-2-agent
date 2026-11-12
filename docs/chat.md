@@ -31,7 +31,7 @@ Khi chưa chọn máy, khung hiện **Chưa chọn máy**. Khi đã chọn, khun
 - Banner **Chấp nhận / Từ chối** khi máy kia đang xin vào.
 - Danh sách tin.
 - Dòng trạng thái **đang nhập…** hoặc **đang trả lời…**.
-- Ô soạn, nút **Gửi**, **Đính kèm**, **Gửi file**, **Xem file**, ô **Lượt**, **Cho hai agent nói**, **Dừng**.
+- Ô soạn và hàng icon: **Gửi**, **Đính kèm**, **Gửi file**, **Xem file**, **Lượt**, **Cho hai agent nói**, **Dừng**. Tên hiện khi đưa chuột lên icon.
 - Khối **Lệnh HTTP tới agent máy kia**.
 
 Danh sách máy bên trái cũng hiện **đang nhập** hoặc **đang trả lời** của từng peer. **đang trả lời** được ưu tiên nếu cả hai cùng bật.
@@ -228,7 +228,7 @@ Mỗi dòng (`ChatLine`) có `id`, máy gửi, tên hiển thị, loại, chữ,
 
 Mỗi máy có nhiều phiên chat với cùng một peer. Phiên nằm trong `sessions`, lịch sử từng phiên nằm trong `transcripts` theo `sessionId`, cả hai trong `config.json` ở thư mục userData của Electron. Phiên đang mở nằm trong `openSessions`. Hội thoại cũ, trước khi có phiên, được chuyển thành một phiên `legacy-<peerId>`. Tối đa 200 dòng mỗi phiên; dòng cũ nhất bị bỏ. Ghi đĩa theo cụm, qua file tạm rồi đổi tên.
 
-Nút **Phiên mới** tạo một phiên trống và báo cho máy kia cùng id, để tin sau vào đúng phiên đó. Ô **Tên phiên** sửa tên phiên đang mở; Enter lưu. Tên đã sửa không bị tin nhắn ghi đè, và được gửi sang máy kia. Agent dựng prompt chỉ từ dòng của phiên đang trả lời, không lẫn phiên khác.
+Icon **Phiên mới** tạo một phiên trống và báo cho máy kia cùng id, để tin sau vào đúng phiên đó. Ô tên dưới tiêu đề sửa tên phiên đang mở; Enter lưu. Tên đã sửa không bị tin nhắn ghi đè, và được gửi sang máy kia. Agent dựng prompt chỉ từ dòng của phiên đang trả lời, không lẫn phiên khác.
 
 Mở lại app, dòng còn `pending` được đóng lại. Dòng không có chữ thành `(dở dang)`.
 

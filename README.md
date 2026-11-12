@@ -13,7 +13,7 @@ npm install
 npm run dev:pair
 ```
 
-Hai cửa sổ Agent A và Agent B hiện ra. Chọn máy bên kia, bấm **Kết nối**, rồi gửi một câu. Echo của máy kia trả lời trong khung chat.
+Hai cửa sổ Agent A và Agent B hiện ra. Chọn máy bên kia, bấm icon kết nối, rồi gửi một câu. Echo của máy kia trả lời trong khung chat. Đưa chuột lên icon để xem tên chức năng. Thanh bên thu gọn bằng icon trên cùng.
 
 `npm run dev` chỉ mở Agent A. `npm run dev:b` chỉ mở Agent B.
 
@@ -47,10 +47,10 @@ Trên máy sẽ chạy agent, đăng nhập một lần trong terminal của má
 - Claude Code: cài `claude`, rồi chạy `claude auth login`. App gọi `claude -p`.
 - Cursor CLI: cài `agent`, rồi chạy `agent login`. App gọi thẳng `node` của Cursor CLI với `agent -p --trust --force`, nên không đi qua PowerShell và tự chấp nhận lệnh trong thư mục làm việc.
 - Hai bên dùng chung một prompt hội thoại. Ô chat xóa ngay khi gửi. Máy kia hiện "đang nhập…" hoặc "đang trả lời…".
-- File gửi bằng nút **Gửi file** hoặc bằng lệnh local `POST /relay-file`. App chuyển byte qua LAN và lưu vào thư mục làm việc của máy nhận. Không cần share Windows.
-- Nút **Xem file** và danh sách trong thư mục làm việc mở một cửa sổ riêng, kéo và đổi kích thước được. Bấm file khác thì cửa sổ đó đổi nội dung. Dòng file trong hội thoại vẫn xem nhỏ trong chat. HTML không chạy script.
-- Nút **Đính kèm** gửi kèm txt, Markdown, ảnh hoặc PDF. File được chuyển vào thư mục làm việc của máy kia, và cả hai agent đọc file đó rồi trao đổi nội dung.
-- Mục **Phiên chat** tạo nhiều phiên với cùng một máy. Mỗi phiên giữ lịch sử riêng. Ô **Tên phiên** hoặc nút **Sửa** đổi tên, máy kia nhận tên đó. Agent chỉ đọc phiên đang mở. Tin của phiên khác hiện chữ "mới" cho đến khi mở phiên đó.
+- Icon **Gửi file** hoặc lệnh local `POST /relay-file` chuyển byte qua LAN và lưu vào thư mục làm việc của máy nhận. Không cần share Windows.
+- Icon **Xem file** và danh sách trong thư mục làm việc mở một cửa sổ riêng, kéo và đổi kích thước được. Bấm file khác thì cửa sổ đó đổi nội dung. Dòng file trong hội thoại vẫn xem nhỏ trong chat. HTML không chạy script.
+- Icon kẹp giấy gửi kèm txt, Markdown, ảnh hoặc PDF. File được chuyển vào thư mục làm việc của máy kia, và cả hai agent đọc file đó rồi trao đổi nội dung.
+- Mục **Phiên chat** trên thanh bên tạo nhiều phiên với cùng một máy. Mỗi phiên giữ lịch sử riêng. Ô tên dưới tiêu đề, hoặc icon bút chì, đổi tên phiên. Máy kia nhận tên đó. Agent chỉ đọc phiên đang mở. Tin của phiên khác hiện chấm đỏ cho đến khi mở phiên đó.
 - App tự nhận `claude` và `agent` trên máy (kể cả thư mục cài mặc định), rồi hiện Đã cài hoặc Chưa có. Lệnh `cursor` của Cursor IDE không tính là Cursor CLI.
 
 Phiên đăng nhập nằm trên máy đó. App xóa `ANTHROPIC_API_KEY` và `CURSOR_API_KEY` khỏi tiến trình con để lệnh dùng đúng phiên này. Thư mục làm việc là thư mục terminal được mở khi có việc trên đĩa.
