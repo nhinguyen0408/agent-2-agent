@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { app } from "electron";
 import { sanitizeBrief, type ProjectBrief } from "../shared/brief";
+import { sanitizeMembers, type GroupRoom } from "../shared/group";
 import type { ChatLine, ChatSession, Settings } from "../shared/types";
 import { normalizeProvider } from "../shared/types";
 
@@ -23,6 +24,7 @@ type Disk = {
   openSessions?: Record<string, string>;
   transcripts: Record<string, ChatLine[]>;
   briefs?: Record<string, ProjectBrief>;
+  groups?: GroupRoom[];
 };
 
 export function defaultSettings(profile: string): Settings {
@@ -46,6 +48,7 @@ export class Store {
   openSessions: Record<string, string>;
   transcripts: Record<string, ChatLine[]>;
   briefs: Record<string, ProjectBrief>;
+  groups: GroupRoom[];
 
   constructor(profile: string) {
     this.file = path.join(app.getPath("userData"), "config.json");
@@ -59,6 +62,7 @@ export class Store {
     this.openSessions = history.openSessions;
     this.transcripts = history.transcripts;
     this.briefs = sanitizeBriefs(disk?.briefs);
+    this.groups = sanitizeGroups(disk?.groups);
     for (const lines of Object.values(this.transcripts)) {
       for (const line of lines) {
         if (line.pending) {
@@ -78,6 +82,7 @@ export class Store {
       openSessions: this.openSessions,
       transcripts: this.transcripts,
       briefs: this.briefs,
+      groups: this.groups,
     };
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
     const tmp = `${this.file}.tmp`;
@@ -141,6 +146,23 @@ function migrateHistory(disk: Disk | null): {
     openSessions[peerId] = id;
   }
   return { sessions, openSessions, transcripts };
+}
+
+function sanitizeGroups(raw: GroupRoom[] | undefined): GroupRoom[] {
+  if (!Array.isArray(raw)) return [];
+  const groups: GroupRoom[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const id = typeof item.id === "string" ? item.id : "";
+    const hostId = typeof item.hostId === "string" ? item.hostId : "";
+    const sessionId = typeof item.sessionId === "string" ? item.sessionId : "";
+    if (!/^[a-zA-Z0-9_-]{1,80}$/.test(id) || !hostId || !sessionId || sessionId.length > 80) continue;
+    const members = sanitizeMembers(item.members);
+    if (!members.some((member) => member.peerId === hostId)) continue;
+    const title = String(item.title || "Nhóm").replace(/\s+/g, " ").trim().slice(0, 42) || "Nhóm";
+    groups.push({ id, title, hostId, members, sessionId, turn: null });
+  }
+  return groups;
 }
 
 function sanitizeBriefs(raw: Record<string, ProjectBrief> | undefined): Record<string, ProjectBrief> {

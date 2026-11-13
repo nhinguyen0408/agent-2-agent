@@ -205,6 +205,22 @@ if (!gotLock) {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.extendBrief(String(peerId), Number(extra) || BRIEF_EXTEND);
       });
+      ipcMain.handle(IPC.createGroup, () => {
+        if (!core) throw new Error("App chưa sẵn sàng");
+        return core.createGroup();
+      });
+      ipcMain.handle(IPC.inviteGroup, (_event, groupId: string, peerId: string) => {
+        if (!core) throw new Error("App chưa sẵn sàng");
+        return core.inviteGroup(String(groupId), String(peerId));
+      });
+      ipcMain.handle(IPC.leaveGroup, (_event, groupId: string, peerId?: string) => {
+        if (!core) throw new Error("App chưa sẵn sàng");
+        return core.leaveGroup(String(groupId), peerId ? String(peerId) : undefined);
+      });
+      ipcMain.handle(IPC.renameGroup, (_event, groupId: string, title: string) => {
+        if (!core) throw new Error("App chưa sẵn sàng");
+        return core.renameGroup(String(groupId), String(title ?? ""));
+      });
       ipcMain.handle(IPC.dialogue, (_event, peerId: string, topic: string, replies: number) =>
         core?.startDialogue(peerId, topic, replies),
       );

@@ -5,7 +5,7 @@ import path from "node:path";
 import type { Settings } from "../shared/types";
 import { findExecutable } from "./cliDetect";
 
-export type ModelTurn = { role: "user" | "assistant" | "note"; text: string };
+export type ModelTurn = { role: "user" | "assistant" | "note"; text: string; speaker?: string };
 
 export type ReplyInput = {
   peerId: string;
@@ -17,6 +17,8 @@ export type ReplyInput = {
   fileRelay?: { url: string };
   readings?: { name: string; path: string; kind: string; excerpt?: string }[];
   brief?: { topic: string; goal: string; turn: number; limit: number; last: boolean };
+  room?: { title: string; members: string };
+  together?: string;
 };
 
 export class AgentHost {
@@ -171,7 +173,11 @@ function clip(value: string, max: number): string {
 
 function conversationPrompt(input: ReplyInput): string {
   const transcript = input.history
-    .map((turn) => (turn.role === "note" ? turn.text : `${turn.role === "user" ? input.peerName : input.selfName}: ${turn.text}`))
+    .map((turn) => {
+      if (turn.role === "note") return turn.text;
+      const who = turn.speaker || (turn.role === "user" ? input.peerName : input.selfName);
+      return `${who}: ${turn.text}`;
+    })
     .join("\n");
   const readings = (input.readings ?? [])
     .map((file) => {
@@ -181,9 +187,12 @@ function conversationPrompt(input: ReplyInput): string {
     .join("\n");
   return [
     briefLead(input),
-    `Bạn là ${input.selfName}. Bạn đang nói chuyện trực tiếp với ${input.peerName} qua LAN Agents.`,
+    input.room
+      ? `Bạn là ${input.selfName}. Bạn đang trong nhóm "${input.room.title}" với ${input.room.members}. Đến lượt bạn. Các agent khác có lượt riêng, đừng nói hộ họ.`
+      : `Bạn là ${input.selfName}. Bạn đang nói chuyện trực tiếp với ${input.peerName} qua LAN Agents.`,
     "Hãy trả lời tin nhắn cuối như một người trong cuộc hội thoại này.",
     "Quy tắc:",
+    "- Nếu tin có @Tên, đó là máy được gọi. Hãy nói với đúng người đó.",
     "- Chỉ viết nội dung sẽ gửi cho đối phương. Không mở đầu bằng việc nhắc lại các quy tắc này.",
     "- Dùng cùng ngôn ngữ với tin nhắn cuối. Giữ câu trả lời gọn, thường dưới 120 từ, trừ khi đang tóm tắt file hoặc đang viết khối KẾT QUẢ.",
     "- Bám các lượt trước. Không bịa việc máy kia đã làm.",
@@ -213,7 +222,7 @@ function briefLead(input: ReplyInput): string {
     ? "Đây là lượt cuối. Chỉ viết khối bắt đầu bằng dòng KẾT QUẢ, đúng cấu trúc kết quả mong muốn. Không mở ý mới."
     : "Bàn trong phạm vi chủ đề và file context. Tiến về kết quả mong muốn. Nói rõ chỗ còn lệch.";
   return [
-    "Hồ sơ dự án, dùng chung cho cả hai agent:",
+    `Hồ sơ dự án, dùng chung cho ${input.together ?? "cả hai"} agent:`,
     `Chủ đề: ${brief.topic}`,
     `Kết quả mong muốn:\n${goal}`,
     `Lượt agent này: ${brief.turn}/${brief.limit}.`,

@@ -795,34 +795,201 @@ body.preview-app .preview-fill > audio { width: min(100%, 36rem); margin: auto; 
 }
 
 .brief-result {
-  display: block;
+  display: flex;
+  align-items: stretch;
   width: 100%;
   margin: 0;
-  padding: 0;
   border-radius: 8px;
   background: rgba(36, 138, 61, 0.1);
   color: var(--text);
+}
+
+.brief-result-text {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+  color: inherit;
   text-align: left;
 }
 
-.brief-result span {
+.brief-result-text span {
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   overflow: hidden;
-  padding: 8px 12px;
+  padding: 8px 4px 8px 12px;
   font-size: 12.5px;
   line-height: 1.45;
   white-space: pre-wrap;
 }
 
-.brief-result.open span {
-  display: block;
-  max-height: 8.5rem;
-  overflow: auto;
+.brief-result .icon-btn { align-self: center; margin-right: 2px; }
+
+.result-pop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px;
+  background: rgba(17, 24, 39, 0.38);
 }
 
-.composer { border-top: 1px solid var(--line); }
+.result-pop[hidden] { display: none; }
+
+.result-card {
+  display: flex;
+  flex-direction: column;
+  width: min(820px, 100%);
+  height: min(78vh, 760px);
+  overflow: hidden;
+  border-radius: 14px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+
+.result-card header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 8px 10px 8px 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.result-card header strong {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 15px;
+}
+
+.result-card .markdown {
+  flex: 1;
+  margin: 0;
+  padding: 18px 24px 32px;
+  overflow: auto;
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+.result-card .markdown :is(p, h1, h2, h3, ul, ol, blockquote, pre) { margin: 0 0 0.7em; }
+
+.result-card .markdown :first-child { margin-top: 0; }
+
+.result-card .markdown :last-child { margin-bottom: 0; }
+
+.result-card .markdown h1,
+.result-card .markdown h2,
+.result-card .markdown h3 { font-size: 1.15em; }
+
+.result-card .markdown ul,
+.result-card .markdown ol { padding-left: 1.3rem; }
+
+.result-card .markdown pre {
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.result-card .markdown code {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 0.92em;
+}
+
+.composer { position: relative; border-top: 1px solid var(--line); }
+
+.mention-pop {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: calc(100% - 4px);
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 180px;
+  overflow: auto;
+  padding: 4px;
+  background: var(--card);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+}
+
+.mention-pop button {
+  width: 100%;
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: 8px;
+}
+
+.mention-pop button.active,
+.mention-pop button:hover { background: rgba(0, 122, 255, 0.1); }
+
+.group-side { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; }
+
+.group-side-head, .group-bar, .group-invite {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.group-side-head strong { flex: 1; }
+
+.group-side-head span, .member-chip { color: var(--muted); font-size: 11px; }
+
+.groups { display: flex; flex-direction: column; gap: 4px; }
+
+.group-bar {
+  flex-wrap: wrap;
+  padding: 0 14px 8px;
+}
+
+.group-members { display: flex; flex-wrap: wrap; gap: 4px; flex: 1; }
+
+.member-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #ececf1;
+}
+
+.member-chip.on { color: var(--ok); background: rgba(52, 199, 89, 0.12); }
+
+.member-chip button {
+  width: 16px;
+  height: 16px;
+  line-height: 16px;
+  color: var(--muted);
+}
+
+.group-invite select { width: 9.5rem; padding: 0.25rem 0.4rem; }
+
+.group-invite button {
+  padding: 0.28rem 0.7rem;
+  background: var(--accent);
+  color: white;
+  border-radius: 999px;
+}
+
+.at {
+  padding: 0 0.2rem;
+  border-radius: 6px;
+  background: rgba(0, 122, 255, 0.12);
+  color: var(--accent);
+  font-weight: 650;
+}
+
+.line.mine .at { background: rgba(255, 255, 255, 0.22); color: white; }
 
 .composer-actions { display: flex; gap: 2px; align-items: center; margin-top: 8px; }
 

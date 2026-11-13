@@ -1,4 +1,5 @@
 import { BRIEF_FILE_MAX, BRIEF_TURN_MAX, resultText, type BriefFile, type ProjectBrief } from "../shared/brief";
+import { GROUP_MAX, groupKey, mentionRanges, parseGroupKey, type GroupRoom, type MentionRef } from "../shared/group";
 import type { AppState, ChatLine, CliReport, CliToolState, FileRef, PeerActivity, PeerView, Settings, WorkFile } from "../shared/types";
 import { providerLabel } from "../shared/types";
 import { fileRef, type PreviewKind } from "../shared/preview";
@@ -23,6 +24,10 @@ declare global {
       removeBriefFile: (peerId: string, name: string) => Promise<AppState>;
       startBrief: (peerId: string) => Promise<AppState>;
       extendBrief: (peerId: string, extra?: number) => Promise<AppState>;
+      createGroup: () => Promise<AppState>;
+      inviteGroup: (groupId: string, peerId: string) => Promise<AppState>;
+      leaveGroup: (groupId: string, peerId?: string) => Promise<AppState>;
+      renameGroup: (groupId: string, title: string) => Promise<AppState>;
       createSession: (peerId: string) => Promise<AppState>;
       openSession: (peerId: string, sessionId: string) => Promise<AppState>;
       renameSession: (peerId: string, sessionId: string, title: string) => Promise<AppState>;
@@ -70,6 +75,14 @@ function boot(host: HTMLElement): void {
         <div class="panel-body" data-pane="peers">
           <div id="peers" class="peers"></div>
           <p id="peers-empty" class="hint">Đang dò máy trong LAN và các cổng 3940–3969.</p>
+          <div class="group-side">
+            <div class="group-side-head">
+              <strong>Nhóm</strong>
+              <span>tối đa ${GROUP_MAX} máy</span>
+              ${iconButton("group-new", "plus", "Tạo nhóm, tối đa 5 máy")}
+            </div>
+            <div id="groups" class="groups"></div>
+          </div>
           <form id="manual" class="manual">
             <input id="manual-host" placeholder="IP hoặc tên máy" autocomplete="off" data-tip="Địa chỉ máy kia" aria-label="Địa chỉ máy kia" />
             <input id="manual-port" inputmode="numeric" value="3940" data-tip="Cổng" aria-label="Cổng" />
@@ -120,7 +133,7 @@ function boot(host: HTMLElement): void {
       <section class="chat">
         <div id="chat-empty" class="empty">
           <h2>Chưa chọn máy</h2>
-          <p>Mở app trên máy thứ hai trong cùng LAN. Máy đó hiện ở mục Máy trong LAN.</p>
+          <p>Chọn một máy, hoặc tạo nhóm rồi mời máy đã nối. Nhóm chứa tối đa 5 máy. Trong chủ đề, các agent nói lần lượt. Gõ @tên để gọi đúng agent.</p>
         </div>
         <div id="chat-panel" class="chat-panel" hidden>
           <header class="chat-head">
@@ -138,6 +151,13 @@ function boot(host: HTMLElement): void {
               ${iconButton("reject", "x", "Từ chối")}
             </span>
           </div>
+          <div id="group-bar" class="group-bar" hidden>
+            <div id="group-members" class="group-members"></div>
+            <form id="group-invite" class="group-invite">
+              <select id="group-pick" aria-label="Mời máy vào nhóm"></select>
+              <button type="submit">Mời</button>
+            </form>
+          </div>
           <div id="messages" class="messages"></div>
           <p id="typing" class="typing" hidden></p>
           <section id="brief" class="brief">
@@ -146,14 +166,17 @@ function boot(host: HTMLElement): void {
               <button id="brief-summary" type="button" class="brief-summary empty">Chưa đặt chủ đề</button>
               <span id="brief-meter" class="brief-meter"></span>
             </div>
-            <button id="brief-result" type="button" class="brief-result" hidden><span></span></button>
+            <div id="brief-result" class="brief-result" hidden>
+              <button id="brief-result-open" type="button" class="brief-result-text"><span></span></button>
+              ${iconButton("brief-expand", "expand", "Mở rộng kết quả")}
+            </div>
             <div id="brief-pop" class="brief-pop" hidden>
               <div class="brief-pop-head">
                 <strong>Hồ sơ dự án</strong>
                 ${iconButton("brief-close", "x", "Đóng cài đặt chủ đề")}
               </div>
               <label>Chủ đề
-                <input id="brief-topic" maxlength="500" placeholder="Việc hai agent cần bàn" aria-label="Chủ đề dự án" />
+                <input id="brief-topic" maxlength="500" placeholder="Việc các agent cần bàn" aria-label="Chủ đề dự án" />
               </label>
               <label>Kết quả mong muốn
                 <textarea id="brief-goal" rows="12" maxlength="2000" placeholder="Dạng kết quả cần chốt" aria-label="Kết quả mong muốn"></textarea>
@@ -174,7 +197,8 @@ function boot(host: HTMLElement): void {
             </div>
           </section>
           <form id="composer" class="composer">
-            <textarea id="draft" rows="3" placeholder="Nhắn cho agent máy kia…"></textarea>
+            <div id="mention-pop" class="mention-pop" hidden></div>
+            <textarea id="draft" rows="3" placeholder="Nhắn cho agent. Gõ @ để gọi đúng máy…"></textarea>
             <div id="attach-chip" class="attach-chip" hidden>
               ${icon("paperclip")}
               <span id="attach-name"></span>
@@ -189,7 +213,7 @@ function boot(host: HTMLElement): void {
               ${iconButton("send", "send", "Gửi", "", "", "submit", "icon-btn primary")}
             </div>
           </form>
-          <details class="http">
+          <details id="http-box" class="http">
             <summary>${icon("terminal")} Lệnh HTTP</summary>
             <pre id="http-snippet"></pre>
             ${iconButton("copy-http", "copy", "Chép lệnh")}
@@ -199,6 +223,15 @@ function boot(host: HTMLElement): void {
     </div>
     <div id="tip" class="tip" hidden></div>
     <div id="toast" class="toast" hidden></div>
+    <div id="result-pop" class="result-pop" hidden>
+      <div class="result-card" role="dialog" aria-modal="true" aria-labelledby="result-title">
+        <header>
+          <strong id="result-title">Kết quả</strong>
+          ${iconButton("result-close", "x", "Đóng")}
+        </header>
+        <article id="result-body" class="markdown"></article>
+      </div>
+    </div>
   `;
 
   const navIds = ["peers", "sessions", "files", "settings", "logs"] as const;
@@ -261,12 +294,34 @@ function boot(host: HTMLElement): void {
 
   let historyQuery = "";
   let focusLine = "";
+  let mentionIndex = 0;
 
   peersEl.addEventListener("click", (event) => {
     const row = (event.target as HTMLElement).closest<HTMLElement>("[data-peer]");
     if (!row?.dataset.peer) return;
     active = row.dataset.peer;
     if (state) paint(state);
+  });
+  must<HTMLElement>("#groups").addEventListener("click", (event) => {
+    const row = (event.target as HTMLElement).closest<HTMLElement>("[data-group]");
+    if (!row?.dataset.group) return;
+    active = row.dataset.group;
+    if (state) paint(state);
+  });
+  must<HTMLButtonElement>("#group-new").addEventListener("click", () => {
+    void guard(async () => {
+      const next = await window.lan.createGroup();
+      const created = next.groups[next.groups.length - 1];
+      if (created) active = groupKey(created.id);
+      paint(next);
+    });
+  });
+  must<HTMLFormElement>("#group-invite").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const groupId = active ? parseGroupKey(active) : null;
+    const peerId = must<HTMLSelectElement>("#group-pick").value;
+    if (!groupId || !peerId) return;
+    void guard(() => window.lan.inviteGroup(groupId, peerId));
   });
 
   must<HTMLFormElement>("#manual").addEventListener("submit", (event) => {
@@ -404,12 +459,41 @@ function boot(host: HTMLElement): void {
     void sendDraft();
   });
   draft.addEventListener("keydown", (event) => {
+    const pop = must<HTMLElement>("#mention-pop");
+    if (!pop.hidden) {
+      const count = pop.children.length;
+      if ((event.key === "ArrowDown" || event.key === "ArrowUp") && count) {
+        event.preventDefault();
+        mentionIndex = event.key === "ArrowDown" ? (mentionIndex + 1) % count : (mentionIndex - 1 + count) % count;
+        paintMentions();
+        return;
+      }
+      if ((event.key === "Enter" || event.key === "Tab") && count) {
+        event.preventDefault();
+        const label = pop.children[mentionIndex]?.textContent || "";
+        if (label.startsWith("@")) insertMention(label.slice(1));
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        pop.hidden = true;
+        return;
+      }
+    }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       void sendDraft();
     }
   });
-  draft.addEventListener("input", () => noteTyping(true));
+  draft.addEventListener("input", () => {
+    mentionIndex = 0;
+    noteTyping(true);
+    paintMentions();
+  });
+  draft.addEventListener("click", () => paintMentions());
+  draft.addEventListener("keyup", (event) => {
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight" || event.key === "Home" || event.key === "End") paintMentions();
+  });
   must<HTMLButtonElement>("#brief-add").addEventListener("click", () => {
     if (!active) return;
     const peerId = active;
@@ -422,8 +506,11 @@ function boot(host: HTMLElement): void {
   must<HTMLButtonElement>("#brief-toggle").addEventListener("click", () => setBriefOpen(must<HTMLElement>("#brief-pop").hidden));
   must<HTMLButtonElement>("#brief-summary").addEventListener("click", () => setBriefOpen(must<HTMLElement>("#brief-pop").hidden));
   must<HTMLButtonElement>("#brief-close").addEventListener("click", () => setBriefOpen(false));
-  must<HTMLButtonElement>("#brief-result").addEventListener("click", () => {
-    must<HTMLElement>("#brief-result").classList.toggle("open");
+  must<HTMLButtonElement>("#brief-result-open").addEventListener("click", () => openResult());
+  must<HTMLButtonElement>("#brief-expand").addEventListener("click", () => openResult());
+  must<HTMLButtonElement>("#result-close").addEventListener("click", () => closeResult());
+  must<HTMLElement>("#result-pop").addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) closeResult();
   });
   document.addEventListener("pointerdown", (event) => {
     const pop = must<HTMLElement>("#brief-pop");
@@ -433,7 +520,13 @@ function boot(host: HTMLElement): void {
     setBriefOpen(false);
   });
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") setBriefOpen(false);
+    if (event.key !== "Escape") return;
+    const resultPop = must<HTMLElement>("#result-pop");
+    if (!resultPop.hidden) {
+      closeResult();
+      return;
+    }
+    setBriefOpen(false);
   });
   must<HTMLButtonElement>("#brief-start").addEventListener("click", () => {
     if (!active) return;
@@ -483,8 +576,13 @@ function boot(host: HTMLElement): void {
 
   function paint(next: AppState): void {
     state = next;
-    if (!active || !next.peers.some((peer) => peer.peerId === active)) {
-      active = next.peers.find((peer) => peer.status === "pending-in")?.peerId ?? next.peers[0]?.peerId ?? null;
+    const stillPeer = Boolean(active && next.peers.some((peer) => peer.peerId === active));
+    const stillGroup = Boolean(active && next.groups.some((group) => groupKey(group.id) === active));
+    if (!stillPeer && !stillGroup) {
+      active =
+        next.peers.find((peer) => peer.status === "pending-in")?.peerId ??
+        next.peers[0]?.peerId ??
+        (next.groups[0] ? groupKey(next.groups[0].id) : null);
     }
     must<HTMLElement>("#self-name").textContent = next.self.name;
     const localNote = installedNote(next.localClis);
@@ -496,6 +594,7 @@ function boot(host: HTMLElement): void {
     fillSettings(next.settings);
     paintTools(next.localClis);
     paintPeers(next);
+    paintGroups(next);
     paintHistory(next);
     paintChat(next);
     must<HTMLPreElement>("#logs").textContent = next.logs.slice(-14).join("\n");
@@ -524,7 +623,42 @@ function boot(host: HTMLElement): void {
     }
   }
 
+  function paintGroups(next: AppState): void {
+    const box = must<HTMLElement>("#groups");
+    box.replaceChildren();
+    if (!next.groups.length) {
+      const hint = document.createElement("p");
+      hint.className = "hint";
+      hint.textContent = "Chưa có nhóm. Tạo nhóm rồi mời máy đã nối.";
+      box.append(hint);
+      return;
+    }
+    for (const group of next.groups) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.group = groupKey(group.id);
+      button.className = `peer${groupKey(group.id) === active ? " active" : ""}`;
+      const who = document.createElement("span");
+      who.className = "who";
+      const title = document.createElement("strong");
+      title.textContent = group.title;
+      const meta = document.createElement("span");
+      const turn = group.turn ? group.members.find((member) => member.peerId === group.turn?.speakerId)?.name : "";
+      meta.textContent = [`${group.members.length}/${GROUP_MAX} máy`, turn ? `đến lượt ${turn}` : "chưa xếp lượt"].join(" · ");
+      who.append(title, meta);
+      button.append(who);
+      box.append(button);
+    }
+  }
+
   function paintChat(next: AppState): void {
+    const group = active ? next.groups.find((item) => groupKey(item.id) === active) ?? null : null;
+    if (group && active) {
+      paintGroupChat(next, group);
+      return;
+    }
+    must<HTMLElement>("#group-bar").hidden = true;
+    must<HTMLElement>("#http-box").hidden = false;
     const peer = next.peers.find((item) => item.peerId === active) ?? null;
     const empty = must<HTMLElement>("#chat-empty");
     const panel = must<HTMLElement>("#chat-panel");
@@ -577,7 +711,9 @@ function boot(host: HTMLElement): void {
       .filter((item) => item.peerId === active)
       .some((item) => (next.transcripts[item.id] ?? []).some((line) => line.pending));
     must<HTMLButtonElement>("#stop").disabled = !replyingSomewhere;
-    paintBrief(sessionId, next.briefs[sessionId], lines, connected);
+    paintBrief(sessionId, next.briefs[sessionId], lines, connected, "");
+    draft.placeholder = "Nhắn cho agent máy kia. Gõ @ để gọi đúng máy…";
+    must<HTMLInputElement>("#brief-topic").placeholder = "Việc hai agent cần bàn";
     const snippet = peer.token
       ? [
           `curl -X POST http://${peer.host}:${peer.port}/trigger`,
@@ -602,7 +738,112 @@ function boot(host: HTMLElement): void {
     must<HTMLButtonElement>("#brief-summary").setAttribute("aria-expanded", open ? "true" : "false");
   }
 
-  function paintBrief(sessionId: string, brief: ProjectBrief | undefined, lines: ChatLine[], connected: boolean): void {
+  function paintGroupChat(next: AppState, group: GroupRoom): void {
+    const key = groupKey(group.id);
+    must<HTMLElement>("#chat-empty").hidden = true;
+    must<HTMLElement>("#chat-panel").hidden = false;
+    must<HTMLElement>("#http-box").hidden = true;
+    must<HTMLElement>("#chat-title").textContent = group.title;
+    const sessionId = next.openSession[key] || group.sessionId;
+    if (messagesEl.dataset.session !== sessionId) {
+      messagesEl.replaceChildren();
+      messagesEl.dataset.session = sessionId;
+      if (typingOn) noteTyping(false);
+    }
+    const host = group.hostId === next.self.peerId;
+    const linked = host || next.peers.some((peer) => peer.peerId === group.hostId && peer.status === "connected");
+    const lines = next.transcripts[sessionId] ?? [];
+    const typing = must<HTMLElement>("#typing");
+    const activityText = group.members
+      .filter((member) => member.peerId !== next.self.peerId)
+      .map((member) => activitySentence(member.name, next.activity[member.peerId], sessionId))
+      .filter(Boolean)
+      .join(" ");
+    typing.hidden = !activityText;
+    typing.textContent = activityText;
+    const link = must<HTMLButtonElement>("#link");
+    setIcon(link, "unlink", host ? "Đóng nhóm" : "Rời nhóm");
+    link.disabled = false;
+    link.onclick = () => {
+      void guard(() => window.lan.leaveGroup(group.id));
+    };
+    must<HTMLElement>("#banner").hidden = true;
+    const nameInput = must<HTMLInputElement>("#session-title");
+    nameInput.disabled = !host;
+    if (document.activeElement !== nameInput) nameInput.value = group.title;
+    const turnName = group.turn ? group.members.find((member) => member.peerId === group.turn?.speakerId)?.name || "" : "";
+    must<HTMLElement>("#chat-status").textContent = [
+      `${group.members.length}/${GROUP_MAX} máy`,
+      group.members.map((member) => member.name).join(", "),
+      host ? "bạn tạo nhóm" : "máy khác tạo nhóm",
+      turnName ? `đến lượt ${turnName}` : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    paintMessages(messagesEl, lines, next.self.peerId, nearBottom(messagesEl), historyQuery);
+    if (focusLine) {
+      const hit = messagesEl.querySelector<HTMLElement>(`[data-id="${cssEscape(focusLine)}"]`);
+      focusLine = "";
+      hit?.scrollIntoView({ block: "center" });
+    }
+    must<HTMLButtonElement>("#send").disabled = !linked;
+    must<HTMLButtonElement>("#send-file").disabled = !linked;
+    must<HTMLButtonElement>("#new-session").disabled = true;
+    const replyingSomewhere = lines.some((line) => line.pending);
+    must<HTMLButtonElement>("#stop").disabled = !replyingSomewhere;
+    paintBrief(sessionId, next.briefs[sessionId], lines, linked, turnName);
+    paintGroupBar(next, group);
+    draft.placeholder = "Nhắn trong nhóm. Gõ @ để gọi đúng agent…";
+    const topic = must<HTMLInputElement>("#brief-topic");
+    topic.placeholder = "Chủ đề chung. Gõ @tên nếu chỉ muốn vài agent nói";
+  }
+
+  function paintGroupBar(next: AppState, group: GroupRoom): void {
+    const bar = must<HTMLElement>("#group-bar");
+    bar.hidden = false;
+    const host = group.hostId === next.self.peerId;
+    const box = must<HTMLElement>("#group-members");
+    box.replaceChildren();
+    for (const member of group.members) {
+      const chip = document.createElement("span");
+      const online = member.peerId === next.self.peerId || next.peers.some((peer) => peer.peerId === member.peerId && peer.status === "connected");
+      chip.className = `member-chip${online ? " on" : ""}`;
+      chip.textContent = member.peerId === next.self.peerId ? `${member.name} (bạn)` : member.name;
+      if (host && member.peerId !== next.self.peerId) {
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.textContent = "×";
+        remove.dataset.tip = `Cho ${member.name} rời nhóm`;
+        remove.setAttribute("aria-label", `Cho ${member.name} rời nhóm`);
+        remove.addEventListener("click", () => {
+          void guard(() => window.lan.leaveGroup(group.id, member.peerId));
+        });
+        chip.append(remove);
+      }
+      box.append(chip);
+    }
+    const form = must<HTMLFormElement>("#group-invite");
+    const pick = must<HTMLSelectElement>("#group-pick");
+    form.hidden = !host || group.members.length >= GROUP_MAX;
+    if (document.activeElement === pick) return;
+    const choices = next.peers.filter((peer) => peer.status === "connected" && !group.members.some((member) => member.peerId === peer.peerId));
+    pick.replaceChildren();
+    if (!choices.length) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "Không có máy đã nối";
+      pick.append(option);
+      return;
+    }
+    for (const peer of choices) {
+      const option = document.createElement("option");
+      option.value = peer.peerId;
+      option.textContent = peer.name;
+      pick.append(option);
+    }
+  }
+
+  function paintBrief(sessionId: string, brief: ProjectBrief | undefined, lines: ChatLine[], connected: boolean, turnName = ""): void {
     const current: ProjectBrief = brief ?? { topic: "", goal: "", turnLimit: 6, turnsUsed: 0, running: false, files: [] };
     const topic = must<HTMLInputElement>("#brief-topic");
     const goal = must<HTMLTextAreaElement>("#brief-goal");
@@ -625,24 +866,43 @@ function boot(host: HTMLElement): void {
     summary.classList.toggle("empty", !title);
     summary.title = title;
     const fileNote = current.files.length ? ` · ${current.files.length} file` : "";
-    must<HTMLElement>("#brief-meter").textContent = `${briefMeter(current)}${fileNote}`;
+    const turnNote = turnName && current.running ? `Đến lượt ${turnName} · ` : "";
+    must<HTMLElement>("#brief-meter").textContent = `${turnNote}${briefMeter(current)}${fileNote}`;
     paintBriefFiles(sessionId, current.files, current.running);
     const result = latestResult(lines);
-    const box = must<HTMLButtonElement>("#brief-result");
+    const box = must<HTMLElement>("#brief-result");
     const resultTextNode = box.querySelector("span");
+    const resultPop = must<HTMLElement>("#result-pop");
     if (!result) {
       box.hidden = true;
       if (resultTextNode) resultTextNode.textContent = "";
-      box.classList.remove("open");
       delete box.dataset.full;
+      resultPop.hidden = true;
     } else {
       box.hidden = false;
       if (box.dataset.full !== result) {
         box.dataset.full = result;
         if (resultTextNode) resultTextNode.textContent = result;
-        box.classList.remove("open");
+        if (!resultPop.hidden) paintResultBody(result);
       }
     }
+  }
+
+  function openResult(): void {
+    const full = must<HTMLElement>("#brief-result").dataset.full ?? "";
+    if (!full) return;
+    const title = must<HTMLElement>("#brief-summary").textContent?.trim() ?? "";
+    must<HTMLElement>("#result-title").textContent = title && title !== "Chưa đặt chủ đề" ? title : "Kết quả";
+    paintResultBody(full);
+    must<HTMLElement>("#result-pop").hidden = false;
+  }
+
+  function closeResult(): void {
+    must<HTMLElement>("#result-pop").hidden = true;
+  }
+
+  function paintResultBody(text: string): void {
+    must<HTMLElement>("#result-body").innerHTML = renderMarkdownHtml(text);
   }
 
   function setIfIdle(el: HTMLInputElement | HTMLTextAreaElement, value: string): void {
@@ -797,6 +1057,7 @@ function boot(host: HTMLElement): void {
     draft.value = "";
     attached = "";
     paintAttach();
+    must<HTMLElement>("#mention-pop").hidden = true;
     noteTyping(false);
     await guard(() => window.lan.send(peerId, text, file || undefined));
   }
@@ -822,7 +1083,8 @@ function boot(host: HTMLElement): void {
       .map((session) => {
         const lines = next.transcripts[session.id] ?? [];
         const peer = next.peers.find((item) => item.peerId === session.peerId);
-        const blob = `${session.title}\n${peer?.name ?? ""}\n${lines.map((line) => line.text).join("\n")}`.toLowerCase();
+        const group = next.groups.find((item) => groupKey(item.id) === session.peerId);
+        const blob = `${session.title}\n${group?.title ?? peer?.name ?? ""}\n${lines.map((line) => line.text).join("\n")}`.toLowerCase();
         const matched = query ? lines.find((line) => line.text.toLowerCase().includes(query)) : undefined;
         const last = [...lines].reverse().find((line) => line.text.trim());
         return { session, lines, peer, matched, last, shown: !query || blob.includes(query) };
@@ -882,9 +1144,14 @@ function boot(host: HTMLElement): void {
   });
   must<HTMLInputElement>("#session-title").addEventListener("change", () => {
     const peerId = active;
+    const title = must<HTMLInputElement>("#session-title").value;
+    const groupId = peerId ? parseGroupKey(peerId) : null;
+    if (groupId) {
+      void guard(() => window.lan.renameGroup(groupId, title));
+      return;
+    }
     const sessionId = peerId ? state?.openSession[peerId] : "";
     if (!peerId || !sessionId) return;
-    const title = must<HTMLInputElement>("#session-title").value;
     void guard(() => window.lan.renameSession(peerId, sessionId, title));
   });
   must<HTMLElement>("#history-list").addEventListener("click", (event) => {
@@ -921,6 +1188,67 @@ function boot(host: HTMLElement): void {
       paint(next);
     });
   });
+
+  function mentionChoices(): MentionRef[] {
+    if (!state || !active) return [];
+    const group = state.groups.find((item) => groupKey(item.id) === active);
+    if (group) return group.members;
+    const peer = state.peers.find((item) => item.peerId === active);
+    const people: MentionRef[] = [];
+    if (state.self.name) people.push({ peerId: state.self.peerId, name: state.self.name });
+    if (peer) people.push({ peerId: peer.peerId, name: peer.name });
+    return people;
+  }
+
+  function currentMention(): { start: number; query: string } | null {
+    const caret = draft.selectionStart ?? draft.value.length;
+    const before = draft.value.slice(0, caret);
+    const at = before.lastIndexOf("@");
+    if (at < 0) return null;
+    if (at > 0 && !/\s/.test(before[at - 1] || "")) return null;
+    const query = before.slice(at + 1);
+    if (query.includes("\n") || query.length > 40) return null;
+    return { start: at, query };
+  }
+
+  function paintMentions(): void {
+    const pop = must<HTMLElement>("#mention-pop");
+    const token = currentMention();
+    const matches = token
+      ? mentionChoices().filter((person) => person.name.toLowerCase().startsWith(token.query.toLowerCase()))
+      : [];
+    if (!token || !matches.length) {
+      pop.hidden = true;
+      pop.replaceChildren();
+      return;
+    }
+    if (mentionIndex >= matches.length) mentionIndex = 0;
+    pop.hidden = false;
+    pop.replaceChildren();
+    matches.forEach((person, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = index === mentionIndex ? "active" : "";
+      button.textContent = `@${person.name}`;
+      button.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        insertMention(person.name);
+      });
+      pop.append(button);
+    });
+  }
+
+  function insertMention(name: string): void {
+    const token = currentMention();
+    if (!token) return;
+    const caret = draft.selectionStart ?? draft.value.length;
+    draft.value = `${draft.value.slice(0, token.start)}@${name} ${draft.value.slice(caret)}`;
+    const pos = token.start + name.length + 2;
+    draft.focus();
+    draft.setSelectionRange(pos, pos);
+    must<HTMLElement>("#mention-pop").hidden = true;
+    noteTyping(true);
+  }
 
   function flash(text: string): void {
     const toast = must<HTMLDivElement>("#toast");
@@ -970,9 +1298,13 @@ function paintMessages(host: HTMLElement, lines: ChatLine[], selfId: string, sti
           body.innerHTML = agentHtml(text);
           changed = true;
         }
-      } else if (body && body.textContent !== text) {
-        body.textContent = text;
-        changed = true;
+      } else if (body) {
+        const marked = plainHtml(line);
+        if (body.dataset.source !== marked.key) {
+          body.dataset.source = marked.key;
+          body.innerHTML = marked.html;
+          changed = true;
+        }
       }
       body?.classList.toggle("pending", line.pending);
       article.classList.toggle("hit", Boolean(query.trim()) && line.text.toLowerCase().includes(query.trim().toLowerCase()));
@@ -1016,7 +1348,9 @@ function renderLine(line: ChatLine, selfId: string): HTMLElement {
     article.append(box);
   } else {
     const body = document.createElement("p");
-    body.textContent = line.text || (line.pending ? "…" : "");
+    const marked = plainHtml(line);
+    body.dataset.source = marked.key;
+    body.innerHTML = marked.html;
     if (line.pending) body.classList.add("pending");
     article.append(body);
   }
@@ -1029,6 +1363,36 @@ function renderLine(line: ChatLine, selfId: string): HTMLElement {
   const attached = attachment(line);
   if (attached) article.append(renderPreview(attached));
   return article;
+}
+
+function plainHtml(line: ChatLine): { key: string; html: string } {
+  const text = line.text || (line.pending ? "…" : "");
+  const marks = (line.mentions ?? []).map((item) => item.peerId).join(",");
+  const html = line.kind === "system" || text === "…" ? escapeHtml(text) : mentionHtml(text, line.mentions);
+  return { key: `${text}\n${marks}`, html };
+}
+
+function mentionHtml(text: string, mentions: MentionRef[] | undefined): string {
+  const hits = mentionRanges(text, mentions ?? []);
+  if (!hits.length) return escapeHtml(text);
+  let html = "";
+  let cursor = 0;
+  for (const hit of hits) {
+    html += escapeHtml(text.slice(cursor, hit.start));
+    html += `<span class="at">${escapeHtml(text.slice(hit.start, hit.end))}</span>`;
+    cursor = hit.end;
+  }
+  return html + escapeHtml(text.slice(cursor));
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (char) => {
+    if (char === "&") return "&amp;";
+    if (char === "<") return "&lt;";
+    if (char === ">") return "&gt;";
+    if (char === '"') return "&quot;";
+    return "&#39;";
+  });
 }
 
 function agentHtml(text: string): string {
@@ -1224,6 +1588,7 @@ function iconSprite(): string {
     item("copy", `<rect x="8" y="8" width="10" height="11.5" rx="1.5"/><path d="M6 16H5.5A1.5 1.5 0 0 1 4 14.5v-9A1.5 1.5 0 0 1 5.5 4H14"/>`),
     item("hash", `<path d="M9 4.5L7.5 19.5M16.5 4.5L15 19.5M5 9h14M4.5 15h14"/>`),
     item("terminal", `<path d="M5 8l4 4-4 4M12 16h7"/>`),
+    item("expand", `<path d="M9 4H4v5M15 4h5v5M20 15v5h-5M4 15v5h5"/>`),
   ].join("")}</svg>`;
 }
 

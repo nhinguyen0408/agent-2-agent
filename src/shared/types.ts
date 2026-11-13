@@ -1,9 +1,11 @@
 import type { ProjectBrief } from "./brief";
 import type { DiscussFile } from "./discuss";
+import type { GroupRoom, MentionRef, TurnTicket } from "./group";
 import type { FileRef, WorkFile } from "./preview";
 
 export type { BriefFile, ProjectBrief } from "./brief";
 export type { DiscussFile, DiscussKind } from "./discuss";
+export type { GroupMember, GroupRoom, MentionRef, TurnTicket } from "./group";
 export type { FileRef, WorkFile } from "./preview";
 
 export const DEFAULT_PORT = 3940;
@@ -41,12 +43,19 @@ export const IPC = {
   removeBriefFile: "lan:remove-brief-file",
   startBrief: "lan:start-brief",
   extendBrief: "lan:extend-brief",
+  createGroup: "lan:create-group",
+  inviteGroup: "lan:invite-group",
+  leaveGroup: "lan:leave-group",
+  renameGroup: "lan:rename-group",
 } as const;
 
 export type ActivityPatch = {
   typing?: boolean;
   replying?: boolean;
   sessionId?: string;
+  fromPeerId?: string;
+  fromName?: string;
+  groupId?: string;
 };
 
 export type PeerActivity = {
@@ -119,6 +128,7 @@ export type ChatLine = {
   createdAt: number;
   file?: FileRef;
   attachment?: DiscussFile;
+  mentions?: MentionRef[];
 };
 
 export type AppState = {
@@ -139,6 +149,7 @@ export type AppState = {
   unreadSessions: string[];
   transcripts: Record<string, ChatLine[]>;
   briefs: Record<string, ProjectBrief>;
+  groups: GroupRoom[];
   logs: string[];
 };
 
@@ -154,6 +165,28 @@ export type WireChat = {
   sessionTitle?: string;
   brief?: ProjectBrief;
   attachment?: { name: string; kind: DiscussFile["kind"]; excerpt: string };
+  groupId?: string;
+  mentions?: MentionRef[];
+  turn?: TurnTicket | null;
+  cue?: boolean;
+  queue?: "topic" | "ping";
+};
+
+export type WireGroup = {
+  id: string;
+  title: string;
+  hostId: string;
+  members: GroupRoom["members"];
+  sessionId: string;
+  sessionTitle?: string;
+  history?: WireChat[];
+};
+
+export type WireGroupTurn = {
+  groupId: string;
+  sessionId?: string;
+  turn: TurnTicket | null;
+  go?: boolean;
 };
 
 export type WireBrief = {
@@ -174,6 +207,7 @@ export type WireDelta = {
   text: string;
   createdAt: number;
   sessionId?: string;
+  groupId?: string;
 };
 
 export type HelloPayload = {
@@ -206,6 +240,10 @@ export type LanApi = {
   removeBriefFile: (peerId: string, name: string) => Promise<AppState>;
   startBrief: (peerId: string) => Promise<AppState>;
   extendBrief: (peerId: string, extra?: number) => Promise<AppState>;
+  createGroup: () => Promise<AppState>;
+  inviteGroup: (groupId: string, peerId: string) => Promise<AppState>;
+  leaveGroup: (groupId: string, peerId?: string) => Promise<AppState>;
+  renameGroup: (groupId: string, title: string) => Promise<AppState>;
   stop: (peerId: string) => Promise<void>;
   pickCwd: () => Promise<string | null>;
   rescanClis: () => Promise<AppState>;
