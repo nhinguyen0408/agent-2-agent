@@ -122,13 +122,15 @@ function boot(host: HTMLElement): void {
               <option value="echo">Echo — thử kênh, không cần đăng nhập</option>
               <option value="claude-cli">Claude terminal — lệnh claude đã login</option>
               <option value="cursor-cli">Cursor terminal — lệnh agent đã login</option>
+              <option value="codex-cli">Codex terminal — lệnh codex đã login</option>
             </select>
           </label>
           <label>Lệnh Claude<input id="set-claude-command" spellcheck="false" /></label>
           <label>Lệnh Cursor<input id="set-cursor-command" spellcheck="false" /></label>
+          <label>Lệnh Codex<input id="set-codex-command" spellcheck="false" /></label>
           <label class="check"><input id="set-auto" type="checkbox" /> Tự chấp nhận máy trong LAN</label>
           <div id="tools" class="tools"></div>
-          <p class="hint">Không dùng API key. File đi qua app, không cần share Windows. Lệnh cursor của Cursor IDE không được tính là Cursor CLI.</p>
+          <p class="hint">Không dùng API key trong app. File đi qua app, không cần share Windows. Claude, Cursor và Codex dùng bản CLI đã đăng nhập trên máy này. Lệnh cursor của Cursor IDE không được tính là Cursor CLI.</p>
           <div class="save-row">
             ${iconButton("save", "check", "Lưu cài đặt", "", "", "button", "icon-btn primary")}
             ${iconButton("rescan", "refresh", "Kiểm tra lại CLI")}
@@ -1158,6 +1160,7 @@ function boot(host: HTMLElement): void {
     must<HTMLSelectElement>("#set-provider").value = settings.provider;
     must<HTMLInputElement>("#set-claude-command").value = settings.claudeCommand;
     must<HTMLInputElement>("#set-cursor-command").value = settings.cursorCommand;
+    must<HTMLInputElement>("#set-codex-command").value = settings.codexCommand;
     must<HTMLInputElement>("#set-cwd").value = settings.workDir;
     must<HTMLInputElement>("#set-auto").checked = settings.autoAccept;
     settingsReady = true;
@@ -1168,10 +1171,11 @@ function boot(host: HTMLElement): void {
     const provider = must<HTMLSelectElement>("#set-provider").value;
     return {
       name: must<HTMLInputElement>("#set-name").value,
-      provider: provider === "claude-cli" || provider === "cursor-cli" ? provider : "echo",
+      provider: provider === "claude-cli" || provider === "cursor-cli" || provider === "codex-cli" ? provider : "echo",
       workDir: must<HTMLInputElement>("#set-cwd").value,
       claudeCommand: must<HTMLInputElement>("#set-claude-command").value,
       cursorCommand: must<HTMLInputElement>("#set-cursor-command").value,
+      codexCommand: must<HTMLInputElement>("#set-codex-command").value,
       autoAccept: must<HTMLInputElement>("#set-auto").checked,
     };
   }
@@ -1775,9 +1779,9 @@ function paintTools(report: CliReport | undefined): void {
   const box = document.querySelector<HTMLElement>("#tools");
   if (!box) return;
   box.replaceChildren();
-  const tools = report ? [report.claude, report.cursor] : [];
+  const tools = report ? [report.claude, report.cursor, report.codex] : [];
   if (!tools.length) {
-    box.textContent = "Đang kiểm tra Claude CLI và Cursor CLI…";
+    box.textContent = "Đang kiểm tra Claude CLI, Cursor CLI và Codex…";
     return;
   }
   for (const tool of tools) {
@@ -1806,6 +1810,7 @@ function installedNote(report: CliReport | undefined): string {
   const names: string[] = [];
   if (report.claude.installed) names.push("Claude CLI");
   if (report.cursor.installed) names.push("Cursor CLI");
+  if (report.codex.installed) names.push("Codex");
   return names.length ? `có ${names.join(", ")}` : "";
 }
 
@@ -1824,7 +1829,7 @@ function activitySentence(name: string, activity: PeerActivity | undefined, sess
 function peerCliNote(clis: string | undefined): string {
   const names = (clis ?? "")
     .split(",")
-    .map((id) => (id === "claude" ? "Claude CLI" : id === "cursor" ? "Cursor CLI" : ""))
+    .map((id) => (id === "claude" ? "Claude CLI" : id === "cursor" ? "Cursor CLI" : id === "codex" ? "Codex" : ""))
     .filter(Boolean);
   return names.length ? `có ${names.join(", ")}` : "";
 }

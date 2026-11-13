@@ -110,6 +110,7 @@ export class AppCore {
   private localClis: CliReport = {
     claude: { id: "claude", label: "Claude CLI", installed: false, path: null, loggedIn: null },
     cursor: { id: "cursor", label: "Cursor CLI", installed: false, path: null, loggedIn: null },
+    codex: { id: "codex", label: "Codex CLI", installed: false, path: null, loggedIn: null },
   };
   private cliSignature = "";
   private readonly remoteClis = new Map<string, string>();
@@ -317,9 +318,10 @@ export class AppCore {
       prev.provider !== next.provider ||
       prev.workDir !== next.workDir ||
       prev.claudeCommand !== next.claudeCommand ||
-      prev.cursorCommand !== next.cursorCommand;
+      prev.cursorCommand !== next.cursorCommand ||
+      prev.codexCommand !== next.codexCommand;
     if (runtimeChanged) void this.agents.dispose();
-    if (prev.claudeCommand !== next.claudeCommand || prev.cursorCommand !== next.cursorCommand) {
+    if (prev.claudeCommand !== next.claudeCommand || prev.cursorCommand !== next.cursorCommand || prev.codexCommand !== next.codexCommand) {
       this.noteClis(detectLocalClis(next), false);
     }
     this.scheduleSave();
@@ -3111,6 +3113,9 @@ export class AppCore {
       report.cursor.installed,
       report.cursor.path ?? "",
       report.cursor.loggedIn,
+      report.codex.installed,
+      report.codex.path ?? "",
+      report.codex.loggedIn,
     ].join("|");
     const changed = signature !== this.cliSignature;
     this.cliSignature = signature;
@@ -3150,7 +3155,8 @@ function basePort(profile: string): number {
 function cliLine(report: CliReport): string {
   const claude = toolLine(report.claude);
   const cursor = toolLine(report.cursor);
-  return `CLI trên máy này — ${claude} · ${cursor}`;
+  const codex = toolLine(report.codex);
+  return `CLI trên máy này — ${claude} · ${cursor} · ${codex}`;
 }
 
 function toolLine(tool: CliReport["claude"]): string {

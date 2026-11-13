@@ -6,10 +6,11 @@ import type { CliReport, Settings } from "../shared/types";
 
 const TOKEN_MARK = /oauth|access_token|accessToken|refresh_token|refreshToken|claudeAiOauth/i;
 
-export function detectLocalClis(settings: Pick<Settings, "claudeCommand" | "cursorCommand">): CliReport {
+export function detectLocalClis(settings: Pick<Settings, "claudeCommand" | "cursorCommand" | "codexCommand">): CliReport {
   return {
     claude: detectOne("claude", "Claude CLI", uniqueNames(settings.claudeCommand, "claude"), claudeLoggedIn),
     cursor: detectOne("cursor", "Cursor CLI", uniqueNames(settings.cursorCommand, "agent", "cursor-agent"), cursorLoggedIn),
+    codex: detectOne("codex", "Codex CLI", uniqueNames(settings.codexCommand, "codex"), codexLoggedIn),
   };
 }
 
@@ -17,6 +18,7 @@ export function installedCliList(report: CliReport): string {
   const ids: string[] = [];
   if (report.claude.installed) ids.push("claude");
   if (report.cursor.installed) ids.push("cursor");
+  if (report.codex.installed) ids.push("codex");
   return ids.join(",");
 }
 
@@ -25,7 +27,7 @@ export function parseCliList(value: unknown): string {
   const ids = new Set<string>();
   for (const part of value.split(",")) {
     const id = part.trim().toLowerCase();
-    if (id === "claude" || id === "cursor") ids.add(id);
+    if (id === "claude" || id === "cursor" || id === "codex") ids.add(id);
   }
   return [...ids].join(",");
 }
@@ -50,6 +52,9 @@ export function findExecutable(name: string): string | null {
     path.join(local, "cursor-agent", `${trimmed}.cmd`),
     path.join(roaming, "npm", `${trimmed}.cmd`),
     path.join(roaming, "npm", `${trimmed}.exe`),
+    path.join(home, ".codex", `${trimmed}.exe`),
+    path.join(local, "OpenAI", "Codex", `${trimmed}.exe`),
+    path.join(local, "Programs", "Codex", `${trimmed}.exe`),
   ];
   for (const candidate of candidates) {
     if (candidate && fs.existsSync(candidate) && !isCursorIde(candidate)) return candidate;
@@ -65,7 +70,7 @@ function isCursorIde(file: string): boolean {
 }
 
 function detectOne(
-  id: "claude" | "cursor",
+  id: "claude" | "cursor" | "codex",
   label: string,
   names: string[],
   login: () => boolean | null,
@@ -106,6 +111,13 @@ function claudeLoggedIn(): boolean | null {
     if (TOKEN_MARK.test(text)) return true;
   }
   return sawFile ? false : null;
+}
+
+function codexLoggedIn(): boolean | null {
+  const text = readHead(path.join(os.homedir(), ".codex", "auth.json"));
+  if (text && (TOKEN_MARK.test(text) || /"tokens"\s*:/.test(text))) return true;
+  if (process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY) return true;
+  return text ? false : null;
 }
 
 function cursorLoggedIn(): boolean | null {

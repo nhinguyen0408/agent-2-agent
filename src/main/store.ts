@@ -36,6 +36,7 @@ export function defaultSettings(profile: string): Settings {
     workDir: os.homedir(),
     claudeCommand: "claude",
     cursorCommand: "agent",
+    codexCommand: "codex",
     autoAccept: false,
   };
 }
@@ -109,6 +110,7 @@ export function sanitizeSettings(input: Partial<Settings> & { cursorCwd?: string
     workDir,
     claudeCommand: (input.claudeCommand || "claude").trim() || "claude",
     cursorCommand: (input.cursorCommand || "agent").trim() || "agent",
+    codexCommand: (input.codexCommand || "codex").trim() || "codex",
     autoAccept: Boolean(input.autoAccept),
   };
 }

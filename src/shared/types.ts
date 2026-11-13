@@ -70,7 +70,7 @@ export type PeerActivity = {
   replyingSessionId: string;
 };
 
-export type ProviderId = "echo" | "claude-cli" | "cursor-cli";
+export type ProviderId = "echo" | "claude-cli" | "cursor-cli" | "codex-cli";
 
 export type Settings = {
   name: string;
@@ -78,6 +78,7 @@ export type Settings = {
   workDir: string;
   claudeCommand: string;
   cursorCommand: string;
+  codexCommand: string;
   autoAccept: boolean;
 };
 
@@ -89,7 +90,7 @@ export type LinkStatus =
   | "connected";
 
 export type CliToolState = {
-  id: "claude" | "cursor";
+  id: "claude" | "cursor" | "codex";
   label: string;
   installed: boolean;
   path: string | null;
@@ -99,6 +100,7 @@ export type CliToolState = {
 export type CliReport = {
   claude: CliToolState;
   cursor: CliToolState;
+  codex: CliToolState;
 };
 
 export type PeerView = {
@@ -282,16 +284,18 @@ export type LanApi = {
 export function normalizeProvider(value: string): ProviderId {
   if (value === "claude" || value === "claude-cli") return "claude-cli";
   if (value === "cursor" || value === "cursor-cli") return "cursor-cli";
+  if (value === "codex" || value === "codex-cli") return "codex-cli";
   return "echo";
 }
 
 export function isProviderId(value: string): value is ProviderId {
-  return value === "echo" || value === "claude-cli" || value === "cursor-cli";
+  return value === "echo" || value === "claude-cli" || value === "cursor-cli" || value === "codex-cli";
 }
 
 export function providerLabel(provider: string): string {
   if (provider === "echo") return "Echo";
   if (provider === "claude" || provider === "claude-cli") return "Claude terminal";
   if (provider === "cursor" || provider === "cursor-cli") return "Cursor terminal";
+  if (provider === "codex" || provider === "codex-cli") return "Codex terminal";
   return provider || "Agent";
 }

@@ -31,6 +31,7 @@ export class AgentHost {
     const settings = this.settings();
     if (settings.provider === "echo") return echoReply(input);
     if (settings.provider === "claude-cli") return this.claudeCli(input, settings);
+    if (settings.provider === "codex-cli") return this.codexCli(input, settings);
     return this.cursorCli(input, settings);
   }
 
@@ -70,6 +71,21 @@ export class AgentHost {
         ["-p", "--trust", "--force", "--output-format", "stream-json", "--stream-partial-output", prompt],
         ["-p", "--trust", "--force", prompt],
         ["-p", "--trust", prompt],
+      ],
+    });
+  }
+
+  private codexCli(input: ReplyInput, settings: Settings): Promise<string> {
+    const prompt = oneLine(conversationPrompt(input), 4500);
+    const cwd = settings.workDir;
+    return this.runCli(input, {
+      command: settings.codexCommand || "codex",
+      cwd,
+      missing: "Không tìm thấy lệnh codex. Cài Codex CLI, rồi chạy `codex login` một lần trên máy này.",
+      attempts: [
+        ["exec", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "--cd", cwd, prompt],
+        ["exec", "--json", "--skip-git-repo-check", "--sandbox", "danger-full-access", "--cd", cwd, prompt],
+        ["exec", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", prompt],
       ],
     });
   }
@@ -115,6 +131,18 @@ export class AgentHost {
       child.stdout?.on("data", (chunk: string) => {
         stdout += chunk;
         lineBuf = consumeLines(lineBuf, chunk, (event) => {
+          const codex = codexAgentText(event);
+          if (codex) {
+            finalText = codex;
+            if (codex.startsWith(streamed)) {
+              const extra = codex.slice(streamed.length);
+              if (extra) {
+                streamed = codex;
+                input.onDelta(extra);
+              }
+            }
+            return;
+          }
           const piece = streamPiece(event);
           if (piece) {
             streamed += piece;
@@ -161,8 +189,8 @@ export class AgentHost {
   }
 }
 
-function oneLine(value: string): string {
-  return clip(value.replace(/\s+/g, " ").trim(), 4000);
+function oneLine(value: string, max = 4000): string {
+  return clip(value.replace(/\s+/g, " ").trim(), max);
 }
 
 function clip(value: string, max: number): string {
@@ -320,6 +348,7 @@ function cliEnv(): NodeJS.ProcessEnv {
     path.join(os.homedir(), ".claude", "local"),
     path.join(process.env.LOCALAPPDATA || "", "cursor-agent"),
     path.join(process.env.APPDATA || "", "npm"),
+    path.join(os.homedir(), ".codex"),
   ].filter((dir) => dir && fs.existsSync(dir));
   const current = env.PATH || env.Path || "";
   const next = [...prefix, current].filter(Boolean).join(path.delimiter);
@@ -370,6 +399,16 @@ function resultText(event: unknown): string {
   if (!event || typeof event !== "object") return "";
   const record = event as { type?: string; result?: unknown };
   if (record.type === "result" && typeof record.result === "string") return record.result;
+  return "";
+}
+
+function codexAgentText(event: unknown): string {
+  if (!event || typeof event !== "object") return "";
+  const record = event as { type?: string; item?: { type?: string; text?: string; content?: string } };
+  if (record.type !== "item.completed" && record.type !== "item.updated") return "";
+  if (record.item?.type !== "agent_message") return "";
+  if (typeof record.item.text === "string" && record.item.text) return record.item.text;
+  if (typeof record.item.content === "string") return record.item.content;
   return "";
 }
 
