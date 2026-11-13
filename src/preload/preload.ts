@@ -1,8 +1,9 @@
 import { contextBridge, ipcRenderer } from "electron";
-import { IPC, type AppState, type FileRef, type LanApi, type Settings } from "../shared/types";
+import { IPC, type AppState, type ChatNotice, type FileRef, type LanApi, type Settings } from "../shared/types";
 
 const api: LanApi = {
   getState: () => ipcRenderer.invoke(IPC.getState) as Promise<AppState>,
+  watch: (peerId, sessionId) => ipcRenderer.invoke(IPC.watch, peerId, sessionId) as Promise<void>,
   saveSettings: (settings: Settings) => ipcRenderer.invoke(IPC.saveSettings, settings) as Promise<AppState>,
   connect: (peerId: string) => ipcRenderer.invoke(IPC.connect, peerId) as Promise<void>,
   connectAddress: (host: string, port: number) => ipcRenderer.invoke(IPC.connectAddress, host, port) as Promise<void>,
@@ -18,12 +19,15 @@ const api: LanApi = {
   pickBriefFiles: () => ipcRenderer.invoke(IPC.pickBriefFiles) as Promise<string[]>,
   addBriefFiles: (peerId, paths) => ipcRenderer.invoke(IPC.addBriefFiles, peerId, paths) as Promise<AppState>,
   removeBriefFile: (peerId, name) => ipcRenderer.invoke(IPC.removeBriefFile, peerId, name) as Promise<AppState>,
+  openBriefFile: (sessionId, name) => ipcRenderer.invoke(IPC.openBriefFile, sessionId, name) as Promise<FileRef | null>,
   startBrief: (peerId) => ipcRenderer.invoke(IPC.startBrief, peerId) as Promise<AppState>,
   extendBrief: (peerId, extra) => ipcRenderer.invoke(IPC.extendBrief, peerId, extra) as Promise<AppState>,
   createGroup: () => ipcRenderer.invoke(IPC.createGroup) as Promise<AppState>,
   inviteGroup: (groupId, peerId) => ipcRenderer.invoke(IPC.inviteGroup, groupId, peerId) as Promise<AppState>,
   leaveGroup: (groupId, peerId) => ipcRenderer.invoke(IPC.leaveGroup, groupId, peerId) as Promise<AppState>,
   renameGroup: (groupId, title) => ipcRenderer.invoke(IPC.renameGroup, groupId, title) as Promise<AppState>,
+  setNickname: (peerId, nickname) => ipcRenderer.invoke(IPC.setNickname, peerId, nickname) as Promise<AppState>,
+  deleteSession: (peerId, sessionId) => ipcRenderer.invoke(IPC.deleteSession, peerId, sessionId) as Promise<AppState>,
   stop: (peerId: string) => ipcRenderer.invoke(IPC.stop, peerId) as Promise<void>,
   pickCwd: () => ipcRenderer.invoke(IPC.pickCwd) as Promise<string | null>,
   rescanClis: () => ipcRenderer.invoke(IPC.rescanClis) as Promise<AppState>,
@@ -40,6 +44,11 @@ const api: LanApi = {
     const wrapped = (_event: unknown, state: AppState) => listener(state);
     ipcRenderer.on(IPC.state, wrapped);
     return () => ipcRenderer.removeListener(IPC.state, wrapped);
+  },
+  onNotice: (listener) => {
+    const wrapped = (_event: unknown, notice: ChatNotice) => listener(notice);
+    ipcRenderer.on(IPC.notice, wrapped);
+    return () => ipcRenderer.removeListener(IPC.notice, wrapped);
   },
   onPreviewFile: (listener) => {
     const wrapped = (_event: unknown, file: FileRef) => listener(file);

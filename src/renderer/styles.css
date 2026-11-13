@@ -142,6 +142,36 @@ body[data-collapsed="1"] .panel { display: none; }
   box-shadow: 0 0 0 2px var(--rail);
 }
 
+.badge.count {
+  width: auto;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  top: 2px;
+  right: 2px;
+  color: white;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
+
+.unread-count {
+  flex: none;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 99px;
+  background: #ff3b30;
+  color: white;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+}
+
+.peer.active .unread-count { background: white; color: var(--accent); }
+
 .panel {
   min-width: 0;
   min-height: 0;
@@ -186,6 +216,12 @@ body[data-collapsed="1"] .panel { display: none; }
 }
 
 .peers { display: flex; flex-direction: column; gap: 2px; }
+
+.peer-row { display: flex; align-items: center; gap: 2px; }
+
+.peer-row .peer { width: auto; flex: 1; min-width: 0; }
+
+.peer-row .nick-btn { width: 28px; height: 28px; color: var(--muted); }
 
 .peer {
   display: flex;
@@ -311,7 +347,7 @@ label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 12px; co
 
 .history-row { display: flex; gap: 4px; align-items: center; }
 
-.history-rename { align-self: center; }
+.history-rename, .history-delete { align-self: center; }
 
 .search {
   display: grid;
@@ -367,12 +403,28 @@ label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 12px; co
 .chat-head {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   gap: 12px;
   border-bottom: 1px solid var(--line);
 }
 
-.chat-id { min-width: 0; }
+.chat-id { min-width: 0; flex: 1; }
+
+.head-actions { display: flex; align-items: center; gap: 2px; margin-top: 2px; }
+
+.chat-head.group-mode h2 { font-size: 18px; letter-spacing: -0.02em; }
+
+.chat-head.group-mode #session-title {
+  width: 100%;
+  max-width: none;
+  height: 34px;
+  margin: 0;
+  padding: 0 4px;
+  font-size: 18px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
 
 .chat-head h2 {
   margin: 0;
@@ -395,9 +447,10 @@ label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 12px; co
 #session-title:hover, #session-title:focus { background: var(--bg); border-color: rgba(0, 0, 0, 0.06); }
 
 .chat-head p, #http-snippet {
-  margin: 2px 0 0;
+  margin: 4px 0 0;
   color: var(--muted);
   font-size: 12px;
+  line-height: 1.4;
 }
 
 .banner {
@@ -721,6 +774,57 @@ body.preview-app .preview-fill > audio { width: min(100%, 36rem); margin: auto; 
   white-space: nowrap;
 }
 
+.brief-tools { display: flex; gap: 4px; margin-left: auto; }
+
+.brief-tools button {
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 8px;
+  background: var(--bg);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.brief-tools button:hover { background: #ececf1; }
+
+.brief.is-hidden .brief-dock,
+.brief.is-hidden .brief-result { display: none; }
+
+.brief-dock {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 2px 2px 4px;
+}
+
+.brief-preview {
+  display: flex;
+  flex: 0 0 124px;
+  flex-direction: column;
+  gap: 4px;
+  width: 124px;
+  padding: 4px;
+  border-radius: 10px;
+  background: var(--bg);
+  text-align: left;
+}
+
+.brief-preview img {
+  width: 100%;
+  height: 78px;
+  object-fit: cover;
+  border-radius: 7px;
+  background: #1d1d1f;
+}
+
+.brief-preview span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
 .brief-files { display: flex; flex-wrap: wrap; gap: 6px; }
 
 .brief-file {
@@ -734,9 +838,14 @@ body.preview-app .preview-fill > audio { width: min(100%, 36rem); margin: auto; 
   font-size: 12px;
 }
 
-.brief-file span {
+.brief-file > button:first-child {
+  flex: 1;
+  min-width: 0;
+  height: auto;
+  padding: 4px 2px;
   overflow: hidden;
   text-overflow: ellipsis;
+  text-align: left;
   white-space: nowrap;
 }
 
@@ -903,14 +1012,14 @@ body.preview-app .preview-fill > audio { width: min(100%, 36rem); margin: auto; 
   font-size: 0.92em;
 }
 
-.composer { position: relative; border-top: 1px solid var(--line); }
+.composer { position: relative; z-index: 8; border-top: 1px solid var(--line); }
 
 .mention-pop {
   position: absolute;
   left: 14px;
   right: 14px;
   bottom: calc(100% - 4px);
-  z-index: 4;
+  z-index: 2;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -924,11 +1033,17 @@ body.preview-app .preview-fill > audio { width: min(100%, 36rem); margin: auto; 
 }
 
 .mention-pop button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   width: 100%;
   text-align: left;
   padding: 6px 8px;
   border-radius: 8px;
 }
+
+.mention-pop small { color: var(--muted); font-size: 11px; }
 
 .mention-pop button.active,
 .mention-pop button:hover { background: rgba(0, 122, 255, 0.1); }
@@ -943,33 +1058,45 @@ body.preview-app .preview-fill > audio { width: min(100%, 36rem); margin: auto; 
 
 .group-side-head strong { flex: 1; }
 
-.group-side-head span, .member-chip { color: var(--muted); font-size: 11px; }
+.group-side-head span { color: var(--muted); font-size: 11px; }
 
 .groups { display: flex; flex-direction: column; gap: 4px; }
 
 .group-bar {
-  flex-wrap: wrap;
-  padding: 0 14px 8px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding: 2px 14px 12px;
 }
 
-.group-members { display: flex; flex-wrap: wrap; gap: 4px; flex: 1; }
+.group-members { display: flex; flex-wrap: wrap; gap: 6px; }
 
 .member-chip {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
+  gap: 2px;
+  min-height: 30px;
+  padding: 0 4px 0 10px;
   border-radius: 999px;
-  background: #ececf1;
+  background: #f2f2f4;
+  color: var(--text);
+  font-size: 12.5px;
 }
 
-.member-chip.on { color: var(--ok); background: rgba(52, 199, 89, 0.12); }
+.member-chip.on { background: rgba(52, 199, 89, 0.14); }
 
-.member-chip button {
-  width: 16px;
-  height: 16px;
-  line-height: 16px;
-  color: var(--muted);
+.member-chip.me { background: rgba(0, 122, 255, 0.1); }
+
+.member-chip .icon-btn { width: 24px; height: 24px; color: var(--muted); }
+
+.nick-edit {
+  width: 8.5rem;
+  height: 26px;
+  margin: 2px 0;
+  padding: 0 8px;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 8px;
+  background: white;
 }
 
 .group-invite select { width: 9.5rem; padding: 0.25rem 0.4rem; }

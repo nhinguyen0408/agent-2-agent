@@ -14,6 +14,7 @@ export type BriefFile = {
   name: string;
   kind: BriefKind;
   excerpt: string;
+  path?: string;
 };
 
 export type ProjectBrief = {

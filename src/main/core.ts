@@ -20,6 +20,9 @@ import {
   groupKey,
   injectSpeakers,
   mentionTargets,
+  rewriteMentionLabels,
+  withAliases,
+  withSelfAlias,
   nextTicket,
   parseGroupKey,
   sanitizeMembers,
@@ -28,6 +31,7 @@ import {
   ticketFrom,
   type GroupMember,
   type GroupRoom,
+  type MentionRef,
   type TurnTicket,
 } from "../shared/group";
 import type {
@@ -113,6 +117,10 @@ export class AppCore {
   private readonly activityTimers = new Map<string, NodeJS.Timeout>();
   private readonly replySessions = new Map<string, string>();
   private readonly unread = new Set<string>();
+  private readonly noticeAt = new Map<string, number>();
+  private watchPeer = "";
+  private watchSession = "";
+  private windowFocused = false;
   private sweepTimer: NodeJS.Timeout | null = null;
   private scanTimer: NodeJS.Timeout | null = null;
   private cliTimer: NodeJS.Timeout | null = null;
@@ -120,6 +128,7 @@ export class AppCore {
   private pushTimer: NodeJS.Timeout | null = null;
   private scanning = false;
   onChange: () => void = () => {};
+  onNotice: (notice: { peerId: string; sessionId: string; title: string; body: string }) => void = () => {};
 
   constructor(profile: string, sessionAutoAccept: boolean) {
     this.profile = profile;
@@ -259,13 +268,45 @@ export class AppCore {
       openSession: { ...this.store.openSessions },
       unreadSessions: [...this.unread],
       transcripts: this.store.transcripts,
-      briefs: this.store.briefs,
+      briefs: this.viewBriefs(),
       groups: this.store.groups.map((room) => ({
         ...room,
         members: room.members.map((member) => this.memberRecord(member)),
       })),
+      nicknames: { ...this.store.nicknames },
       logs: [...this.logs],
     };
+  }
+
+  locateBriefFile(sessionId: string, name: string): { path: string; preview: FileRef | null } | null {
+    const id = sessionId.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 80);
+    const safe = safeFileName(name);
+    if (!id || !safe) return null;
+    const folder = path.resolve(briefFolder(this.store.settings.workDir, id));
+    const full = path.resolve(folder, safe);
+    const rel = path.relative(folder, full);
+    if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return null;
+    if (!fs.existsSync(full)) return null;
+    const preview = fileRef(full);
+    if (preview) allowPreview(full);
+    return { path: full, preview };
+  }
+
+  private viewBriefs(): AppState["briefs"] {
+    const briefs: AppState["briefs"] = {};
+    for (const [sessionId, brief] of Object.entries(this.store.briefs)) {
+      const folder = briefFolder(this.store.settings.workDir, sessionId);
+      briefs[sessionId] = {
+        ...brief,
+        files: brief.files.map((file) => {
+          const full = path.join(folder, file.name);
+          if (!fs.existsSync(full)) return { name: file.name, kind: file.kind, excerpt: file.excerpt };
+          if (fileRef(full)) allowPreview(full);
+          return { name: file.name, kind: file.kind, excerpt: file.excerpt, path: full };
+        }),
+      };
+    }
+    return briefs;
   }
 
   saveSettings(input: Settings): AppState {
@@ -419,13 +460,34 @@ export class AppCore {
     }
     this.appendLine(sessionId, line);
     const wire = this.toWire(line, sessionId);
-    if (this.sendTo(peerId, "chat", wire)) return;
+    const published = this.publishMentions(line.text, this.mentionPeople(peerId));
+    wire.text = published.text;
+    wire.mentions = published.mentions;
+    const callsSelf = Boolean(line.mentions?.some((item) => item.peerId === this.store.peerId));
+    const callsPeer = !line.mentions?.length || Boolean(line.mentions.some((item) => item.peerId === peerId));
+    const briefRunning = Boolean(this.store.briefs[sessionId]?.running);
+    if (callsSelf && !briefRunning) {
+      wire.defer = true;
+      const sent = this.sendTo(peerId, "chat", wire);
+      const epoch = this.epochs.get(peerId) ?? 0;
+      await this.enqueueReply(peerId, sessionId);
+      if ((this.epochs.get(peerId) ?? 0) !== epoch) return;
+      if (sent) {
+        this.sendTo(peerId, "after-me", { sessionId, sessionTitle: this.sessionTitle(sessionId) } satisfies WireResume);
+        return;
+      }
+      if (!callsPeer) return;
+    } else {
+      if (callsSelf) void this.enqueueReply(peerId, sessionId);
+      if (this.sendTo(peerId, "chat", wire)) return;
+      if (!callsPeer) return;
+    }
     if (attachment) {
       this.system(peerId, "File đã tới máy kia, nhưng cần kết nối đang mở thì agent mới đọc và trao đổi.");
       return;
     }
     try {
-      const reply = await this.httpTrigger(peerId, spoken);
+      const reply = await this.httpTrigger(peerId, wire.text);
       const name = this.endpoints.get(peerId)?.name || this.store.trusted[peerId]?.name || "Máy kia";
       this.appendLine(sessionId, this.makeLine(peerId, peerId, name, "agent", reply));
     } catch (err) {
@@ -531,6 +593,7 @@ export class AppCore {
     const line = this.makeLine(peerId, this.store.peerId, this.store.settings.name, "human", brief.topic);
     this.appendLine(sessionId, line);
     const wire = this.toWire(line, sessionId);
+    wire.text = this.publishMentions(line.text, this.mentionPeople(peerId)).text;
     wire.dialogue = { repliesLeft: brief.turnLimit };
     wire.brief = sanitizeBrief(brief);
     this.syncBrief(peerId, sessionId);
@@ -660,6 +723,10 @@ export class AppCore {
         if (!bound) return;
         this.onResume(bound, body);
       });
+      socket.on("after-me", (body: WireResume) => {
+        if (!bound) return;
+        this.onAfterMe(bound, body);
+      });
       socket.on("aside", (body: { text?: string }) => {
         if (!bound || !body?.text) return;
         this.system(bound, body.text.slice(0, 500));
@@ -764,6 +831,7 @@ export class AppCore {
     socket.on("halt", () => this.halt(peerId, false));
     socket.on("brief", (body: WireBrief) => this.onWireBrief(peerId, body));
     socket.on("resume", (body: WireResume) => this.onResume(peerId, body));
+    socket.on("after-me", (body: WireResume) => this.onAfterMe(peerId, body));
     socket.on("aside", (body: { text?: string }) => {
       if (body?.text) this.system(peerId, body.text.slice(0, 500));
     });
@@ -1041,6 +1109,7 @@ export class AppCore {
     const sessionId = this.ensureSession(peerId);
     this.nameSession(peerId, sessionId, text);
     this.appendLine(sessionId, this.makeLine(peerId, peerId, name, "human", text));
+    this.arrive(peerId, sessionId, name, text);
     this.sendTo(peerId, "aside", { text: `Lệnh HTTP: ${text.slice(0, 500)}` });
     const reply = await this.enqueueReply(peerId, sessionId);
     if (!reply) {
@@ -1069,14 +1138,16 @@ export class AppCore {
       file: attachment ? fileRef(attachment.path) ?? undefined : undefined,
       mentions: Array.isArray(msg.mentions) ? mentionTargets(msg.text, msg.mentions) : undefined,
     });
-    if (this.store.openSessions[peerId] !== sessionId) this.unread.add(sessionId);
     if (!this.remember(msg.id)) {
       this.pushNow();
       return;
     }
+    this.arrive(peerId, sessionId, msg.fromName || "Máy kia", text);
     if (msg.brief) this.applyBrief(peerId, sessionId, msg.brief);
     const dialogue = msg.dialogue;
-    const shouldReply = dialogue ? dialogue.repliesLeft > 0 : msg.kind === "human";
+    const incomingMentions = Array.isArray(msg.mentions) ? msg.mentions : [];
+    const called = incomingMentions.length === 0 || incomingMentions.some((item) => item?.peerId === this.store.peerId);
+    const shouldReply = !msg.defer && (dialogue ? dialogue.repliesLeft > 0 : msg.kind === "human" && called);
     this.pushNow();
     if (!shouldReply) return;
     await this.enqueueReply(peerId, sessionId, Boolean(dialogue && dialogue.repliesLeft > 0));
@@ -1174,12 +1245,14 @@ export class AppCore {
           line.text = text;
           line.pending = false;
         }
+        const published = this.publishMentions(text, this.mentionPeople(groupId ? groupKey(groupId) : peerId));
         const wire: WireChat = {
           id,
           fromPeerId: this.store.peerId,
           fromName: this.store.settings.name,
           kind: "agent",
-          text,
+          text: published.text,
+          mentions: published.mentions,
           createdAt,
           sessionId: bound,
           sessionTitle: this.sessionTitle(bound),
@@ -1303,6 +1376,11 @@ export class AppCore {
       const text = this.turnText(line);
       if (!text.trim()) continue;
       if (line.kind === "human" && line.fromPeerId === this.store.peerId) {
+        const callsSelf = line.mentions?.some((item) => item.peerId === this.store.peerId);
+        if (callsSelf) {
+          items.push({ role: "user", text, speaker: line.fromName });
+          continue;
+        }
         if (!line.attachment && !this.roomBySession(sessionId)) continue;
         items.push({ role: "note", text: `${line.fromName}: ${text}` });
         continue;
@@ -1569,6 +1647,12 @@ export class AppCore {
     this.pushNow();
   }
 
+  private onAfterMe(peerId: string, body: WireResume): void {
+    if (!body?.sessionId || body.sessionId.length > 80 || this.aborts.has(peerId)) return;
+    const sessionId = this.adoptSession(peerId, body.sessionId, body.sessionTitle);
+    void this.enqueueReply(peerId, sessionId);
+  }
+
   private onResume(peerId: string, body: WireResume): void {
     if (!body?.sessionId || this.aborts.has(peerId)) return;
     const sessionId = this.adoptSession(peerId, body.sessionId, body.sessionTitle);
@@ -1631,6 +1715,36 @@ export class AppCore {
     return this.postFile(peerId, name, data, false, sessionId);
   }
 
+  setWatch(peerId: string, sessionId: string): void {
+    this.watchPeer = peerId.slice(0, 80);
+    this.watchSession = sessionId.slice(0, 80);
+    if (this.watchSession && this.unread.delete(this.watchSession)) this.pushNow();
+  }
+
+  setWindowFocused(focused: boolean): void {
+    this.windowFocused = focused;
+    if (focused && this.watchSession && this.unread.delete(this.watchSession)) this.pushNow();
+  }
+
+  private arrive(peerKey: string, sessionId: string, title: string, text: string): void {
+    const looking = this.windowFocused && this.watchPeer === peerKey && this.watchSession === sessionId;
+    if (looking) {
+      this.unread.delete(sessionId);
+      return;
+    }
+    this.unread.add(sessionId);
+    const now = Date.now();
+    if (now - (this.noticeAt.get(sessionId) ?? 0) < 2000) return;
+    this.noticeAt.set(sessionId, now);
+    const body = text.replace(/\s+/g, " ").trim().slice(0, 160) || "Có tin mới";
+    this.onNotice({
+      peerId: peerKey,
+      sessionId,
+      title: title.replace(/\s+/g, " ").trim().slice(0, 80) || "LAN Agents",
+      body,
+    });
+  }
+
   createSession(peerId: string): AppState {
     const groupId = parseGroupKey(peerId);
     if (groupId) {
@@ -1641,8 +1755,68 @@ export class AppCore {
     const session = this.addSession(peerId);
     this.store.transcripts[session.id] = [];
     this.store.openSessions[peerId] = session.id;
+    this.watchPeer = peerId;
+    this.watchSession = session.id;
     this.unread.delete(session.id);
     this.sendTo(peerId, "session", { id: session.id, title: session.title, createdAt: session.createdAt });
+    this.scheduleSave();
+    this.pushNow();
+    return this.snapshot();
+  }
+
+  deleteSession(peerId: string, sessionId: string): AppState {
+    const groupId = parseGroupKey(peerId);
+    if (groupId) {
+      const room = this.groupById(groupId);
+      if (room && (room.sessionId === sessionId || this.store.openSessions[peerId] === sessionId)) return this.clearGroupTalk(groupId);
+      this.dropSession(peerId, sessionId);
+      this.scheduleSave();
+      this.pushNow();
+      return this.snapshot();
+    }
+    const list = this.store.sessions[peerId] ?? [];
+    if (!list.some((session) => session.id === sessionId)) return this.snapshot();
+    this.dropSession(peerId, sessionId);
+    if (!(this.store.sessions[peerId] ?? []).length) this.addSession(peerId);
+    else if (!this.store.openSessions[peerId]) {
+      const latest = [...(this.store.sessions[peerId] ?? [])].sort((a, b) => b.updatedAt - a.updatedAt)[0];
+      if (latest) this.store.openSessions[peerId] = latest.id;
+    }
+    this.scheduleSave();
+    this.pushNow();
+    return this.snapshot();
+  }
+
+  setNickname(peerId: string, nickname: string): AppState {
+    const id = String(peerId || "").slice(0, 80);
+    if (!id || id === this.store.peerId || parseGroupKey(id)) return this.snapshot();
+    const clean = nickname.replace(/\s+/g, " ").trim().slice(0, 40);
+    if (!clean) {
+      delete this.store.nicknames[id];
+    } else if (clean.toLowerCase() === "me") {
+      throw new Error("Biệt danh me dành cho máy này.");
+    } else {
+      this.store.nicknames[id] = clean;
+    }
+    this.scheduleSave();
+    this.pushNow();
+    return this.snapshot();
+  }
+
+  clearGroupTalk(groupId: string): AppState {
+    const room = this.groupById(groupId);
+    if (!room) return this.snapshot();
+    const host = room.hostId === this.store.peerId;
+    this.haltGroupLocal(room, false);
+    const sessionId = this.roomSession(room);
+    room.turn = null;
+    this.store.transcripts[sessionId] = [];
+    delete this.store.briefs[sessionId];
+    if (host) {
+      this.relay(room, "group-clear", { groupId: room.id, sessionId });
+      this.relay(room, "group-turn", { groupId: room.id, sessionId, turn: null, go: false } satisfies WireGroupTurn);
+    }
+    this.groupNote(room, host ? "Đã xóa hội thoại nhóm." : "Đã xóa hội thoại nhóm trên máy này.", false);
     this.scheduleSave();
     this.pushNow();
     return this.snapshot();
@@ -1652,6 +1826,8 @@ export class AppCore {
     const known = (this.store.sessions[peerId] ?? []).some((session) => session.id === sessionId);
     if (known) {
       this.store.openSessions[peerId] = sessionId;
+      this.watchPeer = peerId;
+      this.watchSession = sessionId;
       this.unread.delete(sessionId);
       this.scheduleSave();
       this.pushNow();
@@ -1870,11 +2046,12 @@ export class AppCore {
       this.deltaTimers.delete(key);
       const line = this.findLine(sessionId, id);
       if (!line) return;
+      const published = this.publishMentions(line.text, this.mentionPeople(peerId));
       const delta: WireDelta = {
         id,
         fromPeerId: this.store.peerId,
         fromName: this.store.settings.name,
-        text: line.text,
+        text: published.text,
         createdAt: line.createdAt,
         sessionId,
       };
@@ -2085,7 +2262,7 @@ export class AppCore {
     }
     const spoken = text.trim().slice(0, LINE_CAP) || (attachment ? `Đọc file đính kèm ${attachment.name} và trao đổi nội dung.` : "");
     if (!spoken) return;
-    const mentions = mentionTargets(spoken, room.members.map((member) => this.memberRecord(member)));
+    const mentions = mentionTargets(spoken, this.aliasList(room.members.map((member) => this.memberRecord(member))));
     const sessionId = this.roomSession(room);
     this.nameSession(key, sessionId, spoken);
     const line = this.makeLine(key, this.store.peerId, this.store.settings.name, "human", spoken);
@@ -2100,7 +2277,9 @@ export class AppCore {
     }
     this.appendLine(sessionId, line);
     const wire = this.toWire(line, sessionId);
-    wire.mentions = mentions;
+    const published = this.publishMentions(spoken, this.aliasList(room.members.map((member) => this.memberRecord(member))));
+    wire.text = published.text;
+    wire.mentions = published.mentions;
     const busy = Boolean(room.turn && room.turn.left > 0);
     if (!busy && mentions.length) wire.queue = "ping";
     this.dispatchGroup(room, wire);
@@ -2136,13 +2315,15 @@ export class AppCore {
       this.groupNote(room, err instanceof Error ? err.message : "Không gửi được file context.", false);
       return this.snapshot();
     }
-    const mentions = mentionTargets(brief.topic, room.members.map((member) => this.memberRecord(member)));
+    const mentions = mentionTargets(brief.topic, this.aliasList(room.members.map((member) => this.memberRecord(member))));
     this.nameSession(key, sessionId, brief.topic);
     const line = this.makeLine(key, this.store.peerId, this.store.settings.name, "human", brief.topic);
     line.mentions = mentions;
     this.appendLine(sessionId, line);
     const wire = this.toWire(line, sessionId);
-    wire.mentions = mentions;
+    const published = this.publishMentions(brief.topic, this.aliasList(room.members.map((member) => this.memberRecord(member))));
+    wire.text = published.text;
+    wire.mentions = published.mentions;
     wire.queue = "topic";
     wire.dialogue = { repliesLeft: brief.turnLimit };
     wire.brief = sanitizeBrief(brief);
@@ -2187,7 +2368,7 @@ export class AppCore {
       return this.snapshot();
     }
     brief.running = true;
-    const mentions = mentionTargets(brief.topic, room.members.map((member) => this.memberRecord(member)));
+    const mentions = mentionTargets(brief.topic, this.aliasList(room.members.map((member) => this.memberRecord(member))));
     const ticket = this.skipOffline(room, ticketFrom(speakOrder(room.members, mentions, add, this.store.peerId, "topic"), "topic"));
     room.turn = ticket;
     this.syncBrief(groupKey(room.id), sessionId);
@@ -2299,6 +2480,10 @@ export class AppCore {
       const id = peerId();
       if (id) this.onGroupClose(id, body);
     });
+    socket.on("group-clear", (body: { groupId?: string; sessionId?: string }) => {
+      const id = peerId();
+      if (id) this.onGroupClear(id, body);
+    });
     socket.on("group-extend", (body: { groupId?: string; extra?: number }) => {
       const id = peerId();
       if (!id || !body?.groupId) return;
@@ -2333,12 +2518,12 @@ export class AppCore {
       file: attachment ? fileRef(attachment.path) ?? undefined : undefined,
       mentions: Array.isArray(msg.mentions) ? msg.mentions.filter((item) => item?.peerId && item.name).slice(0, 8) : undefined,
     });
-    if (this.store.openSessions[groupKey(room.id)] !== sessionId) this.unread.add(sessionId);
     if (msg.brief) this.applyBrief(groupKey(room.id), sessionId, msg.brief);
     if (!this.remember(msg.id)) {
       this.pushNow();
       return;
     }
+    this.arrive(groupKey(room.id), sessionId, room.title, `${msg.fromName || "Máy"}: ${String(msg.text ?? "")}`);
     const hostTurn = room.hostId === this.store.peerId && msg.fromPeerId === socketPeer;
     if (hostTurn) {
       if (msg.queue === "topic" && msg.brief) {
@@ -2446,6 +2631,21 @@ export class AppCore {
     const room = this.groupById(body?.groupId || "");
     if (!room || room.hostId !== this.store.peerId || !body.peerId || body.peerId !== socketPeer) return;
     this.removeMember(room, body.peerId);
+  }
+
+  private onGroupClear(socketPeer: string, body: { groupId?: string; sessionId?: string }): void {
+    const room = this.groupById(String(body?.groupId || ""));
+    if (!room || socketPeer !== room.hostId || room.hostId === this.store.peerId) return;
+    const sessionId = String(body.sessionId || room.sessionId || "");
+    if (sessionId) room.sessionId = sessionId;
+    room.turn = null;
+    if (room.sessionId) {
+      this.store.transcripts[room.sessionId] = [];
+      delete this.store.briefs[room.sessionId];
+    }
+    this.groupNote(room, "Máy tạo nhóm đã xóa hội thoại.", false);
+    this.scheduleSave();
+    this.pushNow();
   }
 
   private onGroupClose(socketPeer: string, body: { groupId?: string; text?: string }): void {
@@ -2648,9 +2848,46 @@ export class AppCore {
 
   private removeGroup(room: GroupRoom): void {
     this.haltGroupLocal(room, false);
+    const key = groupKey(room.id);
+    for (const session of this.store.sessions[key] ?? []) this.dropSession(key, session.id);
+    delete this.store.sessions[key];
+    delete this.store.openSessions[key];
     this.store.groups = this.store.groups.filter((item) => item.id !== room.id);
     this.scheduleSave();
     this.pushNow();
+  }
+
+  private dropSession(peerId: string, sessionId: string): void {
+    this.store.sessions[peerId] = (this.store.sessions[peerId] ?? []).filter((session) => session.id !== sessionId);
+    delete this.store.transcripts[sessionId];
+    delete this.store.briefs[sessionId];
+    this.unread.delete(sessionId);
+    if (this.store.openSessions[peerId] === sessionId) delete this.store.openSessions[peerId];
+  }
+
+  private aliasList(people: GroupMember[]): GroupMember[] {
+    const aliases = Object.entries(this.store.nicknames).map(([peerId, name]) => ({ peerId, name }));
+    return withSelfAlias(withAliases(people, aliases), this.store.peerId);
+  }
+
+  private publishMentions(text: string, people: GroupMember[]): { text: string; mentions: MentionRef[] } {
+    return rewriteMentionLabels(text, people, (hit) => this.publicMentionLabel(hit.peerId, hit.name));
+  }
+
+  private publicMentionLabel(peerId: string, matched: string): string {
+    if (peerId === this.store.peerId && matched.trim().toLowerCase() === "me") return "me";
+    return this.realName(peerId) || matched;
+  }
+
+  private realName(peerId: string): string {
+    if (peerId === this.store.peerId) return this.store.settings.name;
+    const live = this.endpoints.get(peerId)?.name || this.store.trusted[peerId]?.name || "";
+    if (live) return live;
+    for (const room of this.store.groups) {
+      const member = room.members.find((item) => item.peerId === peerId);
+      if (member?.name) return member.name;
+    }
+    return "";
   }
 
   private advanceIfSpeakerLeft(peerId: string): void {
@@ -2767,7 +3004,9 @@ export class AppCore {
       .slice(-40)
       .map((line) => {
         const wire = this.toWire(line, room.sessionId);
-        wire.mentions = line.mentions;
+        const published = this.publishMentions(line.text, this.aliasList(room.members.map((member) => this.memberRecord(member))));
+        wire.text = published.text;
+        wire.mentions = published.mentions.length ? published.mentions : line.mentions;
         return wire;
       });
     return {
@@ -2845,11 +3084,11 @@ export class AppCore {
 
   private mentionPeople(peerId: string): GroupMember[] {
     const room = this.roomFromKey(peerId);
-    if (room) return room.members.map((member) => this.memberRecord(member));
+    if (room) return this.aliasList(room.members.map((member) => this.memberRecord(member)));
     const people: GroupMember[] = [{ peerId: this.store.peerId, name: this.store.settings.name }];
     const name = this.endpoints.get(peerId)?.name || this.store.trusted[peerId]?.name || "";
     if (name) people.push({ peerId, name });
-    return people;
+    return this.aliasList(people);
   }
 
   private scheduleSave(): void {

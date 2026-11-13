@@ -15,7 +15,9 @@ export const MULTICAST_ADDR = "239.255.77.77";
 
 export const IPC = {
   state: "lan:state",
+  notice: "lan:notice",
   getState: "lan:get-state",
+  watch: "lan:watch",
   saveSettings: "lan:save-settings",
   connect: "lan:connect",
   connectAddress: "lan:connect-address",
@@ -41,12 +43,15 @@ export const IPC = {
   pickBriefFiles: "lan:pick-brief-files",
   addBriefFiles: "lan:add-brief-files",
   removeBriefFile: "lan:remove-brief-file",
+  openBriefFile: "lan:open-brief-file",
   startBrief: "lan:start-brief",
   extendBrief: "lan:extend-brief",
   createGroup: "lan:create-group",
   inviteGroup: "lan:invite-group",
   leaveGroup: "lan:leave-group",
   renameGroup: "lan:rename-group",
+  setNickname: "lan:set-nickname",
+  deleteSession: "lan:delete-session",
 } as const;
 
 export type ActivityPatch = {
@@ -150,6 +155,7 @@ export type AppState = {
   transcripts: Record<string, ChatLine[]>;
   briefs: Record<string, ProjectBrief>;
   groups: GroupRoom[];
+  nicknames: Record<string, string>;
   logs: string[];
 };
 
@@ -167,6 +173,7 @@ export type WireChat = {
   attachment?: { name: string; kind: DiscussFile["kind"]; excerpt: string };
   groupId?: string;
   mentions?: MentionRef[];
+  defer?: boolean;
   turn?: TurnTicket | null;
   cue?: boolean;
   queue?: "topic" | "ping";
@@ -219,12 +226,21 @@ export type HelloPayload = {
   initiatedBy: string;
 };
 
+export type ChatNotice = {
+  peerId: string;
+  sessionId: string;
+  title: string;
+  body: string;
+  open?: boolean;
+};
+
 export type HelloAck =
   | { ok: true; token: string; name: string }
   | { ok: false; pending?: boolean; error?: string };
 
 export type LanApi = {
   getState: () => Promise<AppState>;
+  watch: (peerId: string, sessionId: string) => Promise<void>;
   saveSettings: (settings: Settings) => Promise<AppState>;
   connect: (peerId: string) => Promise<void>;
   connectAddress: (host: string, port: number) => Promise<void>;
@@ -238,12 +254,15 @@ export type LanApi = {
   pickBriefFiles: () => Promise<string[]>;
   addBriefFiles: (peerId: string, paths: string[]) => Promise<AppState>;
   removeBriefFile: (peerId: string, name: string) => Promise<AppState>;
+  openBriefFile: (sessionId: string, name: string) => Promise<FileRef | null>;
   startBrief: (peerId: string) => Promise<AppState>;
   extendBrief: (peerId: string, extra?: number) => Promise<AppState>;
   createGroup: () => Promise<AppState>;
   inviteGroup: (groupId: string, peerId: string) => Promise<AppState>;
   leaveGroup: (groupId: string, peerId?: string) => Promise<AppState>;
   renameGroup: (groupId: string, title: string) => Promise<AppState>;
+  setNickname: (peerId: string, nickname: string) => Promise<AppState>;
+  deleteSession: (peerId: string, sessionId: string) => Promise<AppState>;
   stop: (peerId: string) => Promise<void>;
   pickCwd: () => Promise<string | null>;
   rescanClis: () => Promise<AppState>;
@@ -256,6 +275,7 @@ export type LanApi = {
   openSession: (peerId: string, sessionId: string) => Promise<AppState>;
   renameSession: (peerId: string, sessionId: string, title: string) => Promise<AppState>;
   onState: (listener: (state: AppState) => void) => () => void;
+  onNotice: (listener: (notice: ChatNotice) => void) => () => void;
   onPreviewFile: (listener: (file: FileRef) => void) => () => void;
 };
 

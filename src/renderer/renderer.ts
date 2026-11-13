@@ -1,14 +1,15 @@
 import { BRIEF_FILE_MAX, BRIEF_TURN_MAX, resultText, type BriefFile, type ProjectBrief } from "../shared/brief";
-import { GROUP_MAX, groupKey, mentionRanges, parseGroupKey, type GroupRoom, type MentionRef } from "../shared/group";
-import type { AppState, ChatLine, CliReport, CliToolState, FileRef, PeerActivity, PeerView, Settings, WorkFile } from "../shared/types";
+import { GROUP_MAX, groupKey, mentionRanges, parseGroupKey, rewriteMentionLabels, type GroupMember, type GroupRoom, type MentionRef } from "../shared/group";
+import type { AppState, ChatLine, ChatNotice, CliReport, CliToolState, FileRef, PeerActivity, PeerView, Settings, WorkFile } from "../shared/types";
 import { providerLabel } from "../shared/types";
 import { fileRef, type PreviewKind } from "../shared/preview";
-import { renderMarkdownHtml, renderPreview } from "./previewView";
+import { previewSrc, renderMarkdownHtml, renderPreview } from "./previewView";
 
 declare global {
   interface Window {
     lan: {
       getState: () => Promise<AppState>;
+      watch: (peerId: string, sessionId: string) => Promise<void>;
       saveSettings: (settings: Settings) => Promise<AppState>;
       connect: (peerId: string) => Promise<void>;
       connectAddress: (host: string, port: number) => Promise<void>;
@@ -22,12 +23,15 @@ declare global {
       pickBriefFiles: () => Promise<string[]>;
       addBriefFiles: (peerId: string, paths: string[]) => Promise<AppState>;
       removeBriefFile: (peerId: string, name: string) => Promise<AppState>;
+      openBriefFile: (sessionId: string, name: string) => Promise<FileRef | null>;
       startBrief: (peerId: string) => Promise<AppState>;
       extendBrief: (peerId: string, extra?: number) => Promise<AppState>;
       createGroup: () => Promise<AppState>;
       inviteGroup: (groupId: string, peerId: string) => Promise<AppState>;
       leaveGroup: (groupId: string, peerId?: string) => Promise<AppState>;
       renameGroup: (groupId: string, title: string) => Promise<AppState>;
+      setNickname: (peerId: string, nickname: string) => Promise<AppState>;
+      deleteSession: (peerId: string, sessionId: string) => Promise<AppState>;
       createSession: (peerId: string) => Promise<AppState>;
       openSession: (peerId: string, sessionId: string) => Promise<AppState>;
       renameSession: (peerId: string, sessionId: string, title: string) => Promise<AppState>;
@@ -40,10 +44,15 @@ declare global {
       showPreview: (file: FileRef) => Promise<boolean>;
       listWorkFiles: (dir: string) => Promise<{ found: boolean; files: WorkFile[] }>;
       onState: (listener: (state: AppState) => void) => () => void;
+      onNotice: (listener: (notice: ChatNotice) => void) => () => void;
       onPreviewFile: (listener: (file: FileRef) => void) => () => void;
     };
   }
 }
+
+let mentionFaces: GroupMember[] = [];
+let mentionNicks: Record<string, string> = {};
+let mentionSelf = "";
 
 const root = document.querySelector<HTMLDivElement>("#app");
 if (!root) throw new Error("Thiếu #app");
@@ -60,7 +69,7 @@ function boot(host: HTMLElement): void {
       <nav class="rail" id="rail">
         ${iconButton("nav-toggle", "sidebar", "Thu gọn thanh bên")}
         ${iconButton("", "people", "Máy trong LAN", "peers")}
-        ${iconButton("", "bubble", "Phiên chat", "sessions", `<span id="nav-unread" class="badge" hidden></span>`)}
+        ${iconButton("", "bubble", "Phiên chat", "sessions", `<span id="nav-unread" class="badge count" hidden></span>`)}
         ${iconButton("", "folder", "Thư mục làm việc", "files")}
         <span class="spacer"></span>
         ${iconButton("", "gear", "Cài đặt", "settings")}
@@ -133,7 +142,7 @@ function boot(host: HTMLElement): void {
       <section class="chat">
         <div id="chat-empty" class="empty">
           <h2>Chưa chọn máy</h2>
-          <p>Chọn một máy, hoặc tạo nhóm rồi mời máy đã nối. Nhóm chứa tối đa 5 máy. Trong chủ đề, các agent nói lần lượt. Gõ @tên để gọi đúng agent.</p>
+          <p>Chọn một máy, hoặc tạo nhóm rồi mời máy đã nối. Nhóm chứa tối đa 5 máy. Trong chủ đề, các agent nói lần lượt. Gõ @tên để gọi đúng agent, @me là agent máy này.</p>
         </div>
         <div id="chat-panel" class="chat-panel" hidden>
           <header class="chat-head">
@@ -142,7 +151,11 @@ function boot(host: HTMLElement): void {
               <input id="session-title" maxlength="42" spellcheck="false" placeholder="Tên phiên" data-tip="Tên phiên. Enter để lưu." aria-label="Tên phiên" />
               <p id="chat-status"></p>
             </div>
-            ${iconButton("link", "link", "Kết nối")}
+            <div class="head-actions">
+              ${iconButton("delete-chat", "trash", "Xóa hội thoại")}
+              ${iconButton("delete-group", "x", "Xóa nhóm")}
+              ${iconButton("link", "link", "Kết nối")}
+            </div>
           </header>
           <div id="banner" class="banner" hidden>
             <span id="banner-text"></span>
@@ -165,7 +178,12 @@ function boot(host: HTMLElement): void {
               ${iconButton("brief-toggle", "sliders", "Cài đặt chủ đề")}
               <button id="brief-summary" type="button" class="brief-summary empty">Chưa đặt chủ đề</button>
               <span id="brief-meter" class="brief-meter"></span>
+              <span class="brief-tools">
+                <button id="brief-new" type="button">Thêm chủ đề</button>
+                <button id="brief-hide" type="button">Ẩn</button>
+              </span>
             </div>
+            <div id="brief-dock" class="brief-dock" hidden></div>
             <div id="brief-result" class="brief-result" hidden>
               <button id="brief-result-open" type="button" class="brief-result-text"><span></span></button>
               ${iconButton("brief-expand", "expand", "Mở rộng kết quả")}
@@ -295,8 +313,15 @@ function boot(host: HTMLElement): void {
   let historyQuery = "";
   let focusLine = "";
   let mentionIndex = 0;
+  let watchedKey = "";
 
   peersEl.addEventListener("click", (event) => {
+    const nick = (event.target as HTMLElement).closest<HTMLElement>("[data-nick]");
+    if (nick?.dataset.nick) {
+      const row = nick.closest<HTMLElement>(".peer-row");
+      if (row) beginNickname(row, nick.dataset.nick, state?.nicknames[nick.dataset.nick] || "");
+      return;
+    }
     const row = (event.target as HTMLElement).closest<HTMLElement>("[data-peer]");
     if (!row?.dataset.peer) return;
     active = row.dataset.peer;
@@ -470,8 +495,9 @@ function boot(host: HTMLElement): void {
       }
       if ((event.key === "Enter" || event.key === "Tab") && count) {
         event.preventDefault();
-        const label = pop.children[mentionIndex]?.textContent || "";
-        if (label.startsWith("@")) insertMention(label.slice(1));
+        const chosen = pop.children[mentionIndex];
+        const name = chosen instanceof HTMLElement ? chosen.dataset.name || "" : "";
+        if (name) insertMention(name);
         return;
       }
       if (event.key === "Escape") {
@@ -502,6 +528,25 @@ function boot(host: HTMLElement): void {
       if (!paths.length) return;
       await window.lan.addBriefFiles(peerId, paths);
     });
+  });
+  must<HTMLButtonElement>("#brief-new").addEventListener("click", () => {
+    const briefBox = must<HTMLElement>("#brief");
+    const id = briefBox.dataset.session || "";
+    hiddenBriefs.delete(id);
+    briefBox.classList.remove("is-hidden");
+    must<HTMLButtonElement>("#brief-hide").textContent = "Ẩn";
+    setBriefOpen(true);
+    must<HTMLInputElement>("#brief-topic").focus();
+  });
+  must<HTMLButtonElement>("#brief-hide").addEventListener("click", () => {
+    const briefBox = must<HTMLElement>("#brief");
+    const id = briefBox.dataset.session || "";
+    const hidden = !hiddenBriefs.has(id);
+    if (hidden) hiddenBriefs.add(id);
+    else hiddenBriefs.delete(id);
+    briefBox.classList.toggle("is-hidden", hidden);
+    must<HTMLButtonElement>("#brief-hide").textContent = hidden ? "Hiện" : "Ẩn";
+    if (hidden) setBriefOpen(false);
   });
   must<HTMLButtonElement>("#brief-toggle").addEventListener("click", () => setBriefOpen(must<HTMLElement>("#brief-pop").hidden));
   must<HTMLButtonElement>("#brief-summary").addEventListener("click", () => setBriefOpen(must<HTMLElement>("#brief-pop").hidden));
@@ -572,10 +617,16 @@ function boot(host: HTMLElement): void {
   });
 
   window.lan.onState((next) => paint(next));
+  window.lan.onNotice((notice) => {
+    if (notice.open) openNotice(notice);
+  });
   void window.lan.getState().then(paint).catch((err: unknown) => flash(messageOf(err)));
 
   function paint(next: AppState): void {
     state = next;
+    mentionSelf = next.self.peerId;
+    mentionNicks = next.nicknames;
+    mentionFaces = mentionFacesOf(next);
     const stillPeer = Boolean(active && next.peers.some((peer) => peer.peerId === active));
     const stillGroup = Boolean(active && next.groups.some((group) => groupKey(group.id) === active));
     if (!stillPeer && !stillGroup) {
@@ -590,7 +641,16 @@ function boot(host: HTMLElement): void {
     const fullMeta = [providerLabel(next.self.provider), `${next.self.host}:${next.self.port}`, shortId(next.self.peerId), localNote].filter(Boolean).join(" · ");
     meta.textContent = `${providerLabel(next.self.provider)} · ${next.self.host}:${next.self.port}`;
     meta.dataset.tip = fullMeta;
-    must<HTMLElement>("#nav-unread").hidden = next.unreadSessions.length === 0;
+    const unread = next.unreadSessions.length;
+    const navUnread = must<HTMLElement>("#nav-unread");
+    navUnread.hidden = unread === 0;
+    navUnread.textContent = unread > 9 ? "9+" : unread > 0 ? String(unread) : "";
+    const watching = active ? next.openSession[active] ?? "" : "";
+    const watchKey = `${active ?? ""}\n${watching}`;
+    if (watchKey !== watchedKey) {
+      watchedKey = watchKey;
+      void window.lan.watch(active ?? "", watching);
+    }
     fillSettings(next.settings);
     paintTools(next.localClis);
     paintPeers(next);
@@ -601,6 +661,7 @@ function boot(host: HTMLElement): void {
   }
 
   function paintPeers(next: AppState): void {
+    if (peersEl.querySelector("input.nick-edit")) return;
     peersEl.replaceChildren();
     must<HTMLElement>("#peers-empty").hidden = next.peers.length > 0;
     for (const peer of next.peers) {
@@ -613,13 +674,24 @@ function boot(host: HTMLElement): void {
       const who = document.createElement("span");
       who.className = "who";
       const title = document.createElement("strong");
-      title.textContent = peer.name;
+      const shown = displayName(next, peer.peerId, peer.name);
+      title.textContent = shown;
       const meta = document.createElement("span");
       const where = peer.viaLocalhost ? "cùng máy" : peer.host || "chưa có IP";
-      meta.textContent = [providerLabel(peer.provider), where, peerCliNote(peer.clis), activityNote(next.activity[peer.peerId]), statusText(peer)].filter(Boolean).join(" · ");
+      meta.textContent = [shown === peer.name ? "" : peer.name, providerLabel(peer.provider), where, peerCliNote(peer.clis), activityNote(next.activity[peer.peerId]), statusText(peer)].filter(Boolean).join(" · ");
       who.append(title, meta);
-      button.append(dot, who);
-      peersEl.append(button);
+      button.append(dot, who, unreadMark(unreadFor(next, peer.peerId)));
+      const row = document.createElement("div");
+      row.className = "peer-row";
+      const nick = document.createElement("button");
+      nick.type = "button";
+      nick.className = "icon-btn nick-btn";
+      nick.dataset.nick = peer.peerId;
+      nick.dataset.tip = next.nicknames[peer.peerId] ? "Sửa biệt danh" : "Đặt biệt danh để tag @";
+      nick.setAttribute("aria-label", nick.dataset.tip);
+      nick.innerHTML = icon("pencil");
+      row.append(button, nick);
+      peersEl.append(row);
     }
   }
 
@@ -646,7 +718,7 @@ function boot(host: HTMLElement): void {
       const turn = group.turn ? group.members.find((member) => member.peerId === group.turn?.speakerId)?.name : "";
       meta.textContent = [`${group.members.length}/${GROUP_MAX} máy`, turn ? `đến lượt ${turn}` : "chưa xếp lượt"].join(" · ");
       who.append(title, meta);
-      button.append(who);
+      button.append(who, unreadMark(unreadFor(next, groupKey(group.id))));
       box.append(button);
     }
   }
@@ -665,9 +737,21 @@ function boot(host: HTMLElement): void {
     empty.hidden = Boolean(peer);
     panel.hidden = !peer;
     if (!peer || !active) return;
-    must<HTMLElement>("#chat-title").textContent = peer.name;
+    const head = must<HTMLElement>(".chat-head");
+    head.classList.remove("group-mode");
+    must<HTMLElement>("#chat-title").hidden = false;
+    must<HTMLElement>("#chat-title").textContent = displayName(next, peer.peerId, peer.name);
+    must<HTMLButtonElement>("#delete-group").hidden = true;
+    must<HTMLButtonElement>("#link").hidden = false;
+    const sessionTitle = must<HTMLInputElement>("#session-title");
+    sessionTitle.hidden = false;
+    sessionTitle.placeholder = "Tên phiên";
+    sessionTitle.dataset.tip = "Tên phiên. Enter để lưu.";
+    const deleteChat = must<HTMLButtonElement>("#delete-chat");
+    setIcon(deleteChat, "trash", "Xóa phiên hội thoại");
     const where = peer.viaLocalhost ? "cùng máy" : `${peer.host}:${peer.port}`;
     const sessionId = next.openSession[active] ?? "";
+    deleteChat.disabled = !sessionId;
     if (messagesEl.dataset.session !== sessionId) {
       messagesEl.replaceChildren();
       messagesEl.dataset.session = sessionId;
@@ -695,7 +779,7 @@ function boot(host: HTMLElement): void {
     const nameInput = must<HTMLInputElement>("#session-title");
     nameInput.disabled = !session;
     if (document.activeElement !== nameInput) nameInput.value = session?.title ?? "";
-    must<HTMLElement>("#chat-status").textContent = [session?.title, providerLabel(peer.provider), where, peerCliNote(peer.clis), statusText(peer)]
+    must<HTMLElement>("#chat-status").textContent = [providerLabel(peer.provider), where, peerCliNote(peer.clis), statusText(peer)]
       .filter(Boolean)
       .join(" · ");
     paintMessages(messagesEl, lines, next.self.peerId, nearBottom(messagesEl), historyQuery);
@@ -712,7 +796,7 @@ function boot(host: HTMLElement): void {
       .some((item) => (next.transcripts[item.id] ?? []).some((line) => line.pending));
     must<HTMLButtonElement>("#stop").disabled = !replyingSomewhere;
     paintBrief(sessionId, next.briefs[sessionId], lines, connected, "");
-    draft.placeholder = "Nhắn cho agent máy kia. Gõ @ để gọi đúng máy…";
+    draft.placeholder = "Nhắn cho agent máy kia. Gõ @ để gọi máy, @me là agent máy này…";
     must<HTMLInputElement>("#brief-topic").placeholder = "Việc hai agent cần bàn";
     const snippet = peer.token
       ? [
@@ -727,7 +811,9 @@ function boot(host: HTMLElement): void {
 
   let briefTimer = 0;
   let briefFilesKey = "";
+  let briefDockKey = "";
   let briefAnchor = "";
+  const hiddenBriefs = new Set<string>();
 
   function setBriefOpen(open: boolean): void {
     const pop = must<HTMLElement>("#brief-pop");
@@ -743,14 +829,25 @@ function boot(host: HTMLElement): void {
     must<HTMLElement>("#chat-empty").hidden = true;
     must<HTMLElement>("#chat-panel").hidden = false;
     must<HTMLElement>("#http-box").hidden = true;
-    must<HTMLElement>("#chat-title").textContent = group.title;
+    const head = must<HTMLElement>(".chat-head");
+    head.classList.add("group-mode");
+    const host = group.hostId === next.self.peerId;
+    const title = must<HTMLElement>("#chat-title");
+    title.textContent = group.title;
+    title.hidden = host;
+    const deleteGroup = must<HTMLButtonElement>("#delete-group");
+    deleteGroup.hidden = false;
+    setIcon(deleteGroup, "x", host ? "Xóa nhóm" : "Rời nhóm");
+    const deleteChat = must<HTMLButtonElement>("#delete-chat");
+    setIcon(deleteChat, "trash", host ? "Xóa hội thoại nhóm" : "Xóa hội thoại trên máy này");
+    must<HTMLButtonElement>("#link").hidden = true;
     const sessionId = next.openSession[key] || group.sessionId;
+    deleteChat.disabled = !sessionId;
     if (messagesEl.dataset.session !== sessionId) {
       messagesEl.replaceChildren();
       messagesEl.dataset.session = sessionId;
       if (typingOn) noteTyping(false);
     }
-    const host = group.hostId === next.self.peerId;
     const linked = host || next.peers.some((peer) => peer.peerId === group.hostId && peer.status === "connected");
     const lines = next.transcripts[sessionId] ?? [];
     const typing = must<HTMLElement>("#typing");
@@ -769,14 +866,17 @@ function boot(host: HTMLElement): void {
     };
     must<HTMLElement>("#banner").hidden = true;
     const nameInput = must<HTMLInputElement>("#session-title");
+    nameInput.hidden = !host;
     nameInput.disabled = !host;
+    nameInput.placeholder = "Tên nhóm";
+    nameInput.dataset.tip = "Tên nhóm. Enter để lưu.";
     if (document.activeElement !== nameInput) nameInput.value = group.title;
-    const turnName = group.turn ? group.members.find((member) => member.peerId === group.turn?.speakerId)?.name || "" : "";
+    const turnMember = group.turn ? group.members.find((member) => member.peerId === group.turn?.speakerId) : undefined;
+    const turnName = turnMember ? displayName(next, turnMember.peerId, turnMember.name) : "";
     must<HTMLElement>("#chat-status").textContent = [
       `${group.members.length}/${GROUP_MAX} máy`,
-      group.members.map((member) => member.name).join(", "),
-      host ? "bạn tạo nhóm" : "máy khác tạo nhóm",
-      turnName ? `đến lượt ${turnName}` : "",
+      host ? "Bạn tạo nhóm" : "Máy khác tạo nhóm",
+      turnName ? `Đến lượt ${turnName}` : "",
     ]
       .filter(Boolean)
       .join(" · ");
@@ -793,9 +893,9 @@ function boot(host: HTMLElement): void {
     must<HTMLButtonElement>("#stop").disabled = !replyingSomewhere;
     paintBrief(sessionId, next.briefs[sessionId], lines, linked, turnName);
     paintGroupBar(next, group);
-    draft.placeholder = "Nhắn trong nhóm. Gõ @ để gọi đúng agent…";
+    draft.placeholder = "Nhắn trong nhóm. Gõ @ để gọi agent, @me là máy này…";
     const topic = must<HTMLInputElement>("#brief-topic");
-    topic.placeholder = "Chủ đề chung. Gõ @tên nếu chỉ muốn vài agent nói";
+    topic.placeholder = "Chủ đề chung. Gõ @tên hoặc @me nếu chỉ muốn vài agent nói";
   }
 
   function paintGroupBar(next: AppState, group: GroupRoom): void {
@@ -803,12 +903,28 @@ function boot(host: HTMLElement): void {
     bar.hidden = false;
     const host = group.hostId === next.self.peerId;
     const box = must<HTMLElement>("#group-members");
+    if (box.querySelector("input.nick-edit")) return;
     box.replaceChildren();
     for (const member of group.members) {
       const chip = document.createElement("span");
       const online = member.peerId === next.self.peerId || next.peers.some((peer) => peer.peerId === member.peerId && peer.status === "connected");
-      chip.className = `member-chip${online ? " on" : ""}`;
-      chip.textContent = member.peerId === next.self.peerId ? `${member.name} (bạn)` : member.name;
+      const mine = member.peerId === next.self.peerId;
+      const shown = displayName(next, member.peerId, member.name);
+      chip.className = `member-chip${online ? " on" : ""}${mine ? " me" : ""}`;
+      const label = document.createElement("span");
+      label.textContent = mine ? `${shown} · bạn` : shown;
+      if (!mine && shown !== member.name) label.title = member.name;
+      chip.append(label);
+      if (!mine) {
+        const nick = document.createElement("button");
+        nick.type = "button";
+        nick.className = "icon-btn";
+        nick.dataset.tip = next.nicknames[member.peerId] ? "Sửa biệt danh" : "Đặt biệt danh để tag @";
+        nick.setAttribute("aria-label", nick.dataset.tip);
+        nick.innerHTML = icon("pencil");
+        nick.addEventListener("click", () => beginNickname(chip, member.peerId, next.nicknames[member.peerId] || ""));
+        chip.append(nick);
+      }
       if (host && member.peerId !== next.self.peerId) {
         const remove = document.createElement("button");
         remove.type = "button";
@@ -858,8 +974,17 @@ function boot(host: HTMLElement): void {
     must<HTMLButtonElement>("#brief-start").disabled = !connected || current.running;
     must<HTMLButtonElement>("#brief-extend").disabled = !connected || (!current.running && current.turnsUsed === 0);
     const anchor = `${active ?? ""}:${sessionId}`;
-    if (briefAnchor && briefAnchor !== anchor) setBriefOpen(false);
+    if (briefAnchor && briefAnchor !== anchor) {
+      setBriefOpen(false);
+      briefDockKey = "";
+    }
     briefAnchor = anchor;
+    const briefBox = must<HTMLElement>("#brief");
+    briefBox.dataset.session = sessionId;
+    const hidden = hiddenBriefs.has(sessionId);
+    briefBox.classList.toggle("is-hidden", hidden);
+    must<HTMLButtonElement>("#brief-hide").textContent = hidden ? "Hiện" : "Ẩn";
+    must<HTMLButtonElement>("#brief-new").textContent = current.topic.trim() ? "Sửa chủ đề" : "Thêm chủ đề";
     const summary = must<HTMLButtonElement>("#brief-summary");
     const title = current.topic.trim();
     summary.textContent = title || "Chưa đặt chủ đề";
@@ -869,6 +994,7 @@ function boot(host: HTMLElement): void {
     const turnNote = turnName && current.running ? `Đến lượt ${turnName} · ` : "";
     must<HTMLElement>("#brief-meter").textContent = `${turnNote}${briefMeter(current)}${fileNote}`;
     paintBriefFiles(sessionId, current.files, current.running);
+    paintBriefDock(sessionId, current.files);
     const result = latestResult(lines);
     const box = must<HTMLElement>("#brief-result");
     const resultTextNode = box.querySelector("span");
@@ -905,6 +1031,50 @@ function boot(host: HTMLElement): void {
     must<HTMLElement>("#result-body").innerHTML = renderMarkdownHtml(text);
   }
 
+  function paintBriefDock(sessionId: string, files: BriefFile[]): void {
+    const dock = must<HTMLElement>("#brief-dock");
+    const key = `${sessionId}:${files.map((file) => `${file.name}:${file.path ?? ""}`).join("|")}`;
+    if (key === briefDockKey) return;
+    briefDockKey = key;
+    dock.replaceChildren();
+    dock.hidden = files.length === 0;
+    for (const file of files) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "brief-preview";
+      button.dataset.tip = `Xem ${file.name}`;
+      const ref = file.path ? fileRef(file.path) : null;
+      if (ref?.preview === "image" && file.path) {
+        const img = document.createElement("img");
+        img.alt = file.name;
+        img.src = previewSrc(file.path);
+        button.append(img);
+      }
+      const name = document.createElement("span");
+      name.textContent = file.name;
+      button.append(name);
+      button.addEventListener("click", () => {
+        void openBriefPreview(sessionId, file);
+      });
+      dock.append(button);
+    }
+  }
+
+  async function openBriefPreview(sessionId: string, file: BriefFile): Promise<void> {
+    const ref = file.path ? fileRef(file.path) : null;
+    if (ref) {
+      showDock(ref);
+      return;
+    }
+    const opened = await window.lan.openBriefFile(sessionId, file.name);
+    if (opened) {
+      showDock(opened);
+      return;
+    }
+    if (file.path) return;
+    flash("Không thấy file trên máy này.");
+  }
+
   function setIfIdle(el: HTMLInputElement | HTMLTextAreaElement, value: string): void {
     if (document.activeElement === el) return;
     if (el.value !== value) el.value = value;
@@ -926,9 +1096,13 @@ function boot(host: HTMLElement): void {
     for (const file of files) {
       const row = document.createElement("div");
       row.className = "brief-file";
-      const name = document.createElement("span");
+      const name = document.createElement("button");
+      name.type = "button";
       name.textContent = file.name;
-      name.title = file.kind;
+      name.title = `Xem ${file.name}`;
+      name.addEventListener("click", () => {
+        void openBriefPreview(sessionId, file);
+      });
       const remove = document.createElement("button");
       remove.type = "button";
       remove.textContent = "Bỏ";
@@ -955,7 +1129,7 @@ function boot(host: HTMLElement): void {
       const line = lines[index];
       if (line.kind !== "agent" || line.pending) continue;
       const found = resultText(line.text);
-      if (found) return found;
+      if (found) return shownMentionText(found);
     }
     return "";
   }
@@ -1112,7 +1286,7 @@ function boot(host: HTMLElement): void {
       title.textContent = `${row.session.title}${next.unreadSessions.includes(row.session.id) ? " · mới" : ""}`;
       const meta = document.createElement("small");
       const when = new Date(row.session.updatedAt).toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" });
-      const preview = (row.matched?.text || row.last?.text || "").replace(/\s+/g, " ").trim().slice(0, 72);
+      const preview = shownMentionText(row.matched?.text || row.last?.text || "").replace(/\s+/g, " ").trim().slice(0, 72);
       meta.textContent = `${row.lines.length} dòng · ${when}${preview ? ` · ${preview}` : ""}`;
       open.append(title, meta);
       const edit = document.createElement("button");
@@ -1123,9 +1297,17 @@ function boot(host: HTMLElement): void {
       edit.dataset.tip = "Sửa tên phiên";
       edit.setAttribute("aria-label", "Sửa tên phiên");
       edit.innerHTML = icon("pencil");
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "icon-btn history-delete";
+      remove.dataset.deleteSession = row.session.id;
+      remove.dataset.peer = row.session.peerId;
+      remove.dataset.tip = parseGroupKey(row.session.peerId) ? "Xóa hội thoại nhóm" : "Xóa phiên hội thoại";
+      remove.setAttribute("aria-label", remove.dataset.tip);
+      remove.innerHTML = icon("trash");
       const item = document.createElement("div");
       item.className = "history-row";
-      item.append(open, edit);
+      item.append(open, edit, remove);
       box.append(item);
     }
   }
@@ -1154,7 +1336,47 @@ function boot(host: HTMLElement): void {
     if (!peerId || !sessionId) return;
     void guard(() => window.lan.renameSession(peerId, sessionId, title));
   });
+  must<HTMLButtonElement>("#delete-chat").addEventListener("click", () => {
+    if (!active || !state) return;
+    const current = state;
+    const peerId = active;
+    const sessionId = current.openSession[peerId] || "";
+    if (!sessionId) return;
+    const groupId = parseGroupKey(peerId);
+    const host = groupId ? current.groups.some((group) => group.id === groupId && group.hostId === current.self.peerId) : false;
+    const message = groupId
+      ? host
+        ? "Xóa hội thoại của cả nhóm?"
+        : "Xóa hội thoại nhóm trên máy này?"
+      : "Xóa phiên hội thoại này trên máy này?";
+    if (!window.confirm(message)) return;
+    void guard(() => window.lan.deleteSession(peerId, sessionId));
+  });
+  must<HTMLButtonElement>("#delete-group").addEventListener("click", () => {
+    const groupId = active ? parseGroupKey(active) : null;
+    if (!groupId || !state) return;
+    const current = state;
+    const host = current.groups.some((group) => group.id === groupId && group.hostId === current.self.peerId);
+    if (!window.confirm(host ? "Xóa nhóm này cho mọi máy?" : "Rời nhóm này?")) return;
+    void guard(() => window.lan.leaveGroup(groupId));
+  });
   must<HTMLElement>("#history-list").addEventListener("click", (event) => {
+    const remove = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-delete-session]");
+    if (remove?.dataset.deleteSession && remove.dataset.peer) {
+      const peerId = remove.dataset.peer;
+      const sessionId = remove.dataset.deleteSession;
+      const groupId = parseGroupKey(peerId);
+      const current = state;
+      const host = Boolean(groupId && current?.groups.some((group) => group.id === groupId && group.hostId === current.self.peerId));
+      const message = groupId
+        ? host
+          ? "Xóa hội thoại của cả nhóm?"
+          : "Xóa hội thoại nhóm trên máy này?"
+        : "Xóa phiên hội thoại này trên máy này?";
+      if (!window.confirm(message)) return;
+      void guard(() => window.lan.deleteSession(peerId, sessionId));
+      return;
+    }
     const edit = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-edit-session]");
     if (edit?.dataset.editSession && edit.dataset.peer) {
       const peerId = edit.dataset.peer;
@@ -1189,15 +1411,71 @@ function boot(host: HTMLElement): void {
     });
   });
 
+  function displayName(next: AppState, peerId: string, real: string): string {
+    if (peerId === next.self.peerId) return real;
+    return next.nicknames?.[peerId]?.trim() || real;
+  }
+
+  function personName(peerId: string): string {
+    if (!state) return "";
+    const peer = state.peers.find((item) => item.peerId === peerId);
+    if (peer) return peer.name;
+    for (const group of state.groups) {
+      const member = group.members.find((item) => item.peerId === peerId);
+      if (member) return member.name;
+    }
+    return "";
+  }
+
+  function beginNickname(host: HTMLElement, peerId: string, current: string): void {
+    if (host.querySelector("input.nick-edit")) return;
+    const input = document.createElement("input");
+    input.className = "nick-edit";
+    input.maxLength = 40;
+    input.value = current;
+    input.placeholder = "Biệt danh";
+    input.setAttribute("aria-label", "Biệt danh");
+    const label = host.querySelector("strong") ?? host.querySelector(":scope > span");
+    label?.replaceWith(input);
+    input.focus();
+    input.select();
+    const finish = () => {
+      if (!input.isConnected) return;
+      input.replaceWith(label || document.createTextNode(""));
+      void guard(() => window.lan.setNickname(peerId, input.value));
+    };
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        input.blur();
+      } else if (event.key === "Escape") {
+        input.value = current;
+        input.blur();
+      }
+    });
+    input.addEventListener("blur", finish);
+  }
+
   function mentionChoices(): MentionRef[] {
     if (!state || !active) return [];
     const group = state.groups.find((item) => groupKey(item.id) === active);
-    if (group) return group.members;
-    const peer = state.peers.find((item) => item.peerId === active);
-    const people: MentionRef[] = [];
-    if (state.self.name) people.push({ peerId: state.self.peerId, name: state.self.name });
-    if (peer) people.push({ peerId: peer.peerId, name: peer.name });
-    return people;
+    const people = group ? group.members.slice() : [];
+    if (!group) {
+      const peer = state.peers.find((item) => item.peerId === active);
+      if (state.self.name) people.push({ peerId: state.self.peerId, name: state.self.name });
+      if (peer) people.push({ peerId: peer.peerId, name: peer.name });
+    }
+    const aliased: MentionRef[] = [];
+    for (const person of people) {
+      if (person.peerId === state.self.peerId) continue;
+      const nick = (state.nicknames?.[person.peerId] || "").trim();
+      if (!nick || nick.toLowerCase() === "me" || nick.toLowerCase() === person.name.toLowerCase()) continue;
+      aliased.push({ peerId: person.peerId, name: nick });
+    }
+    const base = [...aliased, ...people];
+    const selfId = state.self.peerId;
+    if (!selfId || base.some((person) => person.peerId === selfId && person.name.toLowerCase() === "me")) return base;
+    return [{ peerId: selfId, name: "me" }, ...base];
   }
 
   function currentMention(): { start: number; query: string } | null {
@@ -1225,11 +1503,24 @@ function boot(host: HTMLElement): void {
     if (mentionIndex >= matches.length) mentionIndex = 0;
     pop.hidden = false;
     pop.replaceChildren();
+    const selfId = state?.self.peerId ?? "";
+    const selfName = state?.self.name ?? "";
     matches.forEach((person, index) => {
       const button = document.createElement("button");
       button.type = "button";
       button.className = index === mentionIndex ? "active" : "";
-      button.textContent = `@${person.name}`;
+      button.dataset.name = person.name;
+      const label = document.createElement("span");
+      label.textContent = `@${person.name}`;
+      button.append(label);
+      const mine = person.peerId === selfId && person.name.toLowerCase() === "me";
+      const nick = (state?.nicknames?.[person.peerId] || "").trim();
+      const named = personName(person.peerId);
+      if (mine || (nick && person.name.toLowerCase() === nick.toLowerCase() && named && named.toLowerCase() !== nick.toLowerCase())) {
+        const hint = document.createElement("small");
+        hint.textContent = mine ? (selfName && selfName.toLowerCase() !== "me" ? `máy này · ${selfName}` : "máy này") : named;
+        button.append(hint);
+      }
       button.addEventListener("mousedown", (event) => {
         event.preventDefault();
         insertMention(person.name);
@@ -1259,6 +1550,28 @@ function boot(host: HTMLElement): void {
       toast.hidden = true;
     }, 3200);
   }
+
+  function openNotice(notice: ChatNotice): void {
+    active = notice.peerId;
+    focusLine = "";
+    void guard(async () => {
+      const next = await window.lan.openSession(notice.peerId, notice.sessionId);
+      if (next && typeof next === "object") paint(next as AppState);
+    });
+  }
+}
+
+function unreadFor(next: AppState, peerId: string): number {
+  const ids = new Set(next.unreadSessions);
+  return next.sessions.filter((session) => session.peerId === peerId && ids.has(session.id)).length;
+}
+
+function unreadMark(count: number): HTMLElement | string {
+  if (count <= 0) return "";
+  const mark = document.createElement("span");
+  mark.className = "unread-count";
+  mark.textContent = count > 9 ? "9+" : String(count);
+  return mark;
 }
 
 function paintMessages(host: HTMLElement, lines: ChatLine[], selfId: string, stick: boolean, query = ""): void {
@@ -1293,9 +1606,11 @@ function paintMessages(host: HTMLElement, lines: ChatLine[], selfId: string, sti
         ? article.querySelector<HTMLElement>(":scope > .preview .md-body")
         : article.querySelector<HTMLElement>(":scope > p:not(.attach-note)");
       if (line.kind === "agent" && body) {
-        if (body.dataset.source !== text) {
-          body.dataset.source = text;
-          body.innerHTML = agentHtml(text);
+        const shown = text === "…" ? text : shownMentionText(text);
+        const key = `${text}\n${nickSignature()}\n${shown}`;
+        if (body.dataset.source !== key) {
+          body.dataset.source = key;
+          body.innerHTML = agentHtml(shown);
           changed = true;
         }
       } else if (body) {
@@ -1341,8 +1656,9 @@ function renderLine(line: ChatLine, selfId: string): HTMLElement {
     const body = document.createElement("article");
     body.className = "markdown md-body";
     const text = line.text || (line.pending ? "…" : "");
-    body.dataset.source = text;
-    body.innerHTML = agentHtml(text);
+    const shown = text === "…" ? text : shownMentionText(text);
+    body.dataset.source = `${text}\n${nickSignature()}\n${shown}`;
+    body.innerHTML = agentHtml(shown);
     if (line.pending) body.classList.add("pending");
     box.append(body);
     article.append(box);
@@ -1367,9 +1683,43 @@ function renderLine(line: ChatLine, selfId: string): HTMLElement {
 
 function plainHtml(line: ChatLine): { key: string; html: string } {
   const text = line.text || (line.pending ? "…" : "");
-  const marks = (line.mentions ?? []).map((item) => item.peerId).join(",");
-  const html = line.kind === "system" || text === "…" ? escapeHtml(text) : mentionHtml(text, line.mentions);
-  return { key: `${text}\n${marks}`, html };
+  const shown = line.kind === "system" || text === "…" ? text : shownMentionText(text);
+  const html = line.kind === "system" || text === "…" ? escapeHtml(text) : mentionHtml(shown, mentionFaces);
+  return { key: `${text}\n${nickSignature()}\n${shown}`, html };
+}
+
+function shownMentionText(text: string): string {
+  if (!text) return text;
+  return rewriteMentionLabels(text, mentionFaces, (hit) => {
+    if (hit.peerId === mentionSelf) return hit.name;
+    return mentionNicks[hit.peerId]?.trim() || hit.name;
+  }).text;
+}
+
+function nickSignature(): string {
+  return Object.entries(mentionNicks)
+    .map(([id, name]) => `${id}:${name}`)
+    .sort()
+    .join("|");
+}
+
+function mentionFacesOf(state: AppState): GroupMember[] {
+  const faces: GroupMember[] = [
+    { peerId: state.self.peerId, name: state.self.name },
+    { peerId: state.self.peerId, name: "me" },
+  ];
+  const add = (peerId: string, name: string) => {
+    const clean = name.replace(/\s+/g, " ").trim();
+    if (!peerId || !clean) return;
+    if (faces.some((face) => face.peerId === peerId && face.name.toLowerCase() === clean.toLowerCase())) return;
+    faces.push({ peerId, name: clean });
+  };
+  for (const peer of state.peers) add(peer.peerId, peer.name);
+  for (const group of state.groups) {
+    for (const member of group.members) add(member.peerId, member.name);
+  }
+  for (const [peerId, name] of Object.entries(state.nicknames)) add(peerId, name);
+  return faces;
 }
 
 function mentionHtml(text: string, mentions: MentionRef[] | undefined): string {
@@ -1589,6 +1939,7 @@ function iconSprite(): string {
     item("hash", `<path d="M9 4.5L7.5 19.5M16.5 4.5L15 19.5M5 9h14M4.5 15h14"/>`),
     item("terminal", `<path d="M5 8l4 4-4 4M12 16h7"/>`),
     item("expand", `<path d="M9 4H4v5M15 4h5v5M20 15v5h-5M4 15v5h5"/>`),
+    item("trash", `<path d="M5 7.5h14"/><path d="M9.2 7.4V5.6h5.6v1.8"/><path d="M7.4 7.5l.6 11.2h8l.6-11.2"/>`),
   ].join("")}</svg>`;
 }
 

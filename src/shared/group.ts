@@ -47,6 +47,25 @@ export function parseGroupKey(key: string): string | null {
   return id;
 }
 
+export function withAliases(people: GroupMember[], aliases: GroupMember[]): GroupMember[] {
+  const known = new Set(people.map((person) => person.peerId));
+  const extra: GroupMember[] = [];
+  for (const alias of aliases) {
+    const name = alias.name.replace(/\s+/g, " ").trim().slice(0, 40);
+    if (!name || !known.has(alias.peerId)) continue;
+    const same = (person: GroupMember) => person.peerId === alias.peerId && person.name.toLowerCase() === name.toLowerCase();
+    if (people.some(same) || extra.some(same)) continue;
+    extra.push({ peerId: alias.peerId, name });
+  }
+  return [...extra, ...people];
+}
+
+export function withSelfAlias(people: GroupMember[], selfId: string): GroupMember[] {
+  if (!selfId) return people;
+  if (people.some((person) => person.peerId === selfId && person.name.trim().toLowerCase() === "me")) return people;
+  return [{ peerId: selfId, name: "me" }, ...people];
+}
+
 export function mentionRanges(text: string, people: GroupMember[]): MentionHit[] {
   const ranked = people
     .map((person) => ({ peerId: person.peerId, name: person.name.trim() }))
@@ -80,6 +99,25 @@ export function mentionTargets(text: string, people: GroupMember[]): MentionRef[
     list.push({ peerId: hit.peerId, name: hit.name });
   }
   return list;
+}
+
+export function rewriteMentionLabels(
+  text: string,
+  people: GroupMember[],
+  labelFor: (hit: MentionHit) => string,
+): { text: string; mentions: MentionRef[] } {
+  const hits = mentionRanges(text, people);
+  if (!hits.length) return { text, mentions: [] };
+  let next = "";
+  let cursor = 0;
+  const mentions: MentionRef[] = [];
+  for (const hit of hits) {
+    const label = labelFor(hit).replace(/\s+/g, " ").trim() || hit.name;
+    next += text.slice(cursor, hit.start + 1) + label;
+    cursor = hit.end;
+    if (!mentions.some((item) => item.peerId === hit.peerId)) mentions.push({ peerId: hit.peerId, name: label });
+  }
+  return { text: next + text.slice(cursor), mentions };
 }
 
 export function speakOrder(

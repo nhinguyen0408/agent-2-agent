@@ -1,13 +1,14 @@
 import path from "node:path";
-import { app, BrowserWindow, dialog, ipcMain, screen, type OpenDialogOptions } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Notification, screen, shell, type OpenDialogOptions } from "electron";
 import { BRIEF_EXTEND } from "../shared/brief";
-import { IPC, type FileRef, type Settings } from "../shared/types";
+import { IPC, type ChatNotice, type FileRef, type Settings } from "../shared/types";
 import { fileRef } from "../shared/preview";
 import { listWorkFiles } from "./files";
 import { AppCore } from "./core";
 import { allowPreview, attachPreviewProtocol, registerPreviewScheme } from "./preview";
 
 registerPreviewScheme();
+app.setAppUserModelId("local.lanagents.app");
 
 const DISCUSS_EXTENSIONS = ["txt", "md", "markdown", "png", "jpg", "jpeg", "gif", "webp", "bmp", "pdf", "docx", "xlsx", "xls", "csv"];
 
@@ -40,6 +41,23 @@ if (!gotLock) {
   const broadcast = () => {
     if (!core || !mainWindow || mainWindow.isDestroyed()) return;
     mainWindow.webContents.send(IPC.state, core.snapshot());
+  };
+
+  const showNotice = (notice: ChatNotice) => {
+    const win = mainWindow;
+    if (win && !win.isDestroyed() && !win.isFocused()) win.flashFrame(true);
+    const focused = Boolean(win && !win.isDestroyed() && win.isFocused());
+    if (focused || !Notification.isSupported()) return;
+    const toast = new Notification({ title: notice.title, body: notice.body });
+    toast.on("click", () => {
+      const shown = mainWindow;
+      if (!shown || shown.isDestroyed()) return;
+      if (shown.isMinimized()) shown.restore();
+      shown.show();
+      shown.focus();
+      shown.webContents.send(IPC.notice, { ...notice, open: true });
+    });
+    toast.show();
   };
 
   const dialogHost = (): BrowserWindow | undefined => {
@@ -109,6 +127,7 @@ if (!gotLock) {
   const createWindow = async () => {
     core = new AppCore(profile, sessionAutoAccept);
     core.onChange = broadcast;
+    core.onNotice = showNotice;
     await core.start();
     const win = new BrowserWindow({
       width: 1180,
@@ -132,6 +151,11 @@ if (!gotLock) {
       if (mainWindow === win) mainWindow = null;
       if (previewWindow && !previewWindow.isDestroyed()) previewWindow.close();
     });
+    win.on("focus", () => {
+      core?.setWindowFocused(true);
+      win.flashFrame(false);
+    });
+    win.on("blur", () => core?.setWindowFocused(false));
     win.once("ready-to-show", () => win.show());
     win.webContents.on("did-finish-load", () => {
       if (!core) return;
@@ -154,6 +178,9 @@ if (!gotLock) {
       ipcMain.handle(IPC.getState, () => {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.snapshot();
+      });
+      ipcMain.handle(IPC.watch, (_event, peerId: string, sessionId: string) => {
+        core?.setWatch(String(peerId ?? ""), String(sessionId ?? ""));
       });
       ipcMain.handle(IPC.saveSettings, (_event, settings: Settings) => {
         if (!core) throw new Error("App chưa sẵn sàng");
@@ -197,6 +224,18 @@ if (!gotLock) {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.removeBriefFile(String(peerId), String(name ?? ""));
       });
+      ipcMain.handle(IPC.openBriefFile, async (_event, sessionId: string, name: string) => {
+        if (!core) throw new Error("App chưa sẵn sàng");
+        const found = core.locateBriefFile(String(sessionId), String(name ?? ""));
+        if (!found) return null;
+        if (found.preview) {
+          openPreviewWindow(found.preview);
+          return found.preview;
+        }
+        const error = await shell.openPath(found.path);
+        if (error) throw new Error("Không mở được file đính kèm.");
+        return null;
+      });
       ipcMain.handle(IPC.startBrief, (_event, peerId: string) => {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.startBrief(String(peerId));
@@ -220,6 +259,14 @@ if (!gotLock) {
       ipcMain.handle(IPC.renameGroup, (_event, groupId: string, title: string) => {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.renameGroup(String(groupId), String(title ?? ""));
+      });
+      ipcMain.handle(IPC.setNickname, (_event, peerId: string, nickname: string) => {
+        if (!core) throw new Error("App chưa sẵn sàng");
+        return core.setNickname(String(peerId), String(nickname ?? ""));
+      });
+      ipcMain.handle(IPC.deleteSession, (_event, peerId: string, sessionId: string) => {
+        if (!core) throw new Error("App chưa sẵn sàng");
+        return core.deleteSession(String(peerId), String(sessionId));
       });
       ipcMain.handle(IPC.dialogue, (_event, peerId: string, topic: string, replies: number) =>
         core?.startDialogue(peerId, topic, replies),

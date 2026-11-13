@@ -25,6 +25,7 @@ type Disk = {
   transcripts: Record<string, ChatLine[]>;
   briefs?: Record<string, ProjectBrief>;
   groups?: GroupRoom[];
+  nicknames?: Record<string, string>;
 };
 
 export function defaultSettings(profile: string): Settings {
@@ -49,6 +50,7 @@ export class Store {
   transcripts: Record<string, ChatLine[]>;
   briefs: Record<string, ProjectBrief>;
   groups: GroupRoom[];
+  nicknames: Record<string, string>;
 
   constructor(profile: string) {
     this.file = path.join(app.getPath("userData"), "config.json");
@@ -63,6 +65,7 @@ export class Store {
     this.transcripts = history.transcripts;
     this.briefs = sanitizeBriefs(disk?.briefs);
     this.groups = sanitizeGroups(disk?.groups);
+    this.nicknames = sanitizeNicknames(disk?.nicknames);
     for (const lines of Object.values(this.transcripts)) {
       for (const line of lines) {
         if (line.pending) {
@@ -83,6 +86,7 @@ export class Store {
       transcripts: this.transcripts,
       briefs: this.briefs,
       groups: this.groups,
+      nicknames: this.nicknames,
     };
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
     const tmp = `${this.file}.tmp`;
@@ -107,6 +111,19 @@ export function sanitizeSettings(input: Partial<Settings> & { cursorCwd?: string
     cursorCommand: (input.cursorCommand || "agent").trim() || "agent",
     autoAccept: Boolean(input.autoAccept),
   };
+}
+
+function sanitizeNicknames(input: unknown): Record<string, string> {
+  if (!input || typeof input !== "object") return {};
+  const nicknames: Record<string, string> = {};
+  for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+    if (!/^[a-zA-Z0-9_-]{1,80}$/.test(key) || typeof value !== "string") continue;
+    const name = value.replace(/\s+/g, " ").trim().slice(0, 40);
+    if (!name || name.toLowerCase() === "me") continue;
+    nicknames[key] = name;
+    if (Object.keys(nicknames).length >= 200) break;
+  }
+  return nicknames;
 }
 
 function readDisk(file: string): Disk | null {
