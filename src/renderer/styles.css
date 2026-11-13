@@ -357,8 +357,8 @@ label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 12px; co
 .empty h2 { margin: 0 0 0.35rem; color: var(--text); font-size: 1.15rem; font-weight: 650; }
 
 .chat-panel {
-  display: grid;
-  grid-template-rows: auto auto 1fr auto auto;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
 }
 
@@ -419,6 +419,7 @@ label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 12px; co
 }
 
 .messages {
+  flex: 1;
   overflow: auto;
   padding: 14px;
   display: flex;
@@ -447,6 +448,68 @@ label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 12px; co
 .line.mine p { background: var(--accent); color: white; }
 
 .line.agent p { box-shadow: inset 3px 0 0 var(--agent); }
+
+.line.agent .agent-md {
+  border: 0;
+  border-radius: 16px;
+  background: #f2f2f7;
+  box-shadow: inset 3px 0 0 var(--agent);
+}
+
+.line.mine.agent .agent-md {
+  background: #e7f1ff;
+  box-shadow: inset -3px 0 0 var(--accent);
+}
+
+.line.mine.agent .agent-md .markdown pre { background: white; }
+
+.line.agent .agent-md .markdown {
+  max-height: none;
+  overflow: visible;
+  padding: 8px 12px;
+  background: transparent;
+  color: var(--text);
+  font-size: 13.5px;
+  line-height: 1.45;
+}
+
+.line.agent .agent-md .markdown :is(p, h1, h2, h3, ul, ol, li, blockquote, pre, strong, em, code) {
+  color: var(--text);
+}
+
+.line.agent .agent-md .markdown :is(p, h1, h2, h3, ul, ol, blockquote, pre) {
+  margin: 0.4em 0;
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+  border-radius: 0;
+  white-space: normal;
+}
+
+.line.agent .agent-md .markdown :first-child { margin-top: 0; }
+
+.line.agent .agent-md .markdown :last-child { margin-bottom: 0; }
+
+.line.agent .agent-md .markdown h1,
+.line.agent .agent-md .markdown h2,
+.line.agent .agent-md .markdown h3 { font-size: 1em; }
+
+.line.agent .agent-md .markdown ul,
+.line.agent .agent-md .markdown ol { padding-left: 1.2rem; }
+
+.line.agent .agent-md .markdown pre {
+  white-space: pre-wrap;
+  padding: 0.45rem 0.6rem;
+  border-radius: 8px;
+  background: white;
+}
+
+.line.agent .agent-md .markdown code {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 0.92em;
+}
+
+.line.agent .agent-md .markdown a { color: var(--accent); }
 
 .line.system { align-self: center; max-width: 100%; }
 
@@ -549,6 +612,157 @@ body.preview-app { overflow: hidden; background: var(--bg); }
 
 .attach-note { display: block; }
 
+.brief {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 8px 6px;
+  border-top: 1px solid var(--line);
+  background: var(--card);
+  z-index: 6;
+}
+
+.brief-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  min-height: 32px;
+}
+
+.brief-summary {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  padding: 0 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  font-weight: 600;
+}
+
+.brief-summary.empty { color: var(--muted); font-weight: 500; }
+
+.brief-summary:hover { background: rgba(0, 0, 0, 0.04); }
+
+#brief-toggle.active {
+  background: rgba(0, 122, 255, 0.12);
+  color: var(--accent);
+}
+
+.brief-pop {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: calc(100% + 6px);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: min(22rem, 62vh);
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 12px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+}
+
+.brief-pop-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.brief label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.brief textarea { min-height: 2.6rem; }
+
+.brief-meter {
+  flex: 0 0 auto;
+  margin-right: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.brief-files { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.brief-file {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 2px 4px 2px 8px;
+  border-radius: 8px;
+  background: var(--bg);
+  font-size: 12px;
+}
+
+.brief-file span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.brief-file button {
+  height: 24px;
+  padding: 0 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.brief-actions { display: flex; align-items: center; gap: 6px; }
+
+.brief-go, .brief-more {
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-weight: 650;
+}
+
+.brief-go { background: var(--accent); color: white; }
+
+.brief-go:hover { background: var(--accent-press); }
+
+.brief-more {
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1px rgba(0, 122, 255, 0.35);
+}
+
+.brief-result {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  width: 100%;
+  max-height: 2.8em;
+  margin: 0;
+  overflow: hidden;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: rgba(36, 138, 61, 0.1);
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.35;
+  text-align: left;
+  white-space: pre-wrap;
+}
+
+.brief-result.open {
+  display: block;
+  max-height: 8.5rem;
+  overflow: auto;
+}
+
 .composer { border-top: 1px solid var(--line); }
 
 .composer-actions { display: flex; gap: 2px; align-items: center; margin-top: 8px; }
@@ -556,6 +770,8 @@ body.preview-app { overflow: hidden; background: var(--bg); }
 .composer-actions .spacer { flex: 1; }
 
 .replies {
+  display: flex;
+  flex: 0 0 auto;
   flex-direction: row;
   align-items: center;
   margin: 0;
@@ -565,6 +781,7 @@ body.preview-app { overflow: hidden; background: var(--bg); }
   padding: 0 6px 0 8px;
   border-radius: 8px;
   color: var(--muted);
+  white-space: nowrap;
 }
 
 .replies:hover { background: rgba(0, 0, 0, 0.04); }

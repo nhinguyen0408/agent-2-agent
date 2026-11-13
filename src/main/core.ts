@@ -4,6 +4,18 @@ import path from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
 import { Server, type Socket } from "socket.io";
 import { io as ioClient, type Socket as ClientSocket } from "socket.io-client";
+import {
+  BRIEF_EXTEND,
+  BRIEF_FILE_MAX,
+  BRIEF_GOAL_CAP,
+  BRIEF_TOPIC_CAP,
+  BRIEF_TURN_HARD,
+  BRIEF_TURN_MAX,
+  clampTurnLimit,
+  emptyBrief,
+  sanitizeBrief,
+  type ProjectBrief,
+} from "../shared/brief";
 import type {
   ActivityPatch,
   AppState,
@@ -17,16 +29,18 @@ import type {
   PeerActivity,
   PeerView,
   Settings,
+  WireBrief,
   WireChat,
   WireDelta,
+  WireResume,
 } from "../shared/types";
 import { DEFAULT_PORT, PORT_SPAN } from "../shared/types";
 import { AgentHost, type ModelTurn } from "./agents";
 import { detectLocalClis, installedCliList, parseCliList } from "./cliDetect";
 import { Discovery, lanIPv4, normalizeIp } from "./discovery";
-import { fileNameFromHeader, formatBytes, MAX_FILE_BYTES, readFileLimited, resolveInside, safeFileName, saveReceivedFile } from "./files";
+import { briefFolder, fileNameFromHeader, formatBytes, MAX_FILE_BYTES, readFileLimited, resolveInside, safeFileName, saveExact, saveReceivedFile } from "./files";
 import { allowPreview } from "./preview";
-import { discussExcerpt, discussKind } from "../shared/discuss";
+import { discussExcerpt, discussKind, isDiscussKind } from "../shared/discuss";
 import { fileRef, type FileRef } from "../shared/preview";
 import { bearer, listen, readBody, readJson, remoteIp, sendJson } from "./httpUtil";
 import { Store, sanitizeSettings } from "./store";
@@ -227,6 +241,7 @@ export class AppCore {
       openSession: { ...this.store.openSessions },
       unreadSessions: [...this.unread],
       transcripts: this.store.transcripts,
+      briefs: this.store.briefs,
       logs: [...this.logs],
     };
   }
@@ -389,21 +404,142 @@ export class AppCore {
   }
 
   async startDialogue(peerId: string, topic: string, replies: number): Promise<void> {
-    const clean = topic.trim().slice(0, LINE_CAP);
+    const clean = topic.trim().slice(0, BRIEF_TOPIC_CAP);
     if (!clean) return;
+    const sessionId = this.ensureSession(peerId);
+    const brief = this.ensureBrief(sessionId);
+    if (!brief.running) {
+      brief.topic = clean;
+      brief.turnLimit = clampTurnLimit(replies, DIALOGUE_CAP);
+    }
+    await this.startBrief(peerId);
+  }
+
+  saveBrief(peerId: string, patch: { topic?: string; goal?: string; turnLimit?: number }): AppState {
+    const sessionId = this.ensureSession(peerId);
+    const brief = this.ensureBrief(sessionId);
+    if (!brief.running) {
+      brief.topic = String(patch.topic ?? brief.topic).trim().slice(0, BRIEF_TOPIC_CAP);
+      brief.goal = String(patch.goal ?? brief.goal).trim().slice(0, BRIEF_GOAL_CAP);
+      brief.turnLimit = clampTurnLimit(Number(patch.turnLimit ?? brief.turnLimit), BRIEF_TURN_MAX);
+      this.syncBrief(peerId, sessionId);
+      this.scheduleSave();
+      this.pushNow();
+    }
+    return this.snapshot();
+  }
+
+  async addBriefFiles(peerId: string, paths: string[]): Promise<AppState> {
+    const sessionId = this.ensureSession(peerId);
+    const brief = this.ensureBrief(sessionId);
+    if (brief.running) return this.snapshot();
+    let offline = false;
+    for (const filePath of Array.isArray(paths) ? paths : []) {
+      if (typeof filePath !== "string" || !filePath.trim()) continue;
+      const replacing = brief.files.some((file) => file.name === safeFileName(path.basename(filePath)));
+      if (!replacing && brief.files.length >= BRIEF_FILE_MAX) {
+        this.system(peerId, `Hồ sơ chỉ giữ ${BRIEF_FILE_MAX} file.`);
+        break;
+      }
+      try {
+        const stored = await this.storeBriefFile(sessionId, filePath);
+        if (this.isLinked(peerId)) await this.postBriefFile(peerId, sessionId, stored.name, stored.data);
+        else offline = true;
+        const next = { name: stored.name, kind: stored.kind, excerpt: stored.excerpt };
+        const index = brief.files.findIndex((file) => file.name === stored.name);
+        if (index >= 0) brief.files[index] = next;
+        else brief.files.push(next);
+      } catch (err) {
+        this.system(peerId, err instanceof Error ? err.message : "Không thêm được file context.");
+      }
+    }
+    if (offline) this.system(peerId, "File context đang ở máy này. Khi bắt đầu và đã nối, file được gửi sang máy kia.");
+    this.syncBrief(peerId, sessionId);
+    this.scheduleSave();
+    this.pushNow();
+    return this.snapshot();
+  }
+
+  removeBriefFile(peerId: string, name: string): AppState {
+    const sessionId = this.ensureSession(peerId);
+    const brief = this.ensureBrief(sessionId);
+    if (!brief.running) {
+      brief.files = brief.files.filter((file) => file.name !== safeFileName(name));
+      this.syncBrief(peerId, sessionId);
+      this.scheduleSave();
+      this.pushNow();
+    }
+    return this.snapshot();
+  }
+
+  async startBrief(peerId: string): Promise<AppState> {
+    const sessionId = this.ensureSession(peerId);
+    const brief = this.ensureBrief(sessionId);
+    if (!brief.topic.trim()) {
+      this.system(peerId, "Hãy nhập chủ đề trước khi bắt đầu.");
+      return this.snapshot();
+    }
     if (!this.isLinked(peerId)) {
       this.system(peerId, "Cần nối socket trước khi cho hai agent nói với nhau.");
-      return;
+      return this.snapshot();
     }
     this.halt(peerId, true);
-    const left = Math.max(1, Math.min(DIALOGUE_CAP, Math.round(replies) || 4));
-    const sessionId = this.ensureSession(peerId);
-    this.nameSession(peerId, sessionId, clean);
-    const line = this.makeLine(peerId, this.store.peerId, this.store.settings.name, "human", clean);
+    brief.running = true;
+    brief.turnsUsed = 0;
+    brief.turnLimit = clampTurnLimit(brief.turnLimit, BRIEF_TURN_MAX);
+    this.pushNow();
+    try {
+      await this.pushBriefFiles(peerId, sessionId, brief);
+    } catch (err) {
+      brief.running = false;
+      this.system(peerId, err instanceof Error ? err.message : "Không gửi được file context.");
+      return this.snapshot();
+    }
+    this.nameSession(peerId, sessionId, brief.topic);
+    const line = this.makeLine(peerId, this.store.peerId, this.store.settings.name, "human", brief.topic);
     this.appendLine(sessionId, line);
     const wire = this.toWire(line, sessionId);
-    wire.dialogue = { repliesLeft: left };
-    this.sendTo(peerId, "chat", wire);
+    wire.dialogue = { repliesLeft: brief.turnLimit };
+    wire.brief = sanitizeBrief(brief);
+    this.syncBrief(peerId, sessionId);
+    if (!this.sendTo(peerId, "chat", wire)) {
+      brief.running = false;
+      this.system(peerId, "Cần nối socket trước khi cho hai agent nói với nhau.");
+    }
+    this.scheduleSave();
+    this.pushNow();
+    return this.snapshot();
+  }
+
+  async extendBrief(peerId: string, extra?: number): Promise<AppState> {
+    const add = extra === 2 || extra === 8 ? extra : BRIEF_EXTEND;
+    if (!this.isLinked(peerId)) {
+      this.system(peerId, "Cần nối socket trước khi gia hạn lượt.");
+      return this.snapshot();
+    }
+    const sessionId = this.ensureSession(peerId);
+    const brief = this.ensureBrief(sessionId);
+    if (!brief.topic.trim()) {
+      this.system(peerId, "Hãy nhập chủ đề trước khi gia hạn.");
+      return this.snapshot();
+    }
+    const nextLimit = brief.turnsUsed >= brief.turnLimit ? brief.turnsUsed + add : brief.turnLimit + add;
+    brief.turnLimit = clampTurnLimit(nextLimit, BRIEF_TURN_HARD);
+    if (brief.running) {
+      this.syncBrief(peerId, sessionId);
+      this.scheduleSave();
+      this.pushNow();
+      return this.snapshot();
+    }
+    brief.running = true;
+    this.syncBrief(peerId, sessionId);
+    const lines = this.store.transcripts[sessionId] ?? [];
+    const lastAgent = [...lines].reverse().find((line) => line.kind === "agent" && !line.pending);
+    if (lastAgent && lastAgent.fromPeerId !== this.store.peerId) void this.enqueueReply(peerId, sessionId, true);
+    else this.sendTo(peerId, "resume", { sessionId, sessionTitle: this.sessionTitle(sessionId) } satisfies WireResume);
+    this.scheduleSave();
+    this.pushNow();
+    return this.snapshot();
   }
 
   stopTalk(peerId: string): void {
@@ -472,6 +608,14 @@ export class AppCore {
       socket.on("halt", () => {
         if (!bound) return;
         this.halt(bound, false);
+      });
+      socket.on("brief", (body: WireBrief) => {
+        if (!bound) return;
+        this.onWireBrief(bound, body);
+      });
+      socket.on("resume", (body: WireResume) => {
+        if (!bound) return;
+        this.onResume(bound, body);
       });
       socket.on("aside", (body: { text?: string }) => {
         if (!bound || !body?.text) return;
@@ -574,6 +718,8 @@ export class AppCore {
     socket.on("chat", (msg: WireChat) => void this.onWireChat(peerId, msg));
     socket.on("delta", (msg: WireDelta) => this.onWireDelta(peerId, msg));
     socket.on("halt", () => this.halt(peerId, false));
+    socket.on("brief", (body: WireBrief) => this.onWireBrief(peerId, body));
+    socket.on("resume", (body: WireResume) => this.onResume(peerId, body));
     socket.on("aside", (body: { text?: string }) => {
       if (body?.text) this.system(peerId, body.text.slice(0, 500));
     });
@@ -767,6 +913,13 @@ export class AppCore {
       return;
     }
     const name = fileNameFromHeader(req.headers["x-file-name"]);
+    const briefSession = String(req.headers["x-brief-session"] || "");
+    if (/^[a-zA-Z0-9_-]{1,80}$/.test(briefSession)) {
+      const saved = await saveExact(briefFolder(this.store.settings.workDir, briefSession), name, data);
+      if (fileRef(saved)) allowPreview(saved);
+      sendJson(res, 200, { ok: true, name: path.basename(saved), bytes: data.length });
+      return;
+    }
     const saved = await saveReceivedFile(this.store.settings.workDir, name, data);
     const discuss = req.headers["x-discuss"] === "1";
     if (!discuss) {
@@ -781,7 +934,7 @@ export class AppCore {
   private async deliverDiscuss(peerId: string, filePath: string): Promise<DiscussFile> {
     const resolved = path.resolve(filePath);
     const kind = discussKind(resolved);
-    if (!kind) throw new Error("Chỉ đính kèm được txt, md, ảnh hoặc pdf.");
+    if (!kind) throw new Error("Chỉ nhận txt, md, ảnh, pdf, docx, xlsx, xls hoặc csv.");
     const data = await readFileLimited(resolved, MAX_FILE_BYTES);
     const root = path.resolve(this.store.settings.workDir);
     const rel = path.relative(root, resolved);
@@ -796,7 +949,7 @@ export class AppCore {
     };
   }
 
-  private async postFile(peerId: string, name: string, data: Buffer, discuss = false): Promise<string> {
+  private async postFile(peerId: string, name: string, data: Buffer, discuss = false, briefSession = ""): Promise<string> {
     const endpoint = this.endpoints.get(peerId) ?? this.endpointFromTrusted(peerId);
     const token = this.store.trusted[peerId]?.token;
     if (!endpoint?.host || !endpoint.port || !token) throw new Error("Hãy nối máy kia trước khi gửi file.");
@@ -809,6 +962,7 @@ export class AppCore {
           "content-type": "application/octet-stream",
           "x-file-name": encodeURIComponent(name),
           ...(discuss ? { "x-discuss": "1" } : {}),
+          ...(briefSession ? { "x-brief-session": briefSession.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 80) } : {}),
         },
         body: new Uint8Array(data),
         signal: AbortSignal.timeout(120_000),
@@ -868,11 +1022,12 @@ export class AppCore {
       this.pushNow();
       return;
     }
+    if (msg.brief) this.applyBrief(peerId, sessionId, msg.brief);
     const dialogue = msg.dialogue;
     const shouldReply = dialogue ? dialogue.repliesLeft > 0 : msg.kind === "human";
     this.pushNow();
     if (!shouldReply) return;
-    await this.enqueueReply(peerId, sessionId, dialogue);
+    await this.enqueueReply(peerId, sessionId, Boolean(dialogue && dialogue.repliesLeft > 0));
   }
 
   private onWireDelta(peerId: string, delta: WireDelta): void {
@@ -893,7 +1048,7 @@ export class AppCore {
     this.push();
   }
 
-  private enqueueReply(peerId: string, sessionId: string, dialogue?: { repliesLeft: number }): Promise<string> {
+  private enqueueReply(peerId: string, sessionId: string, loop = false): Promise<string> {
     const epoch = this.epochs.get(peerId) ?? 0;
     let resolveOut: (text: string) => void = () => undefined;
     const result = new Promise<string>((resolve) => {
@@ -901,6 +1056,10 @@ export class AppCore {
     });
     const run = async () => {
       if ((this.epochs.get(peerId) ?? 0) !== epoch) {
+        resolveOut("");
+        return;
+      }
+      if (loop && !this.briefContinues(sessionId)) {
         resolveOut("");
         return;
       }
@@ -928,6 +1087,7 @@ export class AppCore {
           signal: controller.signal,
           fileRelay: { url: `http://127.0.0.1:${this.port}/relay-file/${peerId}` },
           readings: this.readings(sessionId),
+          brief: this.promptBrief(sessionId),
           onDelta: (chunk) => {
             if ((this.epochs.get(peerId) ?? 0) !== epoch) return;
             const line = this.findLine(sessionId, id);
@@ -946,7 +1106,6 @@ export class AppCore {
           line.text = text;
           line.pending = false;
         }
-        const left = dialogue ? dialogue.repliesLeft - 1 : 0;
         const wire: WireChat = {
           id,
           fromPeerId: this.store.peerId,
@@ -956,8 +1115,8 @@ export class AppCore {
           createdAt,
           sessionId,
           sessionTitle: this.sessionTitle(sessionId),
-          dialogue: dialogue && left > 0 ? { repliesLeft: left } : undefined,
         };
+        if (loop) this.finishBriefTurn(sessionId, wire);
         this.sendTo(peerId, "chat", wire);
         this.lastError.delete(peerId);
         this.pushNow();
@@ -1097,18 +1256,37 @@ export class AppCore {
     return `\n\n[File đính kèm ${file.name}]\nĐường dẫn: ${file.path}${body}`;
   }
 
-  private readings(sessionId: string): { name: string; path: string; kind: string }[] {
+  private readings(sessionId: string): { name: string; path: string; kind: string; excerpt?: string }[] {
+    const found: { name: string; path: string; kind: string; excerpt?: string }[] = [];
+    const brief = this.store.briefs[sessionId];
+    if (brief) {
+      const folder = briefFolder(this.store.settings.workDir, sessionId);
+      for (const file of brief.files) {
+        found.push({ name: file.name, path: path.join(folder, file.name), kind: file.kind, excerpt: file.excerpt });
+      }
+    }
     const lines = this.store.transcripts[sessionId] ?? [];
-    const found: { name: string; path: string; kind: string }[] = [];
     for (const line of lines) {
       if (!line.attachment?.path) continue;
-      found.push({ name: line.attachment.name, path: line.attachment.path, kind: line.attachment.kind });
+      found.push({
+        name: line.attachment.name,
+        path: line.attachment.path,
+        kind: line.attachment.kind,
+        excerpt: line.attachment.excerpt,
+      });
     }
-    return found.slice(-4);
+    const seen = new Set<string>();
+    const unique = found.filter((file) => {
+      const key = file.path.toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    return unique.slice(0, 12);
   }
 
   private localDiscuss(raw: WireChat["attachment"]): DiscussFile | undefined {
-    if (!raw || (raw.kind !== "text" && raw.kind !== "markdown" && raw.kind !== "image" && raw.kind !== "pdf")) return;
+    if (!raw || !isDiscussKind(raw.kind)) return;
     const name = safeFileName(String(raw.name || ""));
     const saved = path.join(path.resolve(this.store.settings.workDir), name);
     if (fileRef(saved)) allowPreview(saved);
@@ -1258,7 +1436,113 @@ export class AppCore {
   private halt(peerId: string, tellPeer: boolean): void {
     this.epochs.set(peerId, (this.epochs.get(peerId) ?? 0) + 1);
     this.aborts.get(peerId)?.abort();
+    const sessionId = this.store.openSessions[peerId];
+    const brief = sessionId ? this.store.briefs[sessionId] : undefined;
+    if (brief?.running) {
+      brief.running = false;
+      this.scheduleSave();
+      this.pushNow();
+    }
     if (tellPeer) this.sendTo(peerId, "halt", {});
+  }
+
+  private ensureBrief(sessionId: string): ProjectBrief {
+    const current = this.store.briefs[sessionId];
+    if (current) return current;
+    const created = emptyBrief();
+    this.store.briefs[sessionId] = created;
+    return created;
+  }
+
+  private syncBrief(peerId: string, sessionId: string): void {
+    const brief = this.store.briefs[sessionId];
+    if (!brief) return;
+    const payload: WireBrief = {
+      sessionId,
+      sessionTitle: this.sessionTitle(sessionId),
+      brief: sanitizeBrief(brief),
+    };
+    this.sendTo(peerId, "brief", payload);
+  }
+
+  private applyBrief(peerId: string, sessionId: string, incoming: ProjectBrief): void {
+    const clean = sanitizeBrief(incoming);
+    const current = this.store.briefs[sessionId];
+    if (current && this.aborts.has(peerId) && current.turnsUsed > clean.turnsUsed) {
+      clean.turnsUsed = current.turnsUsed;
+      if (clean.turnLimit < current.turnLimit) clean.turnLimit = current.turnLimit;
+    }
+    this.store.briefs[sessionId] = clean;
+  }
+
+  private onWireBrief(peerId: string, body: WireBrief): void {
+    if (!body?.sessionId || body.sessionId.length > 80 || !body.brief) return;
+    const sessionId = this.adoptSession(peerId, body.sessionId, body.sessionTitle);
+    this.applyBrief(peerId, sessionId, body.brief);
+    this.scheduleSave();
+    this.pushNow();
+  }
+
+  private onResume(peerId: string, body: WireResume): void {
+    if (!body?.sessionId || this.aborts.has(peerId)) return;
+    const sessionId = this.adoptSession(peerId, body.sessionId, body.sessionTitle);
+    if (!this.briefContinues(sessionId)) return;
+    void this.enqueueReply(peerId, sessionId, true);
+  }
+
+  private briefContinues(sessionId: string): boolean {
+    const brief = this.store.briefs[sessionId];
+    return Boolean(brief?.running && brief.turnsUsed < brief.turnLimit);
+  }
+
+  private promptBrief(sessionId: string): { topic: string; goal: string; turn: number; limit: number; last: boolean } | undefined {
+    const brief = this.store.briefs[sessionId];
+    if (!brief?.topic) return undefined;
+    const turn = brief.running ? brief.turnsUsed + 1 : Math.max(1, brief.turnsUsed);
+    return {
+      topic: brief.topic,
+      goal: brief.goal,
+      turn,
+      limit: brief.turnLimit,
+      last: Boolean(brief.running && turn >= brief.turnLimit),
+    };
+  }
+
+  private finishBriefTurn(sessionId: string, wire: WireChat): void {
+    const brief = this.store.briefs[sessionId];
+    if (!brief?.running) return;
+    brief.turnsUsed += 1;
+    if (brief.turnsUsed >= brief.turnLimit) brief.running = false;
+    const left = brief.turnLimit - brief.turnsUsed;
+    wire.brief = sanitizeBrief(brief);
+    if (left > 0 && brief.running) wire.dialogue = { repliesLeft: left };
+  }
+
+  private async storeBriefFile(
+    sessionId: string,
+    filePath: string,
+  ): Promise<{ name: string; kind: DiscussFile["kind"]; excerpt: string; data: Buffer }> {
+    const resolved = path.resolve(filePath);
+    const kind = discussKind(resolved);
+    if (!kind) throw new Error("Chỉ nhận txt, md, ảnh, pdf, docx, xlsx, xls hoặc csv.");
+    const data = await readFileLimited(resolved, MAX_FILE_BYTES);
+    const saved = await saveExact(briefFolder(this.store.settings.workDir, sessionId), path.basename(resolved), data);
+    if (fileRef(saved)) allowPreview(saved);
+    return { name: path.basename(saved), kind, excerpt: discussExcerpt(saved, data), data };
+  }
+
+  private async pushBriefFiles(peerId: string, sessionId: string, brief: ProjectBrief): Promise<void> {
+    const folder = briefFolder(this.store.settings.workDir, sessionId);
+    for (const file of brief.files) {
+      const full = path.join(folder, file.name);
+      if (!fs.existsSync(full)) throw new Error(`Không thấy file context ${file.name} trên máy này.`);
+      const data = await readFileLimited(full, MAX_FILE_BYTES);
+      await this.postBriefFile(peerId, sessionId, file.name, data);
+    }
+  }
+
+  private postBriefFile(peerId: string, sessionId: string, name: string, data: Buffer): Promise<string> {
+    return this.postFile(peerId, name, data, false, sessionId);
   }
 
   createSession(peerId: string): AppState {

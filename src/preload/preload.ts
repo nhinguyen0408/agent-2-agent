@@ -14,6 +14,12 @@ const api: LanApi = {
   pickDiscuss: () => ipcRenderer.invoke(IPC.pickDiscuss) as Promise<string | null>,
   dialogue: (peerId: string, topic: string, replies: number) =>
     ipcRenderer.invoke(IPC.dialogue, peerId, topic, replies) as Promise<void>,
+  saveBrief: (peerId, patch) => ipcRenderer.invoke(IPC.saveBrief, peerId, patch) as Promise<AppState>,
+  pickBriefFiles: () => ipcRenderer.invoke(IPC.pickBriefFiles) as Promise<string[]>,
+  addBriefFiles: (peerId, paths) => ipcRenderer.invoke(IPC.addBriefFiles, peerId, paths) as Promise<AppState>,
+  removeBriefFile: (peerId, name) => ipcRenderer.invoke(IPC.removeBriefFile, peerId, name) as Promise<AppState>,
+  startBrief: (peerId) => ipcRenderer.invoke(IPC.startBrief, peerId) as Promise<AppState>,
+  extendBrief: (peerId, extra) => ipcRenderer.invoke(IPC.extendBrief, peerId, extra) as Promise<AppState>,
   stop: (peerId: string) => ipcRenderer.invoke(IPC.stop, peerId) as Promise<void>,
   pickCwd: () => ipcRenderer.invoke(IPC.pickCwd) as Promise<string | null>,
   rescanClis: () => ipcRenderer.invoke(IPC.rescanClis) as Promise<AppState>,

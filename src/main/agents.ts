@@ -15,7 +15,8 @@ export type ReplyInput = {
   signal: AbortSignal;
   onDelta: (chunk: string) => void;
   fileRelay?: { url: string };
-  readings?: { name: string; path: string; kind: string }[];
+  readings?: { name: string; path: string; kind: string; excerpt?: string }[];
+  brief?: { topic: string; goal: string; turn: number; limit: number; last: boolean };
 };
 
 export class AgentHost {
@@ -173,28 +174,57 @@ function conversationPrompt(input: ReplyInput): string {
     .map((turn) => (turn.role === "note" ? turn.text : `${turn.role === "user" ? input.peerName : input.selfName}: ${turn.text}`))
     .join("\n");
   const readings = (input.readings ?? [])
-    .map((file) => `- ${file.name} (${file.kind}): ${file.path}`)
+    .map((file) => {
+      const excerpt = file.excerpt?.trim().slice(0, 800);
+      return `- ${file.name} (${file.kind}): ${file.path}${excerpt ? `\n${excerpt}` : ""}`;
+    })
     .join("\n");
   return [
+    briefLead(input),
     `Bạn là ${input.selfName}. Bạn đang nói chuyện trực tiếp với ${input.peerName} qua LAN Agents.`,
     "Hãy trả lời tin nhắn cuối như một người trong cuộc hội thoại này.",
     "Quy tắc:",
     "- Chỉ viết nội dung sẽ gửi cho đối phương. Không mở đầu bằng việc nhắc lại các quy tắc này.",
-    "- Dùng cùng ngôn ngữ với tin nhắn cuối. Giữ câu trả lời gọn, thường dưới 120 từ, trừ khi đang tóm tắt file.",
+    "- Dùng cùng ngôn ngữ với tin nhắn cuối. Giữ câu trả lời gọn, thường dưới 120 từ, trừ khi đang tóm tắt file hoặc đang viết khối KẾT QUẢ.",
     "- Bám các lượt trước. Không bịa việc máy kia đã làm.",
     `- Nếu ${input.peerName} nhờ một việc trên máy này, làm trong thư mục làm việc rồi nói kết quả. Lệnh và sửa file được tự chạy, không hỏi lại.`,
     "- Nếu đối phương chỉ trò chuyện, chỉ trả lời bằng lời. Không chạy lệnh và không sửa file. Riêng khi họ nhờ gửi file thì dùng đúng lệnh gửi file bên dưới.",
-    "- Nếu có file đính kèm, hãy đọc đúng file tại đường dẫn trên máy này rồi trao đổi nội dung. txt và md có thể đã có đoạn trích; ảnh và pdf phải mở file. Không bịa phần chưa đọc được.",
+    "- Nếu có file trong hồ sơ hoặc file đính kèm, hãy đọc đúng file tại đường dẫn trên máy này. txt, md và csv có thể đã có đoạn trích; ảnh, pdf, docx và excel phải mở file khi đoạn trích trống hoặc chưa đủ. Không bịa phần chưa đọc được.",
     input.fileRelay
       ? `- Để gửi file cho ${input.peerName}, không copy sang ổ đĩa máy kia và không dùng đường UNC. File phải nằm trong thư mục làm việc. Chạy: curl.exe -s -H "Content-Type: text/plain; charset=utf-8" --data-binary "ĐƯỜNG_DẪN_ĐẦY_ĐỦ" ${input.fileRelay.url} . Khi kết quả có ok, file đã tới thư mục làm việc của ${input.peerName}.`
       : "",
     "",
     "Hội thoại:",
     transcript,
-    readings ? `\nFile đính kèm trên máy này:\n${readings}` : "",
+    readings ? `\nFile context trên máy này:\n${readings}` : "",
     "",
+    briefTail(input),
     `Hãy trả lời ${input.peerName}.`,
+  ]
+    .filter((part) => part !== "")
+    .join("\n");
+}
+
+function briefLead(input: ReplyInput): string {
+  const brief = input.brief;
+  if (!brief?.topic) return "";
+  const goal = brief.goal || "Chốt một kết luận ngắn mà cả hai cùng chấp nhận.";
+  const pace = brief.last
+    ? "Đây là lượt cuối. Chỉ viết khối bắt đầu bằng dòng KẾT QUẢ, đúng cấu trúc kết quả mong muốn. Không mở ý mới."
+    : "Bàn trong phạm vi chủ đề và file context. Tiến về kết quả mong muốn. Nói rõ chỗ còn lệch.";
+  return [
+    "Hồ sơ dự án, dùng chung cho cả hai agent:",
+    `Chủ đề: ${brief.topic}`,
+    `Kết quả mong muốn:\n${goal}`,
+    `Lượt agent này: ${brief.turn}/${brief.limit}.`,
+    pace,
+    "",
   ].join("\n");
+}
+
+function briefTail(input: ReplyInput): string {
+  if (!input.brief?.last) return "";
+  return "Lượt cuối: bắt đầu câu trả lời bằng dòng KẾT QUẢ.";
 }
 
 function launch(command: string, args: string[], cwd: string): ChildProcess {
@@ -356,7 +386,9 @@ function killChild(child: ChildProcess): void {
 
 async function echoReply(input: ReplyInput): Promise<string> {
   const incoming = input.history[input.history.length - 1]?.text ?? "";
-  const reply = `Echo của ${input.selfName} đã nhận từ ${input.peerName}: ${incoming}`;
+  const reply = input.brief?.last
+    ? `KẾT QUẢ\n${input.brief.goal || input.brief.topic}`
+    : `Echo của ${input.selfName} đã nhận từ ${input.peerName}: ${incoming}`;
   const size = 12;
   for (let i = 0; i < reply.length; i += size) {
     if (input.signal.aborted) throw abortError();

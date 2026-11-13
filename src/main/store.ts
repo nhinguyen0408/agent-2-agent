@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { app } from "electron";
+import { sanitizeBrief, type ProjectBrief } from "../shared/brief";
 import type { ChatLine, ChatSession, Settings } from "../shared/types";
 import { normalizeProvider } from "../shared/types";
 
@@ -21,6 +22,7 @@ type Disk = {
   sessions?: Record<string, ChatSession[]>;
   openSessions?: Record<string, string>;
   transcripts: Record<string, ChatLine[]>;
+  briefs?: Record<string, ProjectBrief>;
 };
 
 export function defaultSettings(profile: string): Settings {
@@ -43,6 +45,7 @@ export class Store {
   sessions: Record<string, ChatSession[]>;
   openSessions: Record<string, string>;
   transcripts: Record<string, ChatLine[]>;
+  briefs: Record<string, ProjectBrief>;
 
   constructor(profile: string) {
     this.file = path.join(app.getPath("userData"), "config.json");
@@ -55,6 +58,7 @@ export class Store {
     this.sessions = history.sessions;
     this.openSessions = history.openSessions;
     this.transcripts = history.transcripts;
+    this.briefs = sanitizeBriefs(disk?.briefs);
     for (const lines of Object.values(this.transcripts)) {
       for (const line of lines) {
         if (line.pending) {
@@ -73,6 +77,7 @@ export class Store {
       sessions: this.sessions,
       openSessions: this.openSessions,
       transcripts: this.transcripts,
+      briefs: this.briefs,
     };
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
     const tmp = `${this.file}.tmp`;
@@ -136,4 +141,14 @@ function migrateHistory(disk: Disk | null): {
     openSessions[peerId] = id;
   }
   return { sessions, openSessions, transcripts };
+}
+
+function sanitizeBriefs(raw: Record<string, ProjectBrief> | undefined): Record<string, ProjectBrief> {
+  const briefs: Record<string, ProjectBrief> = {};
+  if (!raw || typeof raw !== "object") return briefs;
+  for (const [id, brief] of Object.entries(raw)) {
+    if (!id || id.length > 80) continue;
+    briefs[id] = sanitizeBrief(brief);
+  }
+  return briefs;
 }

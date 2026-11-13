@@ -1,7 +1,8 @@
 import zlib from "node:zlib";
 import { fileExtension } from "./preview";
+import { docxExcerpt, xlsxExcerpt } from "./office";
 
-export type DiscussKind = "text" | "markdown" | "image" | "pdf";
+export type DiscussKind = "text" | "markdown" | "image" | "pdf" | "document" | "sheet";
 
 export type DiscussFile = {
   name: string;
@@ -22,7 +23,17 @@ const KINDS: Record<string, DiscussKind> = {
   webp: "image",
   bmp: "image",
   pdf: "pdf",
+  docx: "document",
+  xlsx: "sheet",
+  xls: "sheet",
+  csv: "sheet",
 };
+
+const KIND_LIST: DiscussKind[] = ["text", "markdown", "image", "pdf", "document", "sheet"];
+
+export function isDiscussKind(value: unknown): value is DiscussKind {
+  return typeof value === "string" && KIND_LIST.includes(value as DiscussKind);
+}
 
 export const DISCUSS_EXCERPT = 6000;
 
@@ -34,6 +45,15 @@ export function discussExcerpt(name: string, data: Buffer): string {
   const kind = discussKind(name);
   if (kind === "text" || kind === "markdown") return clipText(data.toString("utf8").replace(/^\uFEFF/, ""));
   if (kind === "pdf") return clipText(extractPdfText(data));
+  if (kind === "document") return clipText(docxExcerpt(data));
+  if (kind === "sheet") return clipText(sheetExcerpt(name, data));
+  return "";
+}
+
+function sheetExcerpt(name: string, data: Buffer): string {
+  const ext = fileExtension(name);
+  if (ext === "csv") return data.toString("utf8").replace(/^\uFEFF/, "");
+  if (ext === "xlsx") return xlsxExcerpt(data);
   return "";
 }
 

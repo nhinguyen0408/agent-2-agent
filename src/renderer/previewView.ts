@@ -46,6 +46,10 @@ export function renderPreview(file: FileRef): HTMLElement {
   return box;
 }
 
+export function renderMarkdownHtml(source: string): string {
+  return renderMarkdown(source, "");
+}
+
 export function previewSrc(filePath: string): string {
   return `lan-file://work/?p=${encodeURIComponent(filePath)}`;
 }
@@ -98,7 +102,7 @@ function inlineMarkdown(value: string, filePath: string): string {
 }
 
 function resolveRelative(baseFile: string, rel: string): string | null {
-  if (/^[a-z]+:/i.test(rel) || rel.startsWith("\\\\") || rel.startsWith("/")) return null;
+  if (!baseFile.trim() || /^[a-z]+:/i.test(rel) || rel.startsWith("\\\\") || rel.startsWith("/")) return null;
   const parts = baseFile.replace(/[/\\][^/\\]*$/, "").split(/[/\\]/);
   for (const bit of rel.split(/[/\\]/)) {
     if (!bit || bit === ".") continue;

@@ -1,5 +1,6 @@
 import path from "node:path";
 import { app, BrowserWindow, dialog, ipcMain, screen, type OpenDialogOptions } from "electron";
+import { BRIEF_EXTEND } from "../shared/brief";
 import { IPC, type FileRef, type Settings } from "../shared/types";
 import { fileRef } from "../shared/preview";
 import { listWorkFiles } from "./files";
@@ -7,6 +8,8 @@ import { AppCore } from "./core";
 import { allowPreview, attachPreviewProtocol, registerPreviewScheme } from "./preview";
 
 registerPreviewScheme();
+
+const DISCUSS_EXTENSIONS = ["txt", "md", "markdown", "png", "jpg", "jpeg", "gif", "webp", "bmp", "pdf", "docx", "xlsx", "xls", "csv"];
 
 const profileArg = process.argv.find((arg) => arg.startsWith("--profile="));
 const profile = (profileArg?.slice("--profile=".length) || "default").replace(/[^a-zA-Z0-9_-]/g, "") || "default";
@@ -169,14 +172,38 @@ if (!gotLock) {
       ipcMain.handle(IPC.pickDiscuss, async () => {
         const picked = await choosePath({
           properties: ["openFile"],
-          filters: [
-            {
-              name: "File để trao đổi",
-              extensions: ["txt", "md", "markdown", "png", "jpg", "jpeg", "gif", "webp", "bmp", "pdf"],
-            },
-          ],
+          filters: [{ name: "File để trao đổi", extensions: DISCUSS_EXTENSIONS }],
         });
         return picked;
+      });
+      ipcMain.handle(IPC.pickBriefFiles, async () => {
+        const options: OpenDialogOptions = {
+          properties: ["openFile", "multiSelections"],
+          filters: [{ name: "File context", extensions: DISCUSS_EXTENSIONS }],
+        };
+        const host = dialogHost();
+        const picked = host ? await dialog.showOpenDialog(host, options) : await dialog.showOpenDialog(options);
+        return picked.canceled ? [] : picked.filePaths;
+      });
+      ipcMain.handle(IPC.saveBrief, (_event, peerId: string, patch: { topic?: string; goal?: string; turnLimit?: number }) => {
+        if (!core) throw new Error("App chưa sẵn sàng");
+        return core.saveBrief(String(peerId), patch ?? {});
+      });
+      ipcMain.handle(IPC.addBriefFiles, (_event, peerId: string, paths: string[]) => {
+        if (!core) throw new Error("App chưa sẵn sàng");
+        return core.addBriefFiles(String(peerId), Array.isArray(paths) ? paths : []);
+      });
+      ipcMain.handle(IPC.removeBriefFile, (_event, peerId: string, name: string) => {
+        if (!core) throw new Error("App chưa sẵn sàng");
+        return core.removeBriefFile(String(peerId), String(name ?? ""));
+      });
+      ipcMain.handle(IPC.startBrief, (_event, peerId: string) => {
+        if (!core) throw new Error("App chưa sẵn sàng");
+        return core.startBrief(String(peerId));
+      });
+      ipcMain.handle(IPC.extendBrief, (_event, peerId: string, extra?: number) => {
+        if (!core) throw new Error("App chưa sẵn sàng");
+        return core.extendBrief(String(peerId), Number(extra) || BRIEF_EXTEND);
       });
       ipcMain.handle(IPC.dialogue, (_event, peerId: string, topic: string, replies: number) =>
         core?.startDialogue(peerId, topic, replies),

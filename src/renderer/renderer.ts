@@ -1,7 +1,8 @@
+import { BRIEF_FILE_MAX, BRIEF_TURN_MAX, resultText, type BriefFile, type ProjectBrief } from "../shared/brief";
 import type { AppState, ChatLine, CliReport, CliToolState, FileRef, PeerActivity, PeerView, Settings, WorkFile } from "../shared/types";
 import { providerLabel } from "../shared/types";
 import { fileRef, type PreviewKind } from "../shared/preview";
-import { renderPreview } from "./previewView";
+import { renderMarkdownHtml, renderPreview } from "./previewView";
 
 declare global {
   interface Window {
@@ -16,6 +17,12 @@ declare global {
       send: (peerId: string, text: string, attachmentPath?: string) => Promise<void>;
       pickDiscuss: () => Promise<string | null>;
       dialogue: (peerId: string, topic: string, replies: number) => Promise<void>;
+      saveBrief: (peerId: string, patch: { topic: string; goal: string; turnLimit: number }) => Promise<AppState>;
+      pickBriefFiles: () => Promise<string[]>;
+      addBriefFiles: (peerId: string, paths: string[]) => Promise<AppState>;
+      removeBriefFile: (peerId: string, name: string) => Promise<AppState>;
+      startBrief: (peerId: string) => Promise<AppState>;
+      extendBrief: (peerId: string, extra?: number) => Promise<AppState>;
       createSession: (peerId: string) => Promise<AppState>;
       openSession: (peerId: string, sessionId: string) => Promise<AppState>;
       renameSession: (peerId: string, sessionId: string, title: string) => Promise<AppState>;
@@ -133,6 +140,36 @@ function boot(host: HTMLElement): void {
           </div>
           <div id="messages" class="messages"></div>
           <p id="typing" class="typing" hidden></p>
+          <section id="brief" class="brief">
+            <div class="brief-bar">
+              ${iconButton("brief-toggle", "sliders", "Cài đặt chủ đề")}
+              <button id="brief-summary" type="button" class="brief-summary empty">Chưa đặt chủ đề</button>
+              <span id="brief-meter" class="brief-meter"></span>
+            </div>
+            <button id="brief-result" type="button" class="brief-result" hidden></button>
+            <div id="brief-pop" class="brief-pop" hidden>
+              <div class="brief-pop-head">
+                <strong>Hồ sơ dự án</strong>
+                ${iconButton("brief-close", "x", "Đóng cài đặt chủ đề")}
+              </div>
+              <label>Chủ đề
+                <input id="brief-topic" maxlength="500" placeholder="Việc hai agent cần bàn" aria-label="Chủ đề dự án" />
+              </label>
+              <label>Kết quả mong muốn
+                <textarea id="brief-goal" rows="12" maxlength="2000" placeholder="Dạng kết quả cần chốt" aria-label="Kết quả mong muốn"></textarea>
+              </label>
+              <div id="brief-files" class="brief-files"></div>
+              <div class="brief-actions">
+                ${iconButton("brief-add", "paperclip", "Thêm file context: txt, Markdown, ảnh, PDF, Word, Excel")}
+                <label class="replies" data-tip="Số lượt agent được trả lời nhau">
+                  ${icon("hash")}
+                  <input id="brief-turns" type="number" min="1" max="24" value="6" aria-label="Số lượt" />
+                </label>
+                <button id="brief-start" class="brief-go" type="button">Bắt đầu</button>
+                <button id="brief-extend" class="brief-more" type="button">Gia hạn +4</button>
+              </div>
+            </div>
+          </section>
           <form id="composer" class="composer">
             <textarea id="draft" rows="3" placeholder="Nhắn cho agent máy kia…"></textarea>
             <div id="attach-chip" class="attach-chip" hidden>
@@ -141,14 +178,9 @@ function boot(host: HTMLElement): void {
               ${iconButton("attach-clear", "x", "Bỏ file đính kèm")}
             </div>
             <div class="composer-actions">
-              ${iconButton("attach", "paperclip", "Đính kèm txt, Markdown, ảnh hoặc PDF")}
+              ${iconButton("attach", "paperclip", "Đính kèm txt, Markdown, ảnh, PDF, Word hoặc Excel")}
               ${iconButton("send-file", "file", "Gửi file sang máy kia")}
               ${iconButton("open-preview", "eye", "Mở cửa sổ xem file")}
-              ${iconButton("dialogue", "dialogue", "Cho hai agent nói với nhau")}
-              <label class="replies" data-tip="Số lượt hai agent trao đổi">
-                ${icon("hash")}
-                <input id="replies" type="number" min="1" max="8" value="4" aria-label="Số lượt" />
-              </label>
               <span class="spacer"></span>
               ${iconButton("stop", "stop", "Dừng agent đang trả lời")}
               ${iconButton("send", "send", "Gửi", "", "", "submit", "icon-btn primary")}
@@ -375,15 +407,52 @@ function boot(host: HTMLElement): void {
     }
   });
   draft.addEventListener("input", () => noteTyping(true));
-  must<HTMLButtonElement>("#dialogue").addEventListener("click", () => {
+  must<HTMLButtonElement>("#brief-add").addEventListener("click", () => {
     if (!active) return;
     const peerId = active;
-    const topic = draft.value.trim() || "Xin chào. Hãy giới thiệu bạn đang chạy trên máy nào, trong một đoạn ngắn.";
-    const replies = Number(must<HTMLInputElement>("#replies").value);
-    draft.value = "";
-    noteTyping(false);
-    void guard(() => window.lan.dialogue(peerId, topic, replies));
+    void guard(async () => {
+      const paths = await window.lan.pickBriefFiles();
+      if (!paths.length) return;
+      await window.lan.addBriefFiles(peerId, paths);
+    });
   });
+  must<HTMLButtonElement>("#brief-toggle").addEventListener("click", () => setBriefOpen(must<HTMLElement>("#brief-pop").hidden));
+  must<HTMLButtonElement>("#brief-summary").addEventListener("click", () => setBriefOpen(must<HTMLElement>("#brief-pop").hidden));
+  must<HTMLButtonElement>("#brief-close").addEventListener("click", () => setBriefOpen(false));
+  must<HTMLButtonElement>("#brief-result").addEventListener("click", () => {
+    must<HTMLElement>("#brief-result").classList.toggle("open");
+  });
+  document.addEventListener("pointerdown", (event) => {
+    const pop = must<HTMLElement>("#brief-pop");
+    if (pop.hidden) return;
+    const target = event.target;
+    if (target instanceof Node && must<HTMLElement>("#brief").contains(target)) return;
+    setBriefOpen(false);
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") setBriefOpen(false);
+  });
+  must<HTMLButtonElement>("#brief-start").addEventListener("click", () => {
+    if (!active) return;
+    const peerId = active;
+    setBriefOpen(false);
+    void guard(async () => {
+      await flushBrief(peerId);
+      await window.lan.startBrief(peerId);
+    });
+  });
+  must<HTMLButtonElement>("#brief-extend").addEventListener("click", () => {
+    if (!active) return;
+    const peerId = active;
+    setBriefOpen(false);
+    void guard(async () => {
+      await flushBrief(peerId);
+      await window.lan.extendBrief(peerId, 4);
+    });
+  });
+  for (const id of ["#brief-topic", "#brief-goal", "#brief-turns"]) {
+    must<HTMLElement>(id).addEventListener("input", () => scheduleBriefSave());
+  }
   must<HTMLButtonElement>("#stop").addEventListener("click", () => {
     if (!active) return;
     void guard(() => window.lan.stop(active as string));
@@ -494,8 +563,8 @@ function boot(host: HTMLElement): void {
     const canSend = connected || Boolean(peer.token);
     must<HTMLButtonElement>("#send").disabled = !canSend;
     must<HTMLButtonElement>("#send-file").disabled = !canSend;
-    must<HTMLButtonElement>("#dialogue").disabled = !connected;
     must<HTMLButtonElement>("#stop").disabled = !lines.some((line) => line.pending);
+    paintBrief(sessionId, next.briefs[sessionId], lines, connected);
     const snippet = peer.token
       ? [
           `curl -X POST http://${peer.host}:${peer.port}/trigger`,
@@ -505,6 +574,134 @@ function boot(host: HTMLElement): void {
         ].join("\n")
       : "Nối máy trước. Token ghép nối xuất hiện sau khi hai bên chấp nhận.";
     must<HTMLPreElement>("#http-snippet").textContent = snippet;
+  }
+
+  let briefTimer = 0;
+  let briefFilesKey = "";
+  let briefAnchor = "";
+
+  function setBriefOpen(open: boolean): void {
+    const pop = must<HTMLElement>("#brief-pop");
+    const toggle = must<HTMLButtonElement>("#brief-toggle");
+    pop.hidden = !open;
+    toggle.classList.toggle("active", open);
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    must<HTMLButtonElement>("#brief-summary").setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
+  function paintBrief(sessionId: string, brief: ProjectBrief | undefined, lines: ChatLine[], connected: boolean): void {
+    const current: ProjectBrief = brief ?? { topic: "", goal: "", turnLimit: 6, turnsUsed: 0, running: false, files: [] };
+    const topic = must<HTMLInputElement>("#brief-topic");
+    const goal = must<HTMLTextAreaElement>("#brief-goal");
+    const turns = must<HTMLInputElement>("#brief-turns");
+    setIfIdle(topic, current.topic);
+    setIfIdle(goal, current.goal);
+    setIfIdle(turns, String(current.turnLimit));
+    topic.disabled = current.running;
+    goal.disabled = current.running;
+    turns.disabled = current.running;
+    must<HTMLButtonElement>("#brief-add").disabled = current.running || current.files.length >= BRIEF_FILE_MAX;
+    must<HTMLButtonElement>("#brief-start").disabled = !connected || current.running;
+    must<HTMLButtonElement>("#brief-extend").disabled = !connected || (!current.running && current.turnsUsed === 0);
+    const anchor = `${active ?? ""}:${sessionId}`;
+    if (briefAnchor && briefAnchor !== anchor) setBriefOpen(false);
+    briefAnchor = anchor;
+    const summary = must<HTMLButtonElement>("#brief-summary");
+    const title = current.topic.trim();
+    summary.textContent = title || "Chưa đặt chủ đề";
+    summary.classList.toggle("empty", !title);
+    summary.title = title;
+    const fileNote = current.files.length ? ` · ${current.files.length} file` : "";
+    must<HTMLElement>("#brief-meter").textContent = `${briefMeter(current)}${fileNote}`;
+    paintBriefFiles(sessionId, current.files, current.running);
+    const result = latestResult(lines);
+    const box = must<HTMLButtonElement>("#brief-result");
+    if (!result) {
+      box.hidden = true;
+      box.textContent = "";
+      box.classList.remove("open");
+      delete box.dataset.full;
+    } else {
+      box.hidden = false;
+      if (box.dataset.full !== result) {
+        box.dataset.full = result;
+        box.textContent = result;
+        box.classList.remove("open");
+      }
+    }
+  }
+
+  function setIfIdle(el: HTMLInputElement | HTMLTextAreaElement, value: string): void {
+    if (document.activeElement === el) return;
+    if (el.value !== value) el.value = value;
+  }
+
+  function paintBriefFiles(sessionId: string, files: BriefFile[], locked: boolean): void {
+    const box = must<HTMLElement>("#brief-files");
+    const key = `${sessionId}:${locked ? 1 : 0}:${files.map((file) => file.name).join("|")}`;
+    if (key === briefFilesKey) return;
+    briefFilesKey = key;
+    box.replaceChildren();
+    if (!files.length) {
+      const empty = document.createElement("span");
+      empty.className = "brief-meter";
+      empty.textContent = "Chưa có file context.";
+      box.append(empty);
+      return;
+    }
+    for (const file of files) {
+      const row = document.createElement("div");
+      row.className = "brief-file";
+      const name = document.createElement("span");
+      name.textContent = file.name;
+      name.title = file.kind;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "Bỏ";
+      remove.disabled = locked;
+      remove.addEventListener("click", () => {
+        const peerId = active;
+        if (!peerId) return;
+        void guard(() => window.lan.removeBriefFile(peerId, file.name));
+      });
+      row.append(name, remove);
+      box.append(row);
+    }
+  }
+
+  function briefMeter(brief: ProjectBrief): string {
+    if (brief.running) return `Đang nói ${brief.turnsUsed}/${brief.turnLimit}`;
+    if (brief.turnsUsed > 0 && brief.turnsUsed >= brief.turnLimit) return `Hết ${brief.turnsUsed}/${brief.turnLimit} lượt`;
+    if (brief.turnsUsed > 0) return `Đã nói ${brief.turnsUsed}/${brief.turnLimit}`;
+    return `${brief.turnLimit} lượt`;
+  }
+
+  function latestResult(lines: ChatLine[]): string {
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const line = lines[index];
+      if (line.kind !== "agent" || line.pending) continue;
+      const found = resultText(line.text);
+      if (found) return found;
+    }
+    return "";
+  }
+
+  function scheduleBriefSave(): void {
+    const peerId = active;
+    if (!peerId) return;
+    window.clearTimeout(briefTimer);
+    briefTimer = window.setTimeout(() => {
+      void flushBrief(peerId);
+    }, 350);
+  }
+
+  async function flushBrief(peerId: string): Promise<void> {
+    const turns = Number(must<HTMLInputElement>("#brief-turns").value);
+    await window.lan.saveBrief(peerId, {
+      topic: must<HTMLInputElement>("#brief-topic").value,
+      goal: must<HTMLTextAreaElement>("#brief-goal").value,
+      turnLimit: Number.isFinite(turns) ? Math.max(1, Math.min(BRIEF_TURN_MAX, Math.round(turns))) : 6,
+    });
   }
 
   function fillSettings(settings: Settings): void {
@@ -734,8 +931,14 @@ function paintMessages(host: HTMLElement, lines: ChatLine[], selfId: string, sti
       changed = true;
       continue;
     }
-    const body = article.querySelector("p");
-    if (body && body.textContent !== text) {
+    const body = line.kind === "agent" ? article.querySelector<HTMLElement>(".md-body") : article.querySelector("p");
+    if (line.kind === "agent" && body) {
+      if (body.dataset.source !== text) {
+        body.dataset.source = text;
+        body.innerHTML = agentHtml(text);
+        changed = true;
+      }
+    } else if (body && body.textContent !== text) {
       body.textContent = text;
       changed = true;
     }
@@ -761,10 +964,23 @@ function renderLine(line: ChatLine, selfId: string): HTMLElement {
     meta.append(who, time);
     article.append(meta);
   }
-  const body = document.createElement("p");
-  body.textContent = line.text || (line.pending ? "…" : "");
-  if (line.pending) body.classList.add("pending");
-  article.append(body);
+  if (line.kind === "agent") {
+    const box = document.createElement("div");
+    box.className = "preview preview-markdown agent-md";
+    const body = document.createElement("article");
+    body.className = "markdown md-body";
+    const text = line.text || (line.pending ? "…" : "");
+    body.dataset.source = text;
+    body.innerHTML = agentHtml(text);
+    if (line.pending) body.classList.add("pending");
+    box.append(body);
+    article.append(box);
+  } else {
+    const body = document.createElement("p");
+    body.textContent = line.text || (line.pending ? "…" : "");
+    if (line.pending) body.classList.add("pending");
+    article.append(body);
+  }
   if (line.attachment) {
     const note = document.createElement("p");
     note.className = "attach-note";
@@ -774,6 +990,11 @@ function renderLine(line: ChatLine, selfId: string): HTMLElement {
   const attached = attachment(line);
   if (attached) article.append(renderPreview(attached));
   return article;
+}
+
+function agentHtml(text: string): string {
+  if (!text || text === "…") return text === "…" ? "…" : "";
+  return renderMarkdownHtml(text);
 }
 
 function kindLabel(kind: PreviewKind | null): string {
@@ -945,6 +1166,7 @@ function iconSprite(): string {
     item("bubble", `<path d="M5 16.2V7.8A2.3 2.3 0 0 1 7.3 5.5h9.4A2.3 2.3 0 0 1 19 7.8v5.6a2.3 2.3 0 0 1-2.3 2.3H9.2L5 18.5z"/>`),
     item("folder", `<path d="M3.5 8.2V7A1.5 1.5 0 0 1 5 5.5h3.8l1.6 1.6H19A1.5 1.5 0 0 1 20.5 8.6v8A1.5 1.5 0 0 1 19 18.1H5A1.5 1.5 0 0 1 3.5 16.6z"/>`),
     item("gear", `<path d="M4 8h11M15 8a2 2 0 1 0 4 0 2 2 0 0 0-4 0zM20 16H9M9 16a2 2 0 1 0-4 0 2 2 0 0 0 4 0z"/>`),
+    item("sliders", `<path d="M4 8h16M4 16h16"/><circle cx="9" cy="8" r="2.1"/><circle cx="15" cy="16" r="2.1"/>`),
     item("list", `<path d="M9 7h10M9 12h10M9 17h10"/><circle cx="5" cy="7" r="0.8"/><circle cx="5" cy="12" r="0.8"/><circle cx="5" cy="17" r="0.8"/>`),
     item("plus", `<path d="M12 5v14M5 12h14"/>`),
     item("search", `<circle cx="11" cy="11" r="5.5"/><path d="M15.5 15.5L20 20"/>`),

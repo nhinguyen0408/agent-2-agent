@@ -71,6 +71,19 @@ export async function readFileLimited(filePath: string, maxBytes: number): Promi
   return fs.promises.readFile(filePath);
 }
 
+export function briefFolder(workDir: string, sessionId: string): string {
+  const id = sessionId.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 80) || "session";
+  return path.join(path.resolve(workDir), "briefs", id);
+}
+
+export async function saveExact(dir: string, name: string, data: Buffer): Promise<string> {
+  const folder = path.resolve(dir);
+  await fs.promises.mkdir(folder, { recursive: true });
+  const saved = path.join(folder, safeFileName(name));
+  await fs.promises.writeFile(saved, data);
+  return saved;
+}
+
 export async function saveReceivedFile(workDir: string, name: string, data: Buffer): Promise<string> {
   const dir = path.resolve(workDir);
   await fs.promises.mkdir(dir, { recursive: true });

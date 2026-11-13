@@ -1,6 +1,8 @@
+import type { ProjectBrief } from "./brief";
 import type { DiscussFile } from "./discuss";
 import type { FileRef, WorkFile } from "./preview";
 
+export type { BriefFile, ProjectBrief } from "./brief";
 export type { DiscussFile, DiscussKind } from "./discuss";
 export type { FileRef, WorkFile } from "./preview";
 
@@ -33,6 +35,12 @@ export const IPC = {
   createSession: "lan:create-session",
   openSession: "lan:open-session",
   renameSession: "lan:rename-session",
+  saveBrief: "lan:save-brief",
+  pickBriefFiles: "lan:pick-brief-files",
+  addBriefFiles: "lan:add-brief-files",
+  removeBriefFile: "lan:remove-brief-file",
+  startBrief: "lan:start-brief",
+  extendBrief: "lan:extend-brief",
 } as const;
 
 export type ActivityPatch = {
@@ -127,6 +135,7 @@ export type AppState = {
   openSession: Record<string, string>;
   unreadSessions: string[];
   transcripts: Record<string, ChatLine[]>;
+  briefs: Record<string, ProjectBrief>;
   logs: string[];
 };
 
@@ -140,7 +149,19 @@ export type WireChat = {
   dialogue?: { repliesLeft: number };
   sessionId?: string;
   sessionTitle?: string;
+  brief?: ProjectBrief;
   attachment?: { name: string; kind: DiscussFile["kind"]; excerpt: string };
+};
+
+export type WireBrief = {
+  sessionId: string;
+  sessionTitle?: string;
+  brief: ProjectBrief;
+};
+
+export type WireResume = {
+  sessionId: string;
+  sessionTitle?: string;
 };
 
 export type WireDelta = {
@@ -176,6 +197,12 @@ export type LanApi = {
   send: (peerId: string, text: string, attachmentPath?: string) => Promise<void>;
   pickDiscuss: () => Promise<string | null>;
   dialogue: (peerId: string, topic: string, replies: number) => Promise<void>;
+  saveBrief: (peerId: string, patch: { topic: string; goal: string; turnLimit: number }) => Promise<AppState>;
+  pickBriefFiles: () => Promise<string[]>;
+  addBriefFiles: (peerId: string, paths: string[]) => Promise<AppState>;
+  removeBriefFile: (peerId: string, name: string) => Promise<AppState>;
+  startBrief: (peerId: string) => Promise<AppState>;
+  extendBrief: (peerId: string, extra?: number) => Promise<AppState>;
   stop: (peerId: string) => Promise<void>;
   pickCwd: () => Promise<string | null>;
   rescanClis: () => Promise<AppState>;
