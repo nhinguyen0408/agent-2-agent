@@ -3,8 +3,8 @@ const BRIEF_KINDS = ["text", "markdown", "image", "pdf", "document", "sheet"] as
 export type BriefKind = (typeof BRIEF_KINDS)[number];
 
 export const BRIEF_TURN_MIN = 1;
-export const BRIEF_TURN_MAX = 24;
-export const BRIEF_TURN_HARD = 48;
+export const BRIEF_TURN_MAX = 50;
+export const BRIEF_TURN_HARD = 50;
 export const BRIEF_FILE_MAX = 8;
 export const BRIEF_TOPIC_CAP = 500;
 export const BRIEF_GOAL_CAP = 2000;

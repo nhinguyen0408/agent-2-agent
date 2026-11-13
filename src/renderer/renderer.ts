@@ -29,7 +29,7 @@ declare global {
       stop: (peerId: string) => Promise<void>;
       pickCwd: () => Promise<string | null>;
       rescanClis: () => Promise<AppState>;
-      activity: (peerId: string, patch: { typing?: boolean; replying?: boolean }) => Promise<void>;
+      activity: (peerId: string, patch: { typing?: boolean; replying?: boolean; sessionId?: string }) => Promise<void>;
       sendFile: (peerId: string) => Promise<string | null>;
       openPreview: () => Promise<FileRef | null>;
       showPreview: (file: FileRef) => Promise<boolean>;
@@ -146,7 +146,7 @@ function boot(host: HTMLElement): void {
               <button id="brief-summary" type="button" class="brief-summary empty">Chưa đặt chủ đề</button>
               <span id="brief-meter" class="brief-meter"></span>
             </div>
-            <button id="brief-result" type="button" class="brief-result" hidden></button>
+            <button id="brief-result" type="button" class="brief-result" hidden><span></span></button>
             <div id="brief-pop" class="brief-pop" hidden>
               <div class="brief-pop-head">
                 <strong>Hồ sơ dự án</strong>
@@ -161,12 +161,15 @@ function boot(host: HTMLElement): void {
               <div id="brief-files" class="brief-files"></div>
               <div class="brief-actions">
                 ${iconButton("brief-add", "paperclip", "Thêm file context: txt, Markdown, ảnh, PDF, Word, Excel")}
-                <label class="replies" data-tip="Số lượt agent được trả lời nhau">
+                <label class="replies" data-tip="Số lượt agent được trả lời nhau, tối đa ${BRIEF_TURN_MAX}">
                   ${icon("hash")}
-                  <input id="brief-turns" type="number" min="1" max="24" value="6" aria-label="Số lượt" />
+                  <input id="brief-turns" type="number" min="1" max="${BRIEF_TURN_MAX}" value="6" aria-label="Số lượt" />
                 </label>
                 <button id="brief-start" class="brief-go" type="button">Bắt đầu</button>
-                <button id="brief-extend" class="brief-more" type="button">Gia hạn +4</button>
+                <div class="extend" data-tip="Số lượt cộng thêm khi gia hạn">
+                  <input id="brief-extra" type="number" min="1" max="${BRIEF_TURN_MAX}" value="4" aria-label="Số lượt gia hạn thêm" />
+                  <button id="brief-extend" class="brief-more" type="button">Gia hạn</button>
+                </div>
               </div>
             </div>
           </section>
@@ -447,7 +450,9 @@ function boot(host: HTMLElement): void {
     setBriefOpen(false);
     void guard(async () => {
       await flushBrief(peerId);
-      await window.lan.extendBrief(peerId, 4);
+      const extra = Math.round(Number(must<HTMLInputElement>("#brief-extra").value));
+      const add = Number.isFinite(extra) ? Math.max(1, Math.min(BRIEF_TURN_MAX, extra)) : 4;
+      await window.lan.extendBrief(peerId, add);
     });
   });
   for (const id of ["#brief-topic", "#brief-goal", "#brief-turns"]) {
@@ -528,8 +533,14 @@ function boot(host: HTMLElement): void {
     if (!peer || !active) return;
     must<HTMLElement>("#chat-title").textContent = peer.name;
     const where = peer.viaLocalhost ? "cùng máy" : `${peer.host}:${peer.port}`;
+    const sessionId = next.openSession[active] ?? "";
+    if (messagesEl.dataset.session !== sessionId) {
+      messagesEl.replaceChildren();
+      messagesEl.dataset.session = sessionId;
+      if (typingOn) noteTyping(false);
+    }
     const typing = must<HTMLElement>("#typing");
-    const activityText = activitySentence(peer.name, next.activity[peer.peerId]);
+    const activityText = activitySentence(peer.name, next.activity[peer.peerId], sessionId);
     typing.hidden = !activityText;
     typing.textContent = activityText;
     const link = must<HTMLButtonElement>("#link");
@@ -545,7 +556,6 @@ function boot(host: HTMLElement): void {
     const banner = must<HTMLElement>("#banner");
     banner.hidden = peer.status !== "pending-in";
     must<HTMLElement>("#banner-text").textContent = `${peer.name} muốn nối vào máy này.`;
-    const sessionId = next.openSession[active] ?? "";
     const session = next.sessions.find((item) => item.id === sessionId);
     const lines = next.transcripts[sessionId] ?? [];
     const nameInput = must<HTMLInputElement>("#session-title");
@@ -563,7 +573,10 @@ function boot(host: HTMLElement): void {
     const canSend = connected || Boolean(peer.token);
     must<HTMLButtonElement>("#send").disabled = !canSend;
     must<HTMLButtonElement>("#send-file").disabled = !canSend;
-    must<HTMLButtonElement>("#stop").disabled = !lines.some((line) => line.pending);
+    const replyingSomewhere = next.sessions
+      .filter((item) => item.peerId === active)
+      .some((item) => (next.transcripts[item.id] ?? []).some((line) => line.pending));
+    must<HTMLButtonElement>("#stop").disabled = !replyingSomewhere;
     paintBrief(sessionId, next.briefs[sessionId], lines, connected);
     const snippet = peer.token
       ? [
@@ -616,16 +629,17 @@ function boot(host: HTMLElement): void {
     paintBriefFiles(sessionId, current.files, current.running);
     const result = latestResult(lines);
     const box = must<HTMLButtonElement>("#brief-result");
+    const resultTextNode = box.querySelector("span");
     if (!result) {
       box.hidden = true;
-      box.textContent = "";
+      if (resultTextNode) resultTextNode.textContent = "";
       box.classList.remove("open");
       delete box.dataset.full;
     } else {
       box.hidden = false;
       if (box.dataset.full !== result) {
         box.dataset.full = result;
-        box.textContent = result;
+        if (resultTextNode) resultTextNode.textContent = result;
         box.classList.remove("open");
       }
     }
@@ -730,20 +744,25 @@ function boot(host: HTMLElement): void {
 
   let typingOn = false;
   let typingTimer = 0;
+  let typingSession = "";
 
   function noteTyping(activeNow: boolean): void {
     const peerId = active;
     if (!peerId) return;
+    const sessionId = state?.openSession[peerId] ?? typingSession;
     window.clearTimeout(typingTimer);
     if (!activeNow) {
       if (!typingOn) return;
       typingOn = false;
-      void window.lan.activity(peerId, { typing: false });
+      const ended = typingSession || sessionId;
+      typingSession = "";
+      void window.lan.activity(peerId, { typing: false, sessionId: ended });
       return;
     }
-    if (!typingOn) {
+    if (!typingOn || typingSession !== sessionId) {
       typingOn = true;
-      void window.lan.activity(peerId, { typing: true });
+      typingSession = sessionId;
+      void window.lan.activity(peerId, { typing: true, sessionId });
     }
     typingTimer = window.setTimeout(() => noteTyping(false), 900);
   }
@@ -917,34 +936,54 @@ function boot(host: HTMLElement): void {
 function paintMessages(host: HTMLElement, lines: ChatLine[], selfId: string, stick: boolean, query = ""): void {
   const ids = new Set(lines.map((line) => line.id));
   for (const child of Array.from(host.children)) {
+    if (!(child instanceof HTMLElement)) continue;
     const id = child.getAttribute("data-id");
     if (!id || !ids.has(id)) child.remove();
   }
+  const byId = new Map<string, HTMLElement>();
+  for (const child of Array.from(host.children)) {
+    if (!(child instanceof HTMLElement)) continue;
+    const id = child.getAttribute("data-id");
+    if (id && !byId.has(id)) byId.set(id, child);
+  }
+  const previewScroll = new Map<string, number>();
+  for (const [id, article] of byId) {
+    const scroller = article.querySelector<HTMLElement>(":scope > .preview:not(.agent-md) .markdown, :scope > .preview:not(.agent-md) iframe");
+    if (scroller && scroller.scrollTop > 0) previewScroll.set(id, scroller.scrollTop);
+  }
   let changed = false;
+  let previous: HTMLElement | null = null;
   for (const line of lines) {
-    const article = host.querySelector<HTMLElement>(`[data-id="${line.id}"]`);
+    let article = byId.get(line.id) ?? null;
     const text = line.text || (line.pending ? "…" : "");
     if (!article) {
-      const created = renderLine(line, selfId);
-      created.dataset.id = line.id;
-      host.append(created);
+      article = renderLine(line, selfId);
+      article.dataset.id = line.id;
       changed = true;
-      continue;
-    }
-    const body = line.kind === "agent" ? article.querySelector<HTMLElement>(".md-body") : article.querySelector("p");
-    if (line.kind === "agent" && body) {
-      if (body.dataset.source !== text) {
-        body.dataset.source = text;
-        body.innerHTML = agentHtml(text);
+    } else {
+      const body = line.kind === "agent"
+        ? article.querySelector<HTMLElement>(":scope > .preview .md-body")
+        : article.querySelector<HTMLElement>(":scope > p:not(.attach-note)");
+      if (line.kind === "agent" && body) {
+        if (body.dataset.source !== text) {
+          body.dataset.source = text;
+          body.innerHTML = agentHtml(text);
+          changed = true;
+        }
+      } else if (body && body.textContent !== text) {
+        body.textContent = text;
         changed = true;
       }
-    } else if (body && body.textContent !== text) {
-      body.textContent = text;
-      changed = true;
+      body?.classList.toggle("pending", line.pending);
+      article.classList.toggle("hit", Boolean(query.trim()) && line.text.toLowerCase().includes(query.trim().toLowerCase()));
     }
-    body?.classList.toggle("pending", line.pending);
-    article.classList.toggle("hit", Boolean(query.trim()) && line.text.toLowerCase().includes(query.trim().toLowerCase()));
-    host.append(article);
+    const anchor: ChildNode | null = previous ? previous.nextSibling : host.firstChild;
+    if (article !== anchor) host.insertBefore(article, anchor);
+    previous = article;
+  }
+  for (const [id, top] of previewScroll) {
+    const scroller = byId.get(id)?.querySelector<HTMLElement>(":scope > .preview:not(.agent-md) .markdown, :scope > .preview:not(.agent-md) iframe");
+    if (scroller && scroller.scrollTop !== top) scroller.scrollTop = top;
   }
   if (changed && stick) host.scrollTop = host.scrollHeight;
 }
@@ -1062,9 +1101,9 @@ function activityNote(activity: PeerActivity | undefined): string {
   return "";
 }
 
-function activitySentence(name: string, activity: PeerActivity | undefined): string {
-  if (activity?.replying) return `${name} đang trả lời…`;
-  if (activity?.typing) return `${name} đang nhập…`;
+function activitySentence(name: string, activity: PeerActivity | undefined, sessionId: string): string {
+  if (activity?.replying && activity.replyingSessionId === sessionId) return `${name} đang trả lời…`;
+  if (activity?.typing && activity.typingSessionId === sessionId) return `${name} đang nhập…`;
   return "";
 }
 

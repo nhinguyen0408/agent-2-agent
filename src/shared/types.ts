@@ -46,11 +46,14 @@ export const IPC = {
 export type ActivityPatch = {
   typing?: boolean;
   replying?: boolean;
+  sessionId?: string;
 };
 
 export type PeerActivity = {
   typing: boolean;
   replying: boolean;
+  typingSessionId: string;
+  replyingSessionId: string;
 };
 
 export type ProviderId = "echo" | "claude-cli" | "cursor-cli";

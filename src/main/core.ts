@@ -9,7 +9,6 @@ import {
   BRIEF_FILE_MAX,
   BRIEF_GOAL_CAP,
   BRIEF_TOPIC_CAP,
-  BRIEF_TURN_HARD,
   BRIEF_TURN_MAX,
   clampTurnLimit,
   emptyBrief,
@@ -95,6 +94,7 @@ export class AppCore {
   private readonly remoteClis = new Map<string, string>();
   private readonly activity = new Map<string, PeerActivity>();
   private readonly activityTimers = new Map<string, NodeJS.Timeout>();
+  private readonly replySessions = new Map<string, string>();
   private readonly unread = new Set<string>();
   private sweepTimer: NodeJS.Timeout | null = null;
   private scanTimer: NodeJS.Timeout | null = null;
@@ -512,7 +512,8 @@ export class AppCore {
   }
 
   async extendBrief(peerId: string, extra?: number): Promise<AppState> {
-    const add = extra === 2 || extra === 8 ? extra : BRIEF_EXTEND;
+    const requested = Math.round(Number(extra));
+    const add = Number.isFinite(requested) && requested > 0 ? Math.min(BRIEF_TURN_MAX, requested) : BRIEF_EXTEND;
     if (!this.isLinked(peerId)) {
       this.system(peerId, "Cần nối socket trước khi gia hạn lượt.");
       return this.snapshot();
@@ -524,7 +525,7 @@ export class AppCore {
       return this.snapshot();
     }
     const nextLimit = brief.turnsUsed >= brief.turnLimit ? brief.turnsUsed + add : brief.turnLimit + add;
-    brief.turnLimit = clampTurnLimit(nextLimit, BRIEF_TURN_HARD);
+    brief.turnLimit = clampTurnLimit(nextLimit, BRIEF_TURN_MAX);
     if (brief.running) {
       this.syncBrief(peerId, sessionId);
       this.scheduleSave();
@@ -1004,7 +1005,9 @@ export class AppCore {
   private async onWireChat(peerId: string, msg: WireChat): Promise<void> {
     if (!msg?.id || msg.fromPeerId === this.store.peerId || msg.fromPeerId !== peerId) return;
     const text = String(msg.text ?? "").slice(0, 100_000);
-    const sessionId = this.adoptSession(peerId, msg.sessionId, msg.sessionTitle);
+    const sessionId = msg.sessionId
+      ? this.adoptSession(peerId, msg.sessionId, msg.sessionTitle)
+      : this.replySessions.get(peerId) || this.ensureSession(peerId);
     const attachment = this.localDiscuss(msg.attachment);
     this.upsertLine(sessionId, {
       id: msg.id,
@@ -1032,8 +1035,12 @@ export class AppCore {
 
   private onWireDelta(peerId: string, delta: WireDelta): void {
     if (!delta?.id || delta.fromPeerId === this.store.peerId || delta.fromPeerId !== peerId) return;
-    const located = delta.sessionId ? undefined : this.locate(peerId, delta.id);
-    const sessionId = delta.sessionId || located?.sessionId || this.ensureSession(peerId);
+    const located = this.locate(peerId, delta.id);
+    const known = delta.sessionId
+      ? (this.store.sessions[peerId] ?? []).some((session) => session.id === delta.sessionId)
+      : false;
+    const sessionId = located?.sessionId || (known ? delta.sessionId || "" : delta.sessionId ? this.adoptSession(peerId, delta.sessionId) : "");
+    if (!sessionId) return;
     const existing = this.findLine(sessionId, delta.id);
     if (existing && !existing.pending) return;
     this.upsertLine(sessionId, {
@@ -1049,6 +1056,7 @@ export class AppCore {
   }
 
   private enqueueReply(peerId: string, sessionId: string, loop = false): Promise<string> {
+    const bound = sessionId;
     const epoch = this.epochs.get(peerId) ?? 0;
     let resolveOut: (text: string) => void = () => undefined;
     const result = new Promise<string>((resolve) => {
@@ -1059,15 +1067,16 @@ export class AppCore {
         resolveOut("");
         return;
       }
-      if (loop && !this.briefContinues(sessionId)) {
+      if (loop && !this.briefContinues(bound)) {
         resolveOut("");
         return;
       }
       const controller = new AbortController();
       this.aborts.set(peerId, controller);
+      this.replySessions.set(peerId, bound);
       const id = randomUUID();
       const createdAt = Date.now();
-      this.upsertLine(sessionId, {
+      this.upsertLine(bound, {
         id,
         fromPeerId: this.store.peerId,
         fromName: this.store.settings.name,
@@ -1077,31 +1086,31 @@ export class AppCore {
         createdAt,
       });
       this.pushNow();
-      this.notifyActivity(peerId, { replying: true });
+      this.notifyActivity(peerId, { replying: true, sessionId: bound });
       try {
         const text = await this.agents.reply({
           peerId,
           selfName: this.store.settings.name,
           peerName: this.endpoints.get(peerId)?.name || this.store.trusted[peerId]?.name || "máy kia",
-          history: this.modelHistory(sessionId),
+          history: this.modelHistory(bound),
           signal: controller.signal,
           fileRelay: { url: `http://127.0.0.1:${this.port}/relay-file/${peerId}` },
-          readings: this.readings(sessionId),
-          brief: this.promptBrief(sessionId),
+          readings: this.readings(bound),
+          brief: this.promptBrief(bound),
           onDelta: (chunk) => {
             if ((this.epochs.get(peerId) ?? 0) !== epoch) return;
-            const line = this.findLine(sessionId, id);
+            const line = this.findLine(bound, id);
             if (!line?.pending) return;
             line.text += chunk;
-            this.scheduleDelta(peerId, sessionId, id);
+            this.scheduleDelta(peerId, bound, id);
           },
         });
         if ((this.epochs.get(peerId) ?? 0) !== epoch || controller.signal.aborted) {
-          this.finishAborted(sessionId, id);
+          this.finishAborted(bound, id);
           resolveOut("");
           return;
         }
-        const line = this.findLine(sessionId, id);
+        const line = this.findLine(bound, id);
         if (line) {
           line.text = text;
           line.pending = false;
@@ -1113,10 +1122,10 @@ export class AppCore {
           kind: "agent",
           text,
           createdAt,
-          sessionId,
-          sessionTitle: this.sessionTitle(sessionId),
+          sessionId: bound,
+          sessionTitle: this.sessionTitle(bound),
         };
-        if (loop) this.finishBriefTurn(sessionId, wire);
+        if (loop) this.finishBriefTurn(bound, wire);
         this.sendTo(peerId, "chat", wire);
         this.lastError.delete(peerId);
         this.pushNow();
@@ -1124,13 +1133,13 @@ export class AppCore {
         resolveOut(text);
       } catch (err) {
         if (isAbort(err) || (this.epochs.get(peerId) ?? 0) !== epoch) {
-          this.finishAborted(sessionId, id);
+          this.finishAborted(bound, id);
           resolveOut("");
           return;
         }
         const message = err instanceof Error ? err.message : "Agent lỗi";
         this.lastError.set(peerId, message);
-        this.upsertLine(sessionId, {
+        this.upsertLine(bound, {
           id,
           fromPeerId: this.store.peerId,
           fromName: this.store.settings.name,
@@ -1144,7 +1153,8 @@ export class AppCore {
         this.scheduleSave();
         resolveOut("");
       } finally {
-        this.notifyActivity(peerId, { replying: false });
+        if (this.replySessions.get(peerId) === bound) this.replySessions.delete(peerId);
+        this.notifyActivity(peerId, { replying: false, sessionId: bound });
         if (this.aborts.get(peerId) === controller) this.aborts.delete(peerId);
       }
     };
@@ -1436,7 +1446,7 @@ export class AppCore {
   private halt(peerId: string, tellPeer: boolean): void {
     this.epochs.set(peerId, (this.epochs.get(peerId) ?? 0) + 1);
     this.aborts.get(peerId)?.abort();
-    const sessionId = this.store.openSessions[peerId];
+    const sessionId = this.replySessions.get(peerId) || this.store.openSessions[peerId];
     const brief = sessionId ? this.store.briefs[sessionId] : undefined;
     if (brief?.running) {
       brief.running = false;
@@ -1547,6 +1557,7 @@ export class AppCore {
 
   createSession(peerId: string): AppState {
     const session = this.addSession(peerId);
+    this.store.transcripts[session.id] = [];
     this.store.openSessions[peerId] = session.id;
     this.unread.delete(session.id);
     this.sendTo(peerId, "session", { id: session.id, title: session.title, createdAt: session.createdAt });
@@ -1637,10 +1648,12 @@ export class AppCore {
       }
       return;
     }
-    this.foldEmptySession(peerId, body.id);
     const previous = this.store.openSessions[peerId];
+    const keepOpen = Boolean(previous && previous !== body.id && (previous === this.replySessions.get(peerId) || this.sessionHasChat(previous)));
+    if (!keepOpen) this.foldEmptySession(peerId, body.id);
     this.addSession(peerId, body.id, body.title);
-    if (previous && previous !== body.id) {
+    const alive = Boolean(previous && (this.store.sessions[peerId] ?? []).some((session) => session.id === previous));
+    if (alive && previous !== body.id) {
       this.store.openSessions[peerId] = previous;
       this.unread.add(body.id);
     }
@@ -1648,11 +1661,16 @@ export class AppCore {
     this.pushNow();
   }
 
+  private sessionHasChat(sessionId: string | undefined): boolean {
+    if (!sessionId) return false;
+    return (this.store.transcripts[sessionId] ?? []).some((line) => line.pending || line.kind !== "system");
+  }
+
   private foldEmptySession(peerId: string, intoId: string): void {
     const open = this.store.openSessions[peerId];
-    if (!open || open === intoId) return;
+    if (!open || open === intoId || open === this.replySessions.get(peerId)) return;
     const lines = this.store.transcripts[open] ?? [];
-    if (lines.some((line) => line.kind !== "system")) return;
+    if (lines.some((line) => line.pending || line.kind !== "system")) return;
     const target = this.store.transcripts[intoId] ?? [];
     this.store.transcripts[intoId] = [...lines, ...target];
     delete this.store.transcripts[open];
@@ -1705,11 +1723,17 @@ export class AppCore {
   }
 
   private noteActivity(peerId: string, patch: ActivityPatch | undefined): void {
-    const current = this.activity.get(peerId) ?? { typing: false, replying: false };
+    const current = this.activity.get(peerId) ?? { typing: false, replying: false, typingSessionId: "", replyingSessionId: "" };
     const next: PeerActivity = {
       typing: typeof patch?.typing === "boolean" ? patch.typing : current.typing,
       replying: typeof patch?.replying === "boolean" ? patch.replying : current.replying,
+      typingSessionId: current.typingSessionId,
+      replyingSessionId: current.replyingSessionId,
     };
+    if (patch?.typing && patch.sessionId) next.typingSessionId = patch.sessionId;
+    if (patch?.replying && patch.sessionId) next.replyingSessionId = patch.sessionId;
+    if (patch?.typing === false) next.typingSessionId = "";
+    if (patch?.replying === false) next.replyingSessionId = "";
     const timer = this.activityTimers.get(peerId);
     if (timer) clearTimeout(timer);
     this.activityTimers.delete(peerId);
@@ -1720,6 +1744,7 @@ export class AppCore {
         const live = this.activity.get(peerId);
         if (!live) return;
         live.typing = false;
+        live.typingSessionId = "";
         if (!live.replying) this.activity.delete(peerId);
         this.activityTimers.delete(peerId);
         this.push();
