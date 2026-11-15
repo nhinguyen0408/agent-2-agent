@@ -1,0 +1,146 @@
+[
+  {
+    "id": "read-search",
+    "level": 1,
+    "title": "Đọc và tìm kiếm sâu",
+    "detail": "Đọc nội dung file văn bản (.txt, .md, .csv, .json, .log, mã nguồn) và tìm kiếm từ khóa ẩn sâu trong hàng nghìn thư mục con."
+  },
+  {
+    "id": "disk-scan",
+    "level": 1,
+    "title": "Quét dữ liệu ổ cứng",
+    "detail": "Quét hệ thống để phát hiện các file rác, file trùng lặp nội dung hoặc file dung lượng lớn không dùng đến. Chỉ quét, chưa xóa."
+  },
+  {
+    "id": "system-monitor",
+    "level": 1,
+    "title": "Giám sát tài nguyên hệ thống",
+    "detail": "Kiểm tra dung lượng ổ cứng trống, mức sử dụng CPU/RAM/GPU, nhiệt độ máy, tình trạng pin và liệt kê các tiến trình chạy ngầm."
+  },
+  {
+    "id": "network-info",
+    "level": 1,
+    "title": "Kiểm tra thông số mạng cơ bản",
+    "detail": "Xem địa chỉ IP nội bộ/công cộng, kiểm tra tốc độ mạng, ping máy chủ, kiểm tra xem cổng nào đang bị chiếm dụng."
+  },
+  {
+    "id": "screen-capture",
+    "level": 1,
+    "title": "Chụp ảnh và quay màn hình",
+    "detail": "Chụp ảnh toàn màn hình hoặc một vùng cửa sổ và lưu cục bộ trên máy."
+  },
+  {
+    "id": "db-read",
+    "level": 1,
+    "title": "Truy vấn dữ liệu chỉ đọc",
+    "detail": "Chạy lệnh SELECT để đọc và xuất báo cáo từ cơ sở dữ liệu cục bộ (SQLite, MySQL, PostgreSQL) hoặc xem thay đổi Git (git diff)."
+  },
+  {
+    "id": "file-arrange",
+    "level": 2,
+    "title": "Sắp xếp, tạo và đổi tên file",
+    "detail": "Tạo file/thư mục mới, sao chép, di chuyển, nén/giải nén (.zip, .rar, .7z) và đổi tên hàng trăm file cùng lúc theo quy tắc."
+  },
+  {
+    "id": "media-convert",
+    "level": 2,
+    "title": "Chuyển đổi đa phương tiện và tài liệu",
+    "detail": "Nén dung lượng ảnh/video hàng loạt, cắt ghép video, tách âm thanh, chuyển đổi định dạng file (Markdown/Word sang PDF, CSV sang Excel)."
+  },
+  {
+    "id": "open-app",
+    "level": 2,
+    "title": "Mở ứng dụng và file",
+    "detail": "Khởi chạy phần mềm (Word, Excel, VS Code, Spotify, Zalo, Docker) hoặc mở file bằng đúng ứng dụng mặc định."
+  },
+  {
+    "id": "browser-basic",
+    "level": 2,
+    "title": "Điều khiển trình duyệt cơ bản",
+    "detail": "Mở trình duyệt (Chrome, Edge, Safari), mở sẵn một nhóm nhiều tab công việc hoặc mở trang tìm kiếm với từ khóa định sẵn."
+  },
+  {
+    "id": "clipboard",
+    "level": 2,
+    "title": "Thao tác Clipboard",
+    "detail": "Đọc nội dung vừa copy, dịch thuật, tóm tắt hoặc định dạng lại rồi ghi đè kết quả mới vào bộ nhớ tạm."
+  },
+  {
+    "id": "light-settings",
+    "level": 2,
+    "title": "Chỉnh sửa cài đặt tiện ích nhẹ",
+    "detail": "Bật/tắt chế độ Sáng/Tối, chỉnh âm lượng loa, thay đổi độ sáng màn hình, khóa màn hình hoặc hẹn giờ ngủ."
+  },
+  {
+    "id": "code-git",
+    "level": 2,
+    "title": "Lập trình và Git cục bộ",
+    "detail": "Viết code mới, sửa lỗi, nâng cấp thư viện, tự chạy kiểm thử (npm test, pytest), tạo nhánh mới và tạo commit trên máy. Chưa đẩy lên mạng."
+  },
+  {
+    "id": "notify",
+    "level": 2,
+    "title": "Gửi thông báo",
+    "detail": "Hiển thị thông báo pop-up kèm âm thanh ở góc màn hình khi tác vụ hoàn tất."
+  },
+  {
+    "id": "delete-data",
+    "level": 3,
+    "title": "Xóa dữ liệu vĩnh viễn",
+    "detail": "Dọn dẹp file rác, xóa file trùng lặp hoặc dùng lệnh xóa trực tiếp làm mất dữ liệu không qua thùng rác."
+  },
+  {
+    "id": "db-write",
+    "level": 3,
+    "title": "Chỉnh sửa hoặc xóa cơ sở dữ liệu",
+    "detail": "Chạy lệnh ghi, cập nhật hoặc xóa bảng dữ liệu trực tiếp trên SQLite, MySQL, PostgreSQL đang chạy trên máy."
+  },
+  {
+    "id": "download",
+    "level": 3,
+    "title": "Tải dữ liệu từ Internet",
+    "detail": "Tải trực tiếp file tài liệu, bộ dữ liệu, hình ảnh, video hoặc nhạc từ đường link URL về máy."
+  },
+  {
+    "id": "install-software",
+    "level": 3,
+    "title": "Cài đặt và gỡ bỏ phần mềm",
+    "detail": "Tự động tải, cài đặt, cập nhật hoặc gỡ bỏ phần mềm và thư viện thông qua trình quản lý gói (winget, brew, apt, npm, pip)."
+  },
+  {
+    "id": "browser-auto",
+    "level": 3,
+    "title": "Tự động hóa thao tác web nâng cao",
+    "detail": "Dùng công cụ điều khiển trình duyệt để đăng nhập tài khoản web, điền biểu mẫu hoặc cào dữ liệu từ trang web."
+  },
+  {
+    "id": "git-push",
+    "level": 3,
+    "title": "Đẩy mã nguồn lên mạng",
+    "detail": "Đẩy code, tạo Pull Request lên GitHub/GitLab. Có thể lộ mã nguồn hoặc API key nếu đẩy nhầm nhánh công khai."
+  },
+  {
+    "id": "gui-automation",
+    "level": 4,
+    "title": "Giả lập chuột và bàn phím",
+    "detail": "Tự động di chuyển chuột, click vào tọa độ hoặc nút bấm trên màn hình, hoặc tự gõ phím."
+  },
+  {
+    "id": "process-network",
+    "level": 4,
+    "title": "Can thiệp mạng và tiến trình hệ thống",
+    "detail": "Bật/tắt Wi-Fi, Bluetooth, buộc tắt ứng dụng hoặc tiến trình chạy ngầm, tắt máy."
+  },
+  {
+    "id": "scheduled-task",
+    "level": 4,
+    "title": "Thiết lập tác vụ chạy ngầm định kỳ",
+    "detail": "Cài đặt lịch trình tự động để máy tự chạy script vào giờ cố định mà không cần mở agent."
+  },
+  {
+    "id": "yolo",
+    "level": 4,
+    "title": "Chạy tự động hoàn toàn",
+    "detail": "Cho phép agent thực thi chuỗi lệnh shell và sửa file hàng loạt liên tục mà bỏ qua bước hỏi xác nhận từng lệnh."
+  }
+]

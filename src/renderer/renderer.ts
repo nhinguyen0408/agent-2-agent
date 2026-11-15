@@ -3,6 +3,7 @@ import { GROUP_MAX, groupKey, mentionRanges, parseGroupKey, rewriteMentionLabels
 import type { AppState, ChatLine, ChatNotice, CliReport, CliToolState, FileRef, PeerActivity, PeerView, Settings, WorkFile } from "../shared/types";
 import { REPLY_WAIT_MS, cliClientLabel, providerLabel } from "../shared/types";
 import { fileRef, type PreviewKind } from "../shared/preview";
+import { ACCESS_LEVELS, ACCESS_ROLES, defaultAccess } from "../shared/access";
 import { previewSrc, renderMarkdownHtml, renderPreview } from "./previewView";
 
 declare global {
@@ -159,6 +160,7 @@ function boot(host: HTMLElement): void {
           <label>Lệnh Cursor<input id="set-cursor-command" spellcheck="false" /></label>
           <label>Lệnh Codex<input id="set-codex-command" spellcheck="false" /></label>
           <label class="check"><input id="set-auto" type="checkbox" /> Tự chấp nhận máy trong LAN</label>
+          <button id="open-access" type="button" class="access-open">Khả năng truy cập của agent khác</button>
           <div id="tools" class="tools"></div>
           <p class="hint">Không dùng API key trong app. File đi qua app, không cần share Windows. Claude, Cursor và Codex dùng bản CLI đã đăng nhập trên máy này. Lệnh cursor của Cursor IDE không được tính là Cursor CLI.</p>
           <div class="save-row">
@@ -283,6 +285,7 @@ function boot(host: HTMLElement): void {
       </div>
     </div>
   `;
+  buildAccessDialog(host);
 
   const navIds = ["peers", "sessions", "files", "settings", "logs"] as const;
   type NavId = (typeof navIds)[number];
@@ -390,6 +393,25 @@ function boot(host: HTMLElement): void {
     const hostInput = must<HTMLInputElement>("#manual-host").value.trim();
     const port = Number(must<HTMLInputElement>("#manual-port").value);
     void guard(() => window.lan.connectAddress(hostInput, port));
+  });
+
+  must<HTMLButtonElement>("#open-access").addEventListener("click", () => {
+    paintAccess(state?.settings.access ?? defaultAccess());
+    must<HTMLElement>("#access-pop").hidden = false;
+  });
+  must<HTMLElement>("#access-pop").addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) closeAccess();
+  });
+  must<HTMLButtonElement>("#access-close").addEventListener("click", () => closeAccess());
+  must<HTMLButtonElement>("#access-save").addEventListener("click", () => {
+    void guard(async () => {
+      await window.lan.saveSettings(readSettings());
+      must<HTMLElement>("#access-pop").hidden = true;
+      flash("Đã lưu khả năng truy cập");
+    });
+  });
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !must<HTMLElement>("#access-pop").hidden) closeAccess();
   });
 
   must<HTMLButtonElement>("#save").addEventListener("click", () => {
@@ -1355,6 +1377,18 @@ function boot(host: HTMLElement): void {
     });
   }
 
+  function paintAccess(ids: string[]): void {
+    const on = new Set(ids);
+    for (const input of Array.from(document.querySelectorAll<HTMLInputElement>("[data-access]"))) {
+      input.checked = on.has(input.dataset.access || "");
+    }
+  }
+
+  function closeAccess(): void {
+    paintAccess(state?.settings.access ?? defaultAccess());
+    must<HTMLElement>("#access-pop").hidden = true;
+  }
+
   function fillSettings(settings: Settings): void {
     if (settingsReady) return;
     must<HTMLInputElement>("#set-name").value = settings.name;
@@ -1368,6 +1402,7 @@ function boot(host: HTMLElement): void {
     must<HTMLInputElement>("#set-codex-skill").value = settings.codexSkillDir;
     must<HTMLInputElement>("#set-confine").checked = settings.confineWorkDir;
     must<HTMLInputElement>("#set-auto").checked = settings.autoAccept;
+    paintAccess(settings.access);
     settingsReady = true;
     void refreshFiles();
   }
@@ -1385,6 +1420,10 @@ function boot(host: HTMLElement): void {
       cursorSkillDir: must<HTMLInputElement>("#set-cursor-skill").value,
       codexSkillDir: must<HTMLInputElement>("#set-codex-skill").value,
       confineWorkDir: must<HTMLInputElement>("#set-confine").checked,
+      access: Array.from(document.querySelectorAll<HTMLInputElement>("[data-access]"))
+        .filter((input) => input.checked)
+        .map((input) => input.dataset.access || "")
+        .filter(Boolean),
       autoAccept: must<HTMLInputElement>("#set-auto").checked,
     };
   }
@@ -2084,6 +2123,77 @@ function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : "Có lỗi";
 }
 
+function buildAccessDialog(host: HTMLElement): void {
+  const pop = document.createElement("div");
+  pop.id = "access-pop";
+  pop.className = "access-pop";
+  pop.hidden = true;
+  const card = document.createElement("div");
+  card.className = "access-card";
+  card.setAttribute("role", "dialog");
+  card.setAttribute("aria-modal", "true");
+  card.setAttribute("aria-labelledby", "access-title");
+  const header = document.createElement("header");
+  const title = document.createElement("strong");
+  title.id = "access-title";
+  title.textContent = "Khả năng truy cập của agent khác";
+  const close = document.createElement("button");
+  close.id = "access-close";
+  close.type = "button";
+  close.className = "icon-btn";
+  close.dataset.tip = "Đóng";
+  close.setAttribute("aria-label", "Đóng");
+  close.innerHTML = icon("x");
+  header.append(title, close);
+  const hint = document.createElement("p");
+  hint.className = "hint access-hint";
+  hint.textContent = "Agent máy khác chỉ làm được các mục đang bật. Mục tắt sẽ bị từ chối.";
+  const list = document.createElement("div");
+  list.className = "access-list";
+  for (const level of ACCESS_LEVELS) {
+    const heading = document.createElement("h3");
+    heading.className = "access-level";
+    heading.textContent = level.title;
+    list.append(heading);
+    for (const role of ACCESS_ROLES.filter((item) => item.level === level.level)) {
+      const row = document.createElement("label");
+      row.className = "access-row";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.dataset.access = role.id;
+      const name = document.createElement("span");
+      name.textContent = role.title;
+      const info = document.createElement("button");
+      info.type = "button";
+      info.className = "icon-btn access-info";
+      info.dataset.tip = role.detail;
+      info.dataset.wide = "1";
+      info.setAttribute("aria-label", `Chi tiết ${role.title}`);
+      info.innerHTML = icon("info");
+      info.addEventListener("pointerdown", (event) => event.stopPropagation());
+      info.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      });
+      row.append(input, name, info);
+      list.append(row);
+    }
+  }
+  const row = document.createElement("div");
+  row.className = "save-row access-save";
+  const save = document.createElement("button");
+  save.id = "access-save";
+  save.type = "button";
+  save.className = "icon-btn primary";
+  save.dataset.tip = "Lưu khả năng truy cập";
+  save.setAttribute("aria-label", "Lưu khả năng truy cập");
+  save.innerHTML = icon("check");
+  row.append(save);
+  card.append(header, hint, list, row);
+  pop.append(card);
+  host.append(pop);
+}
+
 function icon(name: string): string {
   return `<svg class="icon" aria-hidden="true"><use href="#i-${name}"></use></svg>`;
 }
@@ -2106,6 +2216,7 @@ function bindTips(host: HTMLElement): void {
     const text = el.dataset.tip;
     if (!text) return;
     tip.textContent = text;
+    tip.classList.toggle("wide", el.dataset.wide === "1");
     tip.hidden = false;
     const rect = el.getBoundingClientRect();
     const box = tip.getBoundingClientRect();
@@ -2170,6 +2281,7 @@ function iconSprite(): string {
     item("terminal", `<path d="M5 8l4 4-4 4M12 16h7"/>`),
     item("expand", `<path d="M9 4H4v5M15 4h5v5M20 15v5h-5M4 15v5h5"/>`),
     item("trash", `<path d="M5 7.5h14"/><path d="M9.2 7.4V5.6h5.6v1.8"/><path d="M7.4 7.5l.6 11.2h8l.6-11.2"/>`),
+    item("info", `<circle cx="12" cy="12" r="8"/><path d="M12 11.2v5"/><path d="M12 8h.01"/>`),
   ].join("")}</svg>`;
 }
 

@@ -84,6 +84,7 @@ export type Settings = {
   cursorSkillDir: string;
   codexSkillDir: string;
   confineWorkDir: boolean;
+  access: string[];
   autoAccept: boolean;
 };
 

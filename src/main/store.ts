@@ -5,6 +5,7 @@ import path from "node:path";
 import { app } from "electron";
 import { sanitizeBrief, type ProjectBrief } from "../shared/brief";
 import { sanitizeMembers, type GroupRoom } from "../shared/group";
+import { cleanAccess, defaultAccess } from "../shared/access";
 import type { ChatLine, ChatSession, CliLinks, Settings } from "../shared/types";
 import { normalizeProvider } from "../shared/types";
 
@@ -41,6 +42,7 @@ export function defaultSettings(profile: string): Settings {
     cursorSkillDir: "",
     codexSkillDir: "",
     confineWorkDir: true,
+    access: defaultAccess(),
     autoAccept: false,
   };
 }
@@ -119,6 +121,7 @@ export function sanitizeSettings(input: Partial<Settings> & { cursorCwd?: string
     cursorSkillDir: cleanDir(input.cursorSkillDir),
     codexSkillDir: cleanDir(input.codexSkillDir),
     confineWorkDir: input.confineWorkDir !== false,
+    access: cleanAccess(input.access),
     autoAccept: Boolean(input.autoAccept),
   };
 }

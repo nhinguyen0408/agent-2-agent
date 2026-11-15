@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { accessPrompt, AccessDenied, defaultAccess, deniedRoles, toolBlob } from "../shared/access";
 import type { ProviderId, Settings } from "../shared/types";
 import { findExecutable } from "./cliDetect";
 import { insideDir } from "./files";
@@ -23,6 +24,7 @@ export type ReplyInput = {
   confine?: boolean;
   skillDir?: string;
   skills?: string;
+  access?: string[];
   room?: { title: string; members: string };
   together?: string;
   resume?: boolean;
@@ -215,6 +217,7 @@ export class AgentHost {
       let streamed = "";
       let finalText = "";
       let capturedSession = "";
+      let blocked: AccessDenied | null = null;
       const onAbort = () => killChild(child);
       if (input.signal.aborted) onAbort();
       input.signal.addEventListener("abort", onAbort, { once: true });
@@ -223,6 +226,19 @@ export class AgentHost {
       child.stdout?.on("data", (chunk: string) => {
         stdout += chunk;
         lineBuf = consumeLines(lineBuf, chunk, (event) => {
+          const blob = toolBlob(event);
+          if (blob) {
+            const hits = deniedRoles(blob, input.access ?? defaultAccess(), "command");
+            if (hits.length) {
+              if (!blocked) {
+                blocked = new AccessDenied(hits);
+                killChild(child);
+                input.signal.removeEventListener("abort", onAbort);
+                reject(blocked);
+              }
+              return;
+            }
+          }
           const found = sessionIdOf(event);
           if (found) capturedSession = found;
           const codex = codexAgentText(event);
@@ -252,6 +268,7 @@ export class AgentHost {
       child.on("error", (err) => {
         this.running.delete(input.peerId);
         input.signal.removeEventListener("abort", onAbort);
+        if (blocked) return;
         if ((err as NodeJS.ErrnoException).code === "ENOENT") {
           reject(new Error(missing));
           return;
@@ -261,6 +278,7 @@ export class AgentHost {
       child.on("close", (code) => {
         this.running.delete(input.peerId);
         input.signal.removeEventListener("abort", onAbort);
+        if (blocked) return;
         if (input.signal.aborted) {
           reject(abortError());
           return;
@@ -322,6 +340,7 @@ function conversationPrompt(input: ReplyInput): string {
       : `Bạn là ${input.selfName}. Bạn đang nói chuyện trực tiếp với ${input.peerName} qua LAN Agents.`,
     "Hãy trả lời tin nhắn cuối như một người trong cuộc hội thoại này.",
     scopeBlock(input, true),
+    accessPrompt(input.access),
     "Quy tắc:",
     "- Nếu tin có @Tên, đó là máy được gọi. @me là agent của máy đã gửi tin đó. Hãy nói với đúng người đó.",
     "- Trong trò chuyện 1-1, agent của máy gửi @me nói trước. Khi đến lượt bạn sau lời đó, hãy trả lời tiếp nội dung vừa nói.",
@@ -351,6 +370,7 @@ function continuePrompt(input: ReplyInput): string {
   const pace = input.brief?.topic && !input.brief.last ? `Lượt ${input.brief.turn}/${input.brief.limit} của hồ sơ: ${input.brief.topic}` : "";
   return [
     scopeBlock(input, false),
+    accessPrompt(input.access),
     formatHistory(input),
     pace,
     briefTail(input),

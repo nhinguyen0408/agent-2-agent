@@ -56,6 +56,7 @@ import type {
   WireResume,
 } from "../shared/types";
 import { DEFAULT_PORT, PORT_SPAN, REPLY_WAIT_MS } from "../shared/types";
+import { AccessDenied, deniedRoles, denialText, latestRequest } from "../shared/access";
 import { AgentHost, CliResumeUnsupported, CliSessionLost, type ModelTurn } from "./agents";
 import { detectLocalClis, installedCliList, parseCliList } from "./cliDetect";
 import { Discovery, lanIPv4, normalizeIp } from "./discovery";
@@ -1181,6 +1182,28 @@ export class AppCore {
     this.push();
   }
 
+  private publishAgentSpeech(peerId: string, sessionId: string, id: string, createdAt: number, text: string, groupId: string, loop: boolean): void {
+    const published = this.publishMentions(text, this.mentionPeople(groupId ? groupKey(groupId) : peerId));
+    const wire: WireChat = {
+      id,
+      fromPeerId: this.store.peerId,
+      fromName: this.store.settings.name,
+      kind: "agent",
+      text: published.text,
+      mentions: published.mentions,
+      createdAt,
+      sessionId,
+      sessionTitle: this.sessionTitle(sessionId),
+    };
+    if (groupId) this.finishGroupSpeech(groupId, sessionId, wire, loop);
+    else {
+      if (loop) this.finishBriefTurn(sessionId, wire);
+      this.sendTo(peerId, "chat", wire);
+    }
+    this.pushNow();
+    this.scheduleSave();
+  }
+
   private enqueueReply(peerId: string, sessionId: string, loop = false, groupId = ""): Promise<string> {
     const bound = sessionId;
     const epoch = this.epochs.get(peerId) ?? 0;
@@ -1195,6 +1218,28 @@ export class AppCore {
       }
       if (loop && !this.briefContinues(bound)) {
         resolveOut("");
+        return;
+      }
+      const blocked = deniedRoles(latestRequest(this.modelHistory(bound)), this.store.settings.access, "request");
+      if (blocked.length) {
+        if (loop) {
+          const brief = this.store.briefs[bound];
+          if (brief) brief.running = false;
+        }
+        const text = denialText(blocked);
+        const id = randomUUID();
+        const createdAt = Date.now();
+        this.upsertLine(bound, {
+          id,
+          fromPeerId: this.store.peerId,
+          fromName: this.store.settings.name,
+          kind: "agent",
+          text,
+          pending: false,
+          createdAt,
+        });
+        this.publishAgentSpeech(peerId, bound, id, createdAt, text, groupId, loop);
+        resolveOut(text);
         return;
       }
       const controller = new AbortController();
@@ -1242,6 +1287,7 @@ export class AppCore {
             confine: this.store.settings.confineWorkDir,
             skillDir,
             skills: skillIndex(skillDir),
+            access: this.store.settings.access,
             room: room
               ? { title: room.title, members: room.members.map((member) => this.memberRecord(member).name).join(", ") }
               : undefined,
@@ -1290,29 +1336,23 @@ export class AppCore {
           line.pending = false;
         }
         if (resumeEnabled && result.sessionId) this.rememberCli(bound, peerId, provider, result.sessionId, id);
-        const published = this.publishMentions(text, this.mentionPeople(groupId ? groupKey(groupId) : peerId));
-        const wire: WireChat = {
-          id,
-          fromPeerId: this.store.peerId,
-          fromName: this.store.settings.name,
-          kind: "agent",
-          text: published.text,
-          mentions: published.mentions,
-          createdAt,
-          sessionId: bound,
-          sessionTitle: this.sessionTitle(bound),
-        };
-        if (groupId) this.finishGroupSpeech(groupId, bound, wire, loop);
-        else {
-          if (loop) this.finishBriefTurn(bound, wire);
-          this.sendTo(peerId, "chat", wire);
-        }
+        this.publishAgentSpeech(peerId, bound, id, createdAt, text, groupId, loop);
         this.lastError.delete(peerId);
-        this.pushNow();
-        this.scheduleSave();
         resolveOut(text);
       } catch (err) {
         clearTimeout(waitTimer);
+        if (err instanceof AccessDenied && (this.epochs.get(peerId) ?? 0) === epoch) {
+          const text = err.message;
+          const line = this.findLine(bound, id);
+          if (line) {
+            line.kind = "agent";
+            line.text = text;
+            line.pending = false;
+          }
+          this.publishAgentSpeech(peerId, bound, id, createdAt, text, groupId, loop);
+          resolveOut(text);
+          return;
+        }
         if (isAbort(err) || (this.epochs.get(peerId) ?? 0) !== epoch) {
           this.finishAborted(bound, id, timedOut ? "Agent trả lời quá lâu, đã dừng. Bạn có thể nhắn tiếp." : "Đã dừng.");
           resolveOut("");
