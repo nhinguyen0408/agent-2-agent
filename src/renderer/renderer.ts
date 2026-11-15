@@ -1,5 +1,5 @@
-import { BRIEF_FILE_MAX, BRIEF_TURN_MAX, resultText, type BriefFile, type ProjectBrief } from "../shared/brief";
-import { GROUP_MAX, groupKey, mentionRanges, parseGroupKey, rewriteMentionLabels, type GroupMember, type GroupRoom, type MentionRef } from "../shared/group";
+import { BRIEF_FILE_MAX, BRIEF_TURN_MAX, CODING_TURN_DEFAULT, CODING_TURN_MAX, resultText, type BriefFile, type ProjectBrief } from "../shared/brief";
+import { CODING_ROLES, GROUP_MAX, codingRoleLabel, groupKey, mentionRanges, parseGroupKey, rewriteMentionLabels, type GroupMember, type GroupRoom, type MentionRef } from "../shared/group";
 import type { AppState, ChatLine, ChatNotice, CliReport, CliToolState, FileRef, PeerActivity, PeerView, Settings, WorkFile } from "../shared/types";
 import { REPLY_WAIT_MS, cliClientLabel, providerLabel } from "../shared/types";
 import { fileRef, type PreviewKind } from "../shared/preview";
@@ -20,7 +20,7 @@ declare global {
       send: (peerId: string, text: string, attachmentPath?: string) => Promise<void>;
       pickDiscuss: () => Promise<string | null>;
       dialogue: (peerId: string, topic: string, replies: number) => Promise<void>;
-      saveBrief: (peerId: string, patch: { topic: string; goal: string; turnLimit: number }) => Promise<AppState>;
+      saveBrief: (peerId: string, patch: { topic: string; goal: string; turnLimit: number; coding?: boolean }) => Promise<AppState>;
       pickBriefFiles: () => Promise<string[]>;
       addBriefFiles: (peerId: string, paths: string[]) => Promise<AppState>;
       removeBriefFile: (peerId: string, name: string) => Promise<AppState>;
@@ -31,6 +31,7 @@ declare global {
       inviteGroup: (groupId: string, peerId: string) => Promise<AppState>;
       leaveGroup: (groupId: string, peerId?: string) => Promise<AppState>;
       renameGroup: (groupId: string, title: string) => Promise<AppState>;
+      setMemberRole: (groupId: string, peerId: string, role: string) => Promise<AppState>;
       setNickname: (peerId: string, nickname: string) => Promise<AppState>;
       deleteSession: (peerId: string, sessionId: string) => Promise<AppState>;
       createSession: (peerId: string) => Promise<AppState>;
@@ -234,6 +235,10 @@ function boot(host: HTMLElement): void {
                 <textarea id="brief-goal" rows="12" maxlength="2000" placeholder="Dạng kết quả cần chốt" aria-label="Kết quả mong muốn"></textarea>
               </label>
               <div id="brief-files" class="brief-files"></div>
+              <label id="brief-coding-row" class="coding-toggle" hidden>
+                <input id="brief-coding" type="checkbox" />
+                <span>Chế độ coding. Mỗi agent chỉ làm đúng vai đã giao. Mặc định 50 lượt, dừng ngay khi có kết quả.</span>
+              </label>
               <div class="brief-actions">
                 ${iconButton("brief-add", "paperclip", "Thêm file context: txt, Markdown, ảnh, PDF, Word, Excel")}
                 <label class="replies" data-tip="Số lượt agent được trả lời nhau, tối đa ${BRIEF_TURN_MAX}">
@@ -779,13 +784,29 @@ function boot(host: HTMLElement): void {
     void guard(async () => {
       await flushBrief(peerId);
       const extra = Math.round(Number(must<HTMLInputElement>("#brief-extra").value));
-      const add = Number.isFinite(extra) ? Math.max(1, Math.min(BRIEF_TURN_MAX, extra)) : 4;
+      const grouped = Boolean(parseGroupKey(peerId));
+      const coding = grouped && must<HTMLInputElement>("#brief-coding").checked;
+      const cap = coding ? CODING_TURN_MAX : BRIEF_TURN_MAX;
+      const add = Number.isFinite(extra) ? Math.max(1, Math.min(cap, extra)) : 4;
       await window.lan.extendBrief(peerId, add);
     });
   });
   for (const id of ["#brief-topic", "#brief-goal", "#brief-turns"]) {
     must<HTMLElement>(id).addEventListener("input", () => scheduleBriefSave());
   }
+  must<HTMLInputElement>("#brief-coding").addEventListener("change", () => {
+    const box = must<HTMLInputElement>("#brief-coding");
+    const turns = must<HTMLInputElement>("#brief-turns");
+    const extra = must<HTMLInputElement>("#brief-extra");
+    const cap = box.checked ? CODING_TURN_MAX : BRIEF_TURN_MAX;
+    turns.max = String(cap);
+    extra.max = String(cap);
+    const current = Math.round(Number(turns.value));
+    if (box.checked && (!Number.isFinite(current) || current <= 6)) turns.value = String(CODING_TURN_DEFAULT);
+    if (!box.checked && current === CODING_TURN_DEFAULT) turns.value = "6";
+    if (!active) return;
+    void flushBrief(active);
+  });
   must<HTMLButtonElement>("#stop").addEventListener("click", () => {
     if (!active) return;
     void guard(() => window.lan.stop(active as string));
@@ -1103,6 +1124,7 @@ function boot(host: HTMLElement): void {
       `${group.members.length}/${GROUP_MAX} máy`,
       host ? "Bạn tạo nhóm" : "Máy khác tạo nhóm",
       turnName ? `Đến lượt ${turnName}` : "",
+      next.briefs[sessionId]?.coding ? "Coding" : "",
       sessionLinkNote(next, groupSession),
     ]
       .filter(Boolean)
@@ -1128,8 +1150,10 @@ function boot(host: HTMLElement): void {
     bar.hidden = false;
     const host = group.hostId === next.self.peerId;
     const box = must<HTMLElement>("#group-members");
-    if (box.querySelector("input.nick-edit")) return;
+    if (box.querySelector("input.nick-edit, select.role-pick:focus")) return;
     box.replaceChildren();
+    const coding = Boolean(next.briefs[group.sessionId]?.coding);
+    const codingRunning = Boolean(next.briefs[group.sessionId]?.running);
     for (const member of group.members) {
       const chip = document.createElement("span");
       const online = member.peerId === next.self.peerId || next.peers.some((peer) => peer.peerId === member.peerId && peer.status === "connected");
@@ -1140,6 +1164,32 @@ function boot(host: HTMLElement): void {
       label.textContent = mine ? `${shown} · bạn` : shown;
       if (!mine && shown !== member.name) label.title = member.name;
       chip.append(label);
+      if (coding && host) {
+        const select = document.createElement("select");
+        select.className = "role-pick";
+        select.disabled = codingRunning;
+        select.setAttribute("aria-label", `Vai của ${shown}`);
+        const none = document.createElement("option");
+        none.value = "";
+        none.textContent = "Vai";
+        select.append(none);
+        for (const role of CODING_ROLES) {
+          const option = document.createElement("option");
+          option.value = role;
+          option.textContent = codingRoleLabel(role);
+          select.append(option);
+        }
+        select.value = member.role || "";
+        select.addEventListener("change", () => {
+          void guard(() => window.lan.setMemberRole(group.id, member.peerId, select.value));
+        });
+        chip.append(select);
+      } else if (coding && member.role) {
+        const badge = document.createElement("span");
+        badge.className = "role-badge";
+        badge.textContent = codingRoleLabel(member.role);
+        chip.append(badge);
+      }
       if (!mine) {
         const nick = document.createElement("button");
         nick.type = "button";
@@ -1185,16 +1235,54 @@ function boot(host: HTMLElement): void {
   }
 
   function paintBrief(sessionId: string, brief: ProjectBrief | undefined, lines: ChatLine[], connected: boolean, turnName = ""): void {
-    const current: ProjectBrief = brief ?? { topic: "", goal: "", turnLimit: 6, turnsUsed: 0, running: false, files: [] };
+    const current: ProjectBrief = brief ?? {
+      topic: "",
+      goal: "",
+      turnLimit: 6,
+      turnsUsed: 0,
+      running: false,
+      coding: false,
+      needTurns: 0,
+      codingSince: 0,
+      files: [],
+    };
     const topic = must<HTMLInputElement>("#brief-topic");
     const goal = must<HTMLTextAreaElement>("#brief-goal");
     const turns = must<HTMLInputElement>("#brief-turns");
+    const grouped = Boolean(active && parseGroupKey(active));
+    const codingOn = grouped && current.coding;
+    const cap = codingOn ? CODING_TURN_MAX : BRIEF_TURN_MAX;
     setIfIdle(topic, current.topic);
     setIfIdle(goal, current.goal);
     setIfIdle(turns, String(current.turnLimit));
+    turns.max = String(cap);
     topic.disabled = current.running;
     goal.disabled = current.running;
     turns.disabled = current.running;
+    const codingRow = must<HTMLElement>("#brief-coding-row");
+    codingRow.hidden = !grouped;
+    const codingBox = must<HTMLInputElement>("#brief-coding");
+    if (document.activeElement !== codingBox) codingBox.checked = codingOn;
+    codingBox.disabled = current.running || !grouped;
+    const replies = turns.closest("label");
+    if (replies instanceof HTMLElement) {
+      replies.dataset.tip = codingOn
+        ? `Số lượt coding, mặc định ${CODING_TURN_DEFAULT}, tối đa ${CODING_TURN_MAX}. Có kết quả thì dừng sớm.`
+        : `Số lượt agent được trả lời nhau, tối đa ${BRIEF_TURN_MAX}`;
+    }
+    const extra = must<HTMLInputElement>("#brief-extra");
+    extra.max = String(cap);
+    const stamp = String(current.needTurns || "");
+    if (document.activeElement !== extra && extra.dataset.need !== stamp) {
+      extra.dataset.need = stamp;
+      if (current.needTurns > 0) extra.value = String(current.needTurns);
+    }
+    const extendBox = extra.parentElement;
+    if (extendBox) {
+      extendBox.dataset.tip = current.needTurns > 0
+        ? `Agent lượt cuối ước tính cần thêm ${current.needTurns} lượt`
+        : "Số lượt cộng thêm khi gia hạn";
+    }
     must<HTMLButtonElement>("#brief-add").disabled = current.running || current.files.length >= BRIEF_FILE_MAX;
     must<HTMLButtonElement>("#brief-start").disabled = !connected || current.running;
     must<HTMLButtonElement>("#brief-extend").disabled = !connected || (!current.running && current.turnsUsed === 0);
@@ -1343,10 +1431,12 @@ function boot(host: HTMLElement): void {
   }
 
   function briefMeter(brief: ProjectBrief): string {
-    if (brief.running) return `Đang nói ${brief.turnsUsed}/${brief.turnLimit}`;
-    if (brief.turnsUsed > 0 && brief.turnsUsed >= brief.turnLimit) return `Hết ${brief.turnsUsed}/${brief.turnLimit} lượt`;
-    if (brief.turnsUsed > 0) return `Đã nói ${brief.turnsUsed}/${brief.turnLimit}`;
-    return `${brief.turnLimit} lượt`;
+    const prefix = brief.coding ? "Coding " : "";
+    if (brief.running) return `${prefix}đang nói ${brief.turnsUsed}/${brief.turnLimit}`;
+    if (brief.needTurns > 0) return `${prefix}hết lượt. Cần thêm ${brief.needTurns}`;
+    if (brief.turnsUsed > 0 && brief.turnsUsed >= brief.turnLimit) return `${prefix}hết ${brief.turnsUsed}/${brief.turnLimit} lượt`;
+    if (brief.turnsUsed > 0) return `${prefix}đã nói ${brief.turnsUsed}/${brief.turnLimit}`;
+    return `${prefix}${brief.turnLimit} lượt`;
   }
 
   function latestResult(lines: ChatLine[]): string {
@@ -1369,11 +1459,15 @@ function boot(host: HTMLElement): void {
   }
 
   async function flushBrief(peerId: string): Promise<void> {
+    const grouped = Boolean(parseGroupKey(peerId));
+    const coding = grouped && must<HTMLInputElement>("#brief-coding").checked;
+    const cap = coding ? CODING_TURN_MAX : BRIEF_TURN_MAX;
     const turns = Number(must<HTMLInputElement>("#brief-turns").value);
     await window.lan.saveBrief(peerId, {
       topic: must<HTMLInputElement>("#brief-topic").value,
       goal: must<HTMLTextAreaElement>("#brief-goal").value,
-      turnLimit: Number.isFinite(turns) ? Math.max(1, Math.min(BRIEF_TURN_MAX, Math.round(turns))) : 6,
+      turnLimit: Number.isFinite(turns) ? Math.max(1, Math.min(cap, Math.round(turns))) : coding ? CODING_TURN_DEFAULT : 6,
+      coding,
     });
   }
 

@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { accessPrompt, AccessDenied, defaultAccess, deniedRoles, toolBlob } from "../shared/access";
+import { codingRoleDuty, type CodingRole } from "../shared/group";
 import type { ProviderId, Settings } from "../shared/types";
 import { findExecutable } from "./cliDetect";
 import { insideDir } from "./files";
@@ -20,6 +21,9 @@ export type ReplyInput = {
   fileRelay?: { url: string };
   readings?: { name: string; path: string; kind: string; excerpt?: string }[];
   brief?: { topic: string; goal: string; turn: number; limit: number; last: boolean };
+  coding?: boolean;
+  codingRole?: CodingRole;
+  resultFile?: string;
   workDir?: string;
   confine?: boolean;
   skillDir?: string;
@@ -345,12 +349,16 @@ function conversationPrompt(input: ReplyInput): string {
     "- Nếu tin có @Tên, đó là máy được gọi. @me là agent của máy đã gửi tin đó. Hãy nói với đúng người đó.",
     "- Trong trò chuyện 1-1, agent của máy gửi @me nói trước. Khi đến lượt bạn sau lời đó, hãy trả lời tiếp nội dung vừa nói.",
     "- Chỉ viết nội dung sẽ gửi cho đối phương. Không mở đầu bằng việc nhắc lại các quy tắc này.",
-    "- Dùng cùng ngôn ngữ với tin nhắn cuối. Giữ câu trả lời gọn, thường dưới 120 từ, trừ khi đang tóm tắt file hoặc đang viết khối KẾT QUẢ.",
+    input.coding
+      ? "- Viết mô tả ảnh hưởng bằng Markdown, đủ ý. Không giới hạn số từ. Chỉ làm đúng vai đã giao."
+      : "- Dùng cùng ngôn ngữ với tin nhắn cuối. Giữ câu trả lời gọn, thường dưới 120 từ, trừ khi đang tóm tắt file hoặc đang viết khối KẾT QUẢ.",
     "- Bám các lượt trước. Không bịa việc máy kia đã làm.",
     input.confine
       ? `- Nếu ${input.peerName} nhờ một việc trên máy này, chỉ làm trong thư mục làm việc đã đăng ký rồi nói kết quả. Lệnh và sửa file trong thư mục đó được tự chạy, không hỏi lại.`
       : `- Nếu ${input.peerName} nhờ một việc trên máy này, hãy làm rồi nói kết quả. Lệnh và sửa file được tự chạy, không hỏi lại.`,
-    "- Nếu đối phương chỉ trò chuyện, chỉ trả lời bằng lời. Không chạy lệnh và không sửa file. Riêng khi họ nhờ gửi file thì dùng đúng lệnh gửi file bên dưới.",
+    input.coding
+      ? "- Chỉ sửa file và chạy lệnh khi việc đó thuộc đúng vai của mình. Không làm việc của vai khác. Không gửi file cho nhóm khi việc chưa xong."
+      : "- Nếu đối phương chỉ trò chuyện, chỉ trả lời bằng lời. Không chạy lệnh và không sửa file. Riêng khi họ nhờ gửi file thì dùng đúng lệnh gửi file bên dưới.",
     "- Nếu có file trong hồ sơ hoặc file đính kèm, hãy đọc đúng file tại đường dẫn trên máy này. txt, md và csv có thể đã có đoạn trích; ảnh, pdf, docx và excel phải mở file khi đoạn trích trống hoặc chưa đủ. Không bịa phần chưa đọc được.",
     relayLine(input),
     "",
@@ -371,10 +379,13 @@ function continuePrompt(input: ReplyInput): string {
   return [
     scopeBlock(input, false),
     accessPrompt(input.access),
+    input.coding ? codingPace(input) : "",
     formatHistory(input),
     pace,
     briefTail(input),
-    `Hãy trả lời ${input.peerName}. Chỉ viết nội dung sẽ gửi, cùng ngôn ngữ với tin trên.`,
+    input.coding
+      ? `Hãy trả lời ${input.peerName}. Viết mô tả ảnh hưởng bằng Markdown, không giới hạn số từ. Chỉ làm đúng vai của mình.`
+      : `Hãy trả lời ${input.peerName}. Chỉ viết nội dung sẽ gửi, cùng ngôn ngữ với tin trên.`,
   ]
     .filter((part) => part !== "")
     .join("\n");
@@ -502,10 +513,12 @@ function sessionIdOf(event: unknown): string {
 function briefLead(input: ReplyInput): string {
   const brief = input.brief;
   if (!brief?.topic) return "";
-  const goal = brief.goal || "Chốt một kết luận ngắn mà cả hai cùng chấp nhận.";
-  const pace = brief.last
-    ? "Đây là lượt cuối. Chỉ viết khối bắt đầu bằng dòng KẾT QUẢ, đúng cấu trúc kết quả mong muốn. Không mở ý mới."
-    : "Bàn trong phạm vi chủ đề và file context. Tiến về kết quả mong muốn. Nói rõ chỗ còn lệch.";
+  const goal = brief.goal || (input.coding ? "Hoàn thành việc đúng vai và chốt một tài liệu chung." : "Chốt một kết luận ngắn mà cả hai cùng chấp nhận.");
+  const pace = input.coding
+    ? codingPace(input)
+    : brief.last
+      ? "Đây là lượt cuối. Chỉ viết khối bắt đầu bằng dòng KẾT QUẢ, đúng cấu trúc kết quả mong muốn. Không mở ý mới."
+      : "Bàn trong phạm vi chủ đề và file context. Tiến về kết quả mong muốn. Nói rõ chỗ còn lệch.";
   return [
     `Hồ sơ dự án, dùng chung cho ${input.together ?? "cả hai"} agent:`,
     `Chủ đề: ${brief.topic}`,
@@ -517,8 +530,26 @@ function briefLead(input: ReplyInput): string {
 }
 
 function briefTail(input: ReplyInput): string {
+  if (input.coding) {
+    if (!input.brief?.last) return "";
+    return "Lượt cuối: nếu xong thì bắt đầu bằng dòng KẾT QUẢ và ghi file chung; nếu chưa xong thì bắt đầu bằng dòng CẦN THÊM: N.";
+  }
   if (!input.brief?.last) return "";
   return "Lượt cuối: bắt đầu câu trả lời bằng dòng KẾT QUẢ.";
+}
+
+function codingPace(input: ReplyInput): string {
+  const file = input.resultFile?.trim();
+  const last = Boolean(input.brief?.last);
+  return [
+    codingRoleDuty(input.codingRole),
+    file
+      ? `Khi toàn bộ việc đã xong, ghi một file Markdown chung tại ${file}. Trước đó không tạo file chung và không gửi file cho nhóm. File code đúng vai của mình vẫn được ghi trong thư mục làm việc.`
+      : "Trước khi toàn bộ việc xong, không tạo file chung và không gửi file cho nhóm.",
+    last
+      ? "Đây là lượt cuối của hạn mức. Nếu việc đã xong, bắt đầu bằng dòng KẾT QUẢ rồi ghi file chung. Nếu chưa xong, không viết KẾT QUẢ và không tạo file chung. Bắt đầu bằng đúng dòng CẦN THÊM: N, N là số nguyên lượt còn cần để hoàn thành, rồi nêu phần còn thiếu."
+      : "Nếu toàn bộ việc đã xong ở lượt này, bắt đầu bằng dòng KẾT QUẢ và ghi file chung. Nếu chưa xong, mô tả ảnh hưởng bằng Markdown, đủ ý, không giới hạn số từ. Không viết KẾT QUẢ và không tạo file chung.",
+  ].join("\n");
 }
 
 function launch(command: string, args: string[], cwd: string): ChildProcess {

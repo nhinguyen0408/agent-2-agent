@@ -10,13 +10,21 @@ import {
   BRIEF_GOAL_CAP,
   BRIEF_TOPIC_CAP,
   BRIEF_TURN_MAX,
+  CODING_RESULT_FILE,
+  CODING_TURN_DEFAULT,
+  CODING_TURN_MAX,
   clampTurnLimit,
+  codingNeed,
   emptyBrief,
+  resultText,
   sanitizeBrief,
   type ProjectBrief,
 } from "../shared/brief";
 import {
   GROUP_MAX,
+  codingRole,
+  codingRoleLabel,
+  codingSpeakOrder,
   groupKey,
   injectSpeakers,
   mentionTargets,
@@ -102,6 +110,7 @@ export class AppCore {
   private readonly epochs = new Map<string, number>();
   private readonly tails = new Map<string, Promise<void>>();
   private readonly aborts = new Map<string, AbortController>();
+  private readonly codingFileStamp = new Map<string, number>();
   private readonly seen = new Set<string>();
   private readonly seenOrder: string[] = [];
   private readonly greeted = new Set<string>();
@@ -514,17 +523,37 @@ export class AppCore {
     await this.startBrief(peerId);
   }
 
-  saveBrief(peerId: string, patch: { topic?: string; goal?: string; turnLimit?: number }): AppState {
+  saveBrief(peerId: string, patch: { topic?: string; goal?: string; turnLimit?: number; coding?: boolean }): AppState {
     const sessionId = this.ensureSession(peerId);
     const brief = this.ensureBrief(sessionId);
     if (!brief.running) {
       brief.topic = String(patch.topic ?? brief.topic).trim().slice(0, BRIEF_TOPIC_CAP);
       brief.goal = String(patch.goal ?? brief.goal).trim().slice(0, BRIEF_GOAL_CAP);
-      brief.turnLimit = clampTurnLimit(Number(patch.turnLimit ?? brief.turnLimit), BRIEF_TURN_MAX);
+      if (parseGroupKey(peerId)) {
+        if (typeof patch.coding === "boolean") brief.coding = patch.coding;
+      } else {
+        brief.coding = false;
+      }
+      if (!brief.coding) brief.needTurns = 0;
+      brief.turnLimit = clampTurnLimit(Number(patch.turnLimit ?? brief.turnLimit), brief.coding ? CODING_TURN_MAX : BRIEF_TURN_MAX);
       this.syncBrief(peerId, sessionId);
       this.scheduleSave();
       this.pushNow();
     }
+    return this.snapshot();
+  }
+
+  setMemberRole(groupId: string, peerId: string, role: string): AppState {
+    const room = this.groupById(groupId);
+    if (!room || room.hostId !== this.store.peerId) return this.snapshot();
+    const member = room.members.find((item) => item.peerId === peerId);
+    if (!member) return this.snapshot();
+    const clean = codingRole(role);
+    if (clean) member.role = clean;
+    else delete member.role;
+    this.relay(room, "group", this.wireGroup(room));
+    this.scheduleSave();
+    this.pushNow();
     return this.snapshot();
   }
 
@@ -1267,6 +1296,18 @@ export class AppCore {
       try {
         const provider = this.store.settings.provider;
         const skillDir = configuredSkillDir(this.store.settings);
+        const coding = Boolean(room && this.store.briefs[bound]?.coding);
+        const selfMember = room?.members.find((member) => member.peerId === this.store.peerId);
+        if (coding) {
+          const resultPath = path.join(briefFolder(this.store.settings.workDir, bound), CODING_RESULT_FILE);
+          let stamp = 0;
+          try {
+            stamp = fs.statSync(resultPath).mtimeMs;
+          } catch {
+            stamp = 0;
+          }
+          this.codingFileStamp.set(bound, stamp);
+        }
         const ask = (resume: boolean) => {
           const link = resume ? this.cliLink(bound, provider) : undefined;
           return this.agents.reply({
@@ -1283,13 +1324,24 @@ export class AppCore {
             fileRelay: room ? undefined : { url: `http://127.0.0.1:${this.port}/relay-file/${peerId}` },
             readings: this.readings(bound),
             brief: this.promptBrief(bound),
+            coding,
+            codingRole: selfMember?.role,
+            resultFile: coding ? path.join(briefFolder(this.store.settings.workDir, bound), CODING_RESULT_FILE) : undefined,
             workDir: this.store.settings.workDir,
             confine: this.store.settings.confineWorkDir,
             skillDir,
             skills: skillIndex(skillDir),
             access: this.store.settings.access,
             room: room
-              ? { title: room.title, members: room.members.map((member) => this.memberRecord(member).name).join(", ") }
+              ? {
+                  title: room.title,
+                  members: room.members
+                    .map((member) => {
+                      const record = this.memberRecord(member);
+                      return record.role ? `${record.name} (${codingRoleLabel(record.role)})` : record.name;
+                    })
+                    .join(", "),
+                }
               : undefined,
             together: room ? "cả nhóm" : undefined,
             resume: Boolean(link),
@@ -2467,10 +2519,16 @@ export class AppCore {
       this.groupNote(room, "Đang có lượt. Bấm Dừng trước khi bắt đầu vòng mới.", false);
       return this.snapshot();
     }
+    if (brief.coding && !room.members.some((member) => codingRole(member.role))) {
+      this.groupNote(room, "Hãy phân vai cho ít nhất một agent trước khi bắt đầu chế độ coding.", false);
+      return this.snapshot();
+    }
     this.haltGroupLocal(room, false);
     brief.running = true;
     brief.turnsUsed = 0;
-    brief.turnLimit = clampTurnLimit(brief.turnLimit, BRIEF_TURN_MAX);
+    brief.needTurns = 0;
+    if (brief.coding) brief.codingSince = Date.now();
+    brief.turnLimit = clampTurnLimit(brief.turnLimit, brief.coding ? CODING_TURN_MAX : BRIEF_TURN_MAX);
     this.pushNow();
     try {
       if (room.hostId === this.store.peerId) await this.pushBriefFilesGroup(room, sessionId);
@@ -2500,13 +2558,14 @@ export class AppCore {
   private extendGroup(key: string, extra?: number): AppState {
     const room = this.roomFromKey(key);
     if (!room) return this.snapshot();
+    const brief = this.ensureBrief(this.roomSession(room));
+    const cap = brief.coding ? CODING_TURN_MAX : BRIEF_TURN_MAX;
     const requested = Math.round(Number(extra));
-    const add = Number.isFinite(requested) && requested > 0 ? Math.min(BRIEF_TURN_MAX, requested) : BRIEF_EXTEND;
+    const add = Number.isFinite(requested) && requested > 0 ? Math.min(cap, requested) : BRIEF_EXTEND;
     if (!this.groupReachable(room)) {
       this.groupNote(room, "Cần nối với máy chủ nhóm trước khi gia hạn lượt.", false);
       return this.snapshot();
     }
-    const brief = this.ensureBrief(this.roomSession(room));
     if (!brief.topic.trim()) {
       this.groupNote(room, "Hãy nhập chủ đề trước khi gia hạn.", false);
       return this.snapshot();
@@ -2521,10 +2580,13 @@ export class AppCore {
   private applyGroupExtend(room: GroupRoom, add: number): AppState {
     const sessionId = this.roomSession(room);
     const brief = this.ensureBrief(sessionId);
+    const cap = brief.coding ? CODING_TURN_MAX : BRIEF_TURN_MAX;
     const nextLimit = brief.turnsUsed >= brief.turnLimit ? brief.turnsUsed + add : brief.turnLimit + add;
-    brief.turnLimit = clampTurnLimit(nextLimit, BRIEF_TURN_MAX);
+    brief.turnLimit = clampTurnLimit(nextLimit, cap);
+    brief.needTurns = 0;
     if (room.turn && room.turn.left > 0 && room.turn.mode === "topic") {
-      const more = speakOrder(room.members, [], add, room.turn.speakerId, "topic");
+      const last = room.turn.order[room.turn.order.length - 1] || room.turn.speakerId;
+      const more = brief.coding ? codingSpeakOrder(room.members, add, last) : speakOrder(room.members, [], add, last, "topic");
       room.turn = { ...room.turn, order: [...room.turn.order, ...more], left: room.turn.left + more.length };
       this.syncBrief(groupKey(room.id), sessionId);
       this.relay(room, "group-turn", { groupId: room.id, sessionId, turn: room.turn, go: false } satisfies WireGroupTurn);
@@ -2534,7 +2596,9 @@ export class AppCore {
     }
     brief.running = true;
     const mentions = mentionTargets(brief.topic, this.aliasList(room.members.map((member) => this.memberRecord(member))));
-    const ticket = this.skipOffline(room, ticketFrom(speakOrder(room.members, mentions, add, this.store.peerId, "topic"), "topic"));
+    const after = brief.coding ? this.lastAgentId(sessionId) : this.store.peerId;
+    const order = brief.coding ? codingSpeakOrder(room.members, add, after) : speakOrder(room.members, mentions, add, this.store.peerId, "topic");
+    const ticket = this.skipOffline(room, ticketFrom(order, "topic"));
     room.turn = ticket;
     this.syncBrief(groupKey(room.id), sessionId);
     this.relay(room, "group-turn", { groupId: room.id, sessionId, turn: ticket, go: Boolean(ticket) } satisfies WireGroupTurn);
@@ -2649,13 +2713,19 @@ export class AppCore {
       const id = peerId();
       if (id) this.onGroupClear(id, body);
     });
+    socket.on("group-result", (body: { groupId?: string; sessionId?: string; text?: string }) => {
+      const id = peerId();
+      if (id) void this.onGroupResult(id, body);
+    });
     socket.on("group-extend", (body: { groupId?: string; extra?: number }) => {
       const id = peerId();
       if (!id || !body?.groupId) return;
       const room = this.groupById(body.groupId);
       if (!room || room.hostId !== this.store.peerId || !room.members.some((member) => member.peerId === id)) return;
+      const brief = this.ensureBrief(room.sessionId);
+      const cap = brief.coding ? CODING_TURN_MAX : BRIEF_TURN_MAX;
       const requested = Math.round(Number(body.extra));
-      const add = Number.isFinite(requested) && requested > 0 ? Math.min(BRIEF_TURN_MAX, requested) : BRIEF_EXTEND;
+      const add = Number.isFinite(requested) && requested > 0 ? Math.min(cap, requested) : BRIEF_EXTEND;
       this.applyGroupExtend(room, add);
     });
     socket.on("group-activity", (body: ActivityPatch) => {
@@ -2898,15 +2968,20 @@ export class AppCore {
         this.groupNote(room, "Đang có lượt. Đợi các agent nói xong, hoặc bấm Dừng.", true);
         return;
       }
-      const turns = msg.dialogue?.repliesLeft || this.store.briefs[room.sessionId]?.turnLimit || 6;
-      const ticket = this.skipOffline(room, ticketFrom(speakOrder(room.members, mentions, turns, msg.fromPeerId, "topic"), "topic"));
+      const stored = this.store.briefs[room.sessionId];
+      const coding = Boolean(msg.brief?.coding ?? stored?.coding);
+      const turns = msg.dialogue?.repliesLeft || stored?.turnLimit || (coding ? CODING_TURN_DEFAULT : 6);
+      const order = coding
+        ? codingSpeakOrder(room.members, turns)
+        : speakOrder(room.members, mentions, turns, msg.fromPeerId, "topic");
+      const ticket = this.skipOffline(room, ticketFrom(order, "topic"));
       room.turn = ticket;
       msg.turn = ticket;
       msg.cue = Boolean(ticket);
       if (!ticket) {
         const brief = this.store.briefs[room.sessionId];
         if (brief) brief.running = false;
-        this.groupNote(room, "Không có agent nào đang nối để xếp lượt.", true);
+        this.groupNote(room, coding ? "Không có agent đã phân vai đang nối." : "Không có agent nào đang nối để xếp lượt.", true);
       }
       return;
     }
@@ -2919,12 +2994,18 @@ export class AppCore {
       return;
     }
     if (busy && mentions.length && room.turn) {
+      const brief = this.ensureBrief(room.sessionId);
+      if (brief.coding && room.turn.mode === "topic") {
+        msg.turn = room.turn;
+        msg.cue = false;
+        msg.queue = undefined;
+        return;
+      }
       room.turn = injectSpeakers(room.turn, mentions.map((item) => item.peerId));
       msg.turn = room.turn;
       msg.cue = false;
       msg.queue = undefined;
       if (room.turn.mode === "topic") {
-        const brief = this.ensureBrief(room.sessionId);
         brief.turnLimit = clampTurnLimit(Math.max(brief.turnLimit, brief.turnsUsed + room.turn.left), BRIEF_TURN_MAX);
         this.syncBrief(groupKey(room.id), room.sessionId);
       }
@@ -2955,13 +3036,19 @@ export class AppCore {
     let upcoming: TurnTicket | null = speaking && live ? nextTicket(live) : live;
     if (speaking && live?.mode === "topic") {
       const brief = this.ensureBrief(sessionId);
-      brief.turnLimit = clampTurnLimit(Math.max(brief.turnLimit, brief.turnsUsed + 1 + (upcoming ? upcoming.left : 0)), BRIEF_TURN_MAX);
+      const text = wire.text || "";
+      const done = Boolean(brief.coding && resultText(text));
+      if (done) upcoming = null;
+      if (brief.coding) brief.needTurns = done || upcoming ? 0 : codingNeed(text);
+      const cap = brief.coding ? CODING_TURN_MAX : BRIEF_TURN_MAX;
+      brief.turnLimit = clampTurnLimit(Math.max(brief.turnLimit, brief.turnsUsed + 1 + (upcoming ? upcoming.left : 0)), cap);
       this.finishBriefTurn(sessionId, wire);
       if (!upcoming) {
         brief.running = false;
         wire.dialogue = undefined;
         wire.brief = sanitizeBrief(brief);
       }
+      if (done) void this.publishCodingResult(room, sessionId, text);
     }
     if (!speaking) upcoming = room.turn;
     if (speaking && room.hostId === this.store.peerId) upcoming = this.skipOffline(room, upcoming);
@@ -3096,7 +3183,7 @@ export class AppCore {
       this.groupNote(room, `${this.memberName(room, current.speakerId)} không nối, chuyển lượt.`, true);
       current = nextTicket(current);
       hops += 1;
-      if (hops > 55) return null;
+      if (hops > CODING_TURN_MAX) return null;
     }
     return current;
   }
@@ -3238,9 +3325,97 @@ export class AppCore {
   }
 
   private memberRecord(member: GroupMember): GroupMember {
-    if (member.peerId === this.store.peerId) return { peerId: member.peerId, name: this.store.settings.name };
-    const name = this.endpoints.get(member.peerId)?.name || this.store.trusted[member.peerId]?.name || member.name;
-    return { peerId: member.peerId, name: name || "Máy" };
+    const role = codingRole(member.role);
+    const name = member.peerId === this.store.peerId
+      ? this.store.settings.name
+      : this.endpoints.get(member.peerId)?.name || this.store.trusted[member.peerId]?.name || member.name || "Máy";
+    return role ? { peerId: member.peerId, name, role } : { peerId: member.peerId, name };
+  }
+
+  private lastAgentId(sessionId: string): string {
+    const lines = this.store.transcripts[sessionId] ?? [];
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const line = lines[index];
+      if (line?.kind === "agent" && line.fromPeerId) return line.fromPeerId;
+    }
+    return "";
+  }
+
+  private async publishCodingResult(room: GroupRoom, sessionId: string, text: string): Promise<void> {
+    const body = resultText(text);
+    if (!body) return;
+    try {
+      const brief = this.ensureBrief(sessionId);
+      const folder = briefFolder(this.store.settings.workDir, sessionId);
+      const full = path.join(folder, CODING_RESULT_FILE);
+      let data: Buffer | null = null;
+      if (fs.existsSync(full)) {
+        const stat = fs.statSync(full);
+        const since = this.codingFileStamp.get(sessionId) ?? brief.codingSince ?? 0;
+        if (stat.size > 0 && stat.mtimeMs > since) data = await readFileLimited(full, MAX_FILE_BYTES);
+      }
+      this.codingFileStamp.delete(sessionId);
+      if (!data) {
+        data = Buffer.from(body, "utf8");
+        await saveExact(folder, CODING_RESULT_FILE, data);
+      }
+      if (fileRef(full)) allowPreview(full);
+      const entry = { name: CODING_RESULT_FILE, kind: "markdown" as const, excerpt: discussExcerpt(CODING_RESULT_FILE, data) };
+      brief.files = brief.files.filter((file) => file.name !== CODING_RESULT_FILE);
+      if (brief.files.length >= BRIEF_FILE_MAX) brief.files.pop();
+      brief.files.push(entry);
+      let sent = 0;
+      for (const target of this.fileTargets(room)) {
+        if (!this.isLinked(target)) continue;
+        await this.postBriefFile(target, sessionId, CODING_RESULT_FILE, data);
+        sent += 1;
+      }
+      if (room.hostId !== this.store.peerId) {
+        this.sendTo(room.hostId, "group-result", {
+          groupId: room.id,
+          sessionId,
+          text: body.slice(0, 200_000),
+        });
+      }
+      const others = room.members.some((member) => member.peerId !== this.store.peerId);
+      this.groupNote(
+        room,
+        !others || sent > 0
+          ? `Đã chuyển file ${CODING_RESULT_FILE} cho nhóm.`
+          : `Chưa chuyển được ${CODING_RESULT_FILE} vì chưa nối máy nào trong nhóm.`,
+        true,
+      );
+      this.syncBrief(groupKey(room.id), sessionId);
+      this.scheduleSave();
+      this.pushNow();
+    } catch (err) {
+      this.groupNote(room, err instanceof Error ? err.message : "Không chuyển được file kết quả.", true);
+    }
+  }
+
+  private async onGroupResult(socketPeer: string, body: { groupId?: string; sessionId?: string; text?: string }): Promise<void> {
+    const room = this.groupById(String(body?.groupId || ""));
+    if (!room || room.hostId !== this.store.peerId || socketPeer === room.hostId) return;
+    if (!room.members.some((member) => member.peerId === socketPeer)) return;
+    const sessionId = String(body?.sessionId || room.sessionId || "");
+    if (!/^[a-zA-Z0-9_-]{1,80}$/.test(sessionId)) return;
+    const folder = briefFolder(this.store.settings.workDir, sessionId);
+    const full = path.join(folder, CODING_RESULT_FILE);
+    if (!fs.existsSync(full)) {
+      const text = String(body?.text || "").trim();
+      if (!text) return;
+      await saveExact(folder, CODING_RESULT_FILE, Buffer.from(text, "utf8"));
+    }
+    if (!fs.existsSync(full)) return;
+    const data = await readFileLimited(full, MAX_FILE_BYTES);
+    for (const member of room.members) {
+      if (member.peerId === this.store.peerId || member.peerId === socketPeer || !this.isLinked(member.peerId)) continue;
+      try {
+        await this.postBriefFile(member.peerId, sessionId, CODING_RESULT_FILE, data);
+      } catch (err) {
+        this.groupNote(room, err instanceof Error ? err.message : "Không chuyển được file kết quả.", false);
+      }
+    }
   }
 
   private memberName(room: GroupRoom, peerId: string): string {

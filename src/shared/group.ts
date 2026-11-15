@@ -1,11 +1,86 @@
+import { CODING_TURN_MAX } from "./brief";
+
 export const GROUP_MAX = 5;
+
+export const CODING_ROLES = ["po", "pm", "ba", "ux", "sa", "be", "fe", "fullstack", "mobile", "data", "devops", "security", "tester"] as const;
+
+export type CodingRole = (typeof CODING_ROLES)[number];
+
+const CODING_ROLE_TEXT: Record<CodingRole, { label: string; duty: string }> = {
+  po: {
+    label: "PO",
+    duty: "Vai của bạn: PO. Chỉ quyết định ưu tiên, phạm vi sản phẩm và việc nhận hay không nhận. Không viết đặc tả chi tiết, không thiết kế màn hình, không viết code, không viết test case.",
+  },
+  pm: {
+    label: "PM",
+    duty: "Vai của bạn: PM. Chỉ lập kế hoạch, tiến độ, rủi ro và phụ thuộc giữa các vai. Không viết đặc tả, không thiết kế, không viết code, không viết test case.",
+  },
+  ba: {
+    label: "BA",
+    duty: "Vai của bạn: BA. Chỉ viết và làm rõ yêu cầu nghiệp vụ, phạm vi và tiêu chí chấp nhận. Không thiết kế giao diện, không viết code, không viết test case.",
+  },
+  ux: {
+    label: "UX",
+    duty: "Vai của bạn: UX. Chỉ mô tả luồng, bố cục và nội dung màn hình. Không viết code giao diện, không viết API, không viết test case.",
+  },
+  sa: {
+    label: "SA",
+    duty: "Vai của bạn: SA. Chỉ chốt kiến trúc, ranh giới hệ thống và hợp đồng giữa các phần. Không viết code tính năng, không viết test case.",
+  },
+  be: {
+    label: "BE",
+    duty: "Vai của bạn: BE. Chỉ viết code backend và mô tả API cùng ảnh hưởng bằng Markdown. Không viết giao diện, không viết app mobile, không viết tài liệu nghiệp vụ, không viết test case.",
+  },
+  fe: {
+    label: "FE",
+    duty: "Vai của bạn: FE. Chỉ viết giao diện web và mô tả màn hình cùng ảnh hưởng bằng Markdown. Không viết API backend, không viết app mobile, không viết tài liệu nghiệp vụ, không viết test case.",
+  },
+  fullstack: {
+    label: "Full stack",
+    duty: "Vai của bạn: Full stack. Chỉ viết code backend, API và giao diện web, rồi mô tả ảnh hưởng của cả hai phần bằng Markdown. Không viết app mobile, không viết tài liệu nghiệp vụ, không làm hạ tầng, không viết test case.",
+  },
+  mobile: {
+    label: "Mobile",
+    duty: "Vai của bạn: Mobile. Chỉ viết ứng dụng mobile và mô tả màn hình cùng ảnh hưởng bằng Markdown. Không viết web, không viết API backend, không viết test case.",
+  },
+  data: {
+    label: "Data",
+    duty: "Vai của bạn: Data. Chỉ làm mô hình dữ liệu, pipeline và báo cáo. Không viết API sản phẩm, không viết giao diện, không viết test case.",
+  },
+  devops: {
+    label: "DevOps",
+    duty: "Vai của bạn: DevOps. Chỉ làm hạ tầng, CI/CD, triển khai và cấu hình môi trường. Không viết tính năng sản phẩm, không viết test case.",
+  },
+  security: {
+    label: "Security",
+    duty: "Vai của bạn: Security. Chỉ xem quyền, xác thực, mối đe dọa và lỗ hổng. Không sửa code tính năng, không viết test case chức năng.",
+  },
+  tester: {
+    label: "Tester",
+    duty: "Vai của bạn: Tester. Chỉ viết test case từ tài liệu và phần ảnh hưởng đã có. Không sửa code, không viết lại tài liệu nghiệp vụ.",
+  },
+};
 
 const GROUP_PREFIX = "group:";
 
 export type GroupMember = {
   peerId: string;
   name: string;
+  role?: CodingRole;
 };
+
+export function codingRole(value: unknown): CodingRole | undefined {
+  return typeof value === "string" && (CODING_ROLES as readonly string[]).includes(value) ? (value as CodingRole) : undefined;
+}
+
+export function codingRoleLabel(role: CodingRole): string {
+  return CODING_ROLE_TEXT[role].label;
+}
+
+export function codingRoleDuty(role: CodingRole | undefined): string {
+  if (!role) return "Bạn chưa được phân vai. Không làm việc của các vai khác trong nhóm.";
+  return CODING_ROLE_TEXT[role].duty;
+}
 
 export type MentionRef = {
   peerId: string;
@@ -144,6 +219,23 @@ export function speakOrder(
   return order;
 }
 
+export function codingSpeakOrder(members: GroupMember[], turns: number, afterId = ""): string[] {
+  const pool: string[] = [];
+  for (const role of CODING_ROLES) {
+    for (const member of members) {
+      if (member.role !== role || pool.includes(member.peerId)) continue;
+      pool.push(member.peerId);
+    }
+  }
+  if (!pool.length || turns <= 0) return [];
+  const found = afterId ? pool.indexOf(afterId) : -1;
+  const start = found < 0 ? 0 : (found + 1) % pool.length;
+  const count = Math.min(CODING_TURN_MAX, Math.max(0, Math.round(turns)));
+  const order: string[] = [];
+  for (let index = 0; index < count; index += 1) order.push(pool[(start + index) % pool.length]);
+  return order;
+}
+
 export function ticketFrom(order: string[], mode: TurnMode): TurnTicket | null {
   const speakerId = order[0];
   if (!speakerId) return null;
@@ -178,7 +270,7 @@ export function sanitizeTicket(input: unknown): TurnTicket | null {
   const mode: TurnMode | null = raw.mode === "ping" ? "ping" : raw.mode === "topic" ? "topic" : null;
   if (!mode) return null;
   const order = Array.isArray(raw.order)
-    ? raw.order.filter((id): id is string => typeof id === "string" && id.length > 0 && id.length <= 80).slice(0, 50)
+    ? raw.order.filter((id): id is string => typeof id === "string" && id.length > 0 && id.length <= 80).slice(0, CODING_TURN_MAX)
     : [];
   const index = Math.max(0, Math.round(Number(raw.index) || 0));
   const left = Math.max(0, Math.round(Number(raw.left) || 0));
@@ -196,7 +288,8 @@ export function sanitizeMembers(input: unknown): GroupMember[] {
     const peerId = typeof raw.peerId === "string" ? raw.peerId.slice(0, 80) : "";
     const name = typeof raw.name === "string" ? raw.name.replace(/\s+/g, " ").trim().slice(0, 40) : "";
     if (!peerId || !name || members.some((member) => member.peerId === peerId)) continue;
-    members.push({ peerId, name });
+    const role = codingRole(raw.role);
+    members.push(role ? { peerId, name, role } : { peerId, name });
     if (members.length >= GROUP_MAX) break;
   }
   return members;

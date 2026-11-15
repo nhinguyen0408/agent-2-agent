@@ -5,6 +5,9 @@ export type BriefKind = (typeof BRIEF_KINDS)[number];
 export const BRIEF_TURN_MIN = 1;
 export const BRIEF_TURN_MAX = 50;
 export const BRIEF_TURN_HARD = 50;
+export const CODING_TURN_DEFAULT = 50;
+export const CODING_TURN_MAX = 200;
+export const CODING_RESULT_FILE = "ket-qua.md";
 export const BRIEF_FILE_MAX = 8;
 export const BRIEF_TOPIC_CAP = 500;
 export const BRIEF_GOAL_CAP = 2000;
@@ -23,11 +26,18 @@ export type ProjectBrief = {
   turnLimit: number;
   turnsUsed: number;
   running: boolean;
+  coding: boolean;
+  needTurns: number;
+  codingSince: number;
   files: BriefFile[];
 };
 
 export function emptyBrief(): ProjectBrief {
-  return { topic: "", goal: "", turnLimit: 6, turnsUsed: 0, running: false, files: [] };
+  return { topic: "", goal: "", turnLimit: 6, turnsUsed: 0, running: false, coding: false, needTurns: 0, codingSince: 0, files: [] };
+}
+
+export function briefCap(coding: boolean): number {
+  return coding ? CODING_TURN_MAX : BRIEF_TURN_MAX;
 }
 
 export function clampTurnLimit(value: number, hard = BRIEF_TURN_MAX): number {
@@ -44,12 +54,18 @@ export function sanitizeBrief(input: Partial<ProjectBrief> | null | undefined): 
     files.push(file);
     if (files.length >= BRIEF_FILE_MAX) break;
   }
+  const coding = Boolean(input?.coding);
+  const cap = briefCap(coding);
+  const need = Math.round(Number(input?.needTurns) || 0);
   return {
     topic: String(input?.topic ?? "").trim().slice(0, BRIEF_TOPIC_CAP),
     goal: String(input?.goal ?? "").trim().slice(0, BRIEF_GOAL_CAP),
-    turnLimit: clampTurnLimit(Number(input?.turnLimit ?? 6), BRIEF_TURN_HARD),
-    turnsUsed: Math.max(0, Math.min(BRIEF_TURN_HARD, Math.round(Number(input?.turnsUsed) || 0))),
+    turnLimit: clampTurnLimit(Number(input?.turnLimit ?? (coding ? CODING_TURN_DEFAULT : 6)), cap),
+    turnsUsed: Math.max(0, Math.min(cap, Math.round(Number(input?.turnsUsed) || 0))),
     running: Boolean(input?.running),
+    coding,
+    needTurns: coding ? Math.max(0, Math.min(CODING_TURN_MAX, Number.isFinite(need) ? need : 0)) : 0,
+    codingSince: coding ? Math.max(0, Math.round(Number(input?.codingSince) || 0)) : 0,
     files,
   };
 }
@@ -59,6 +75,14 @@ export function resultText(text: string): string {
   if (!match || match.index === undefined) return "";
   const start = text.indexOf("KẾT QUẢ", match.index);
   return start < 0 ? "" : text.slice(start).trim();
+}
+
+export function codingNeed(text: string): number {
+  const match = /(?:^|\n)\s*CẦN THÊM:\s*(\d{1,3})/u.exec(text);
+  if (!match) return 0;
+  const count = Math.round(Number(match[1]));
+  if (!Number.isFinite(count) || count <= 0) return 0;
+  return Math.min(CODING_TURN_MAX, count);
 }
 
 function sanitizeBriefFile(input: unknown): BriefFile | null {

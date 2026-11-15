@@ -1179,20 +1179,79 @@ body.preview-app .preview-fill > audio { width: min(100%, 36rem); margin: auto; 
 .member-chip {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
-  min-height: 30px;
-  padding: 0 4px 0 10px;
+  flex: 0 0 auto;
+  gap: 8px;
+  min-height: 36px;
+  padding: 3px 6px 3px 12px;
   border-radius: 999px;
   background: #f2f2f4;
   color: var(--text);
   font-size: 12.5px;
+  white-space: nowrap;
 }
 
 .member-chip.on { background: rgba(52, 199, 89, 0.14); }
 
 .member-chip.me { background: rgba(0, 122, 255, 0.1); }
 
+.member-chip > span:first-child {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  line-height: 1.2;
+}
+
 .member-chip .icon-btn { width: 24px; height: 24px; color: var(--muted); }
+
+.member-chip .role-pick {
+  width: 9.2rem;
+  min-width: 9.2rem;
+  height: 28px;
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0 0.4rem 0 0.65rem;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 28px;
+}
+
+.role-badge {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  height: 22px;
+  margin: 0;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+}
+
+label.coding-toggle {
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: flex-start;
+  width: 100%;
+  gap: 8px;
+  margin: 0 0 8px;
+  text-align: left;
+}
+
+label.coding-toggle input {
+  width: auto;
+  flex: 0 0 auto;
+  margin: 2px 0 0;
+}
+
+label.coding-toggle span {
+  flex: 1 1 auto;
+  text-align: left;
+  line-height: 1.35;
+}
 
 .nick-edit {
   width: 8.5rem;

@@ -26,6 +26,7 @@ const api: LanApi = {
   inviteGroup: (groupId, peerId) => ipcRenderer.invoke(IPC.inviteGroup, groupId, peerId) as Promise<AppState>,
   leaveGroup: (groupId, peerId) => ipcRenderer.invoke(IPC.leaveGroup, groupId, peerId) as Promise<AppState>,
   renameGroup: (groupId, title) => ipcRenderer.invoke(IPC.renameGroup, groupId, title) as Promise<AppState>,
+  setMemberRole: (groupId, peerId, role) => ipcRenderer.invoke(IPC.setMemberRole, groupId, peerId, role) as Promise<AppState>,
   setNickname: (peerId, nickname) => ipcRenderer.invoke(IPC.setNickname, peerId, nickname) as Promise<AppState>,
   deleteSession: (peerId, sessionId) => ipcRenderer.invoke(IPC.deleteSession, peerId, sessionId) as Promise<AppState>,
   stop: (peerId: string) => ipcRenderer.invoke(IPC.stop, peerId) as Promise<void>,

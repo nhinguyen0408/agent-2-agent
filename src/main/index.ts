@@ -212,7 +212,7 @@ if (!gotLock) {
         const picked = host ? await dialog.showOpenDialog(host, options) : await dialog.showOpenDialog(options);
         return picked.canceled ? [] : picked.filePaths;
       });
-      ipcMain.handle(IPC.saveBrief, (_event, peerId: string, patch: { topic?: string; goal?: string; turnLimit?: number }) => {
+      ipcMain.handle(IPC.saveBrief, (_event, peerId: string, patch: { topic?: string; goal?: string; turnLimit?: number; coding?: boolean }) => {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.saveBrief(String(peerId), patch ?? {});
       });
@@ -255,6 +255,10 @@ if (!gotLock) {
       ipcMain.handle(IPC.leaveGroup, (_event, groupId: string, peerId?: string) => {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.leaveGroup(String(groupId), peerId ? String(peerId) : undefined);
+      });
+      ipcMain.handle(IPC.setMemberRole, (_event, groupId: string, peerId: string, role: string) => {
+        if (!core) throw new Error("App chưa sẵn sàng");
+        return core.setMemberRole(String(groupId), String(peerId), String(role ?? ""));
       });
       ipcMain.handle(IPC.renameGroup, (_event, groupId: string, title: string) => {
         if (!core) throw new Error("App chưa sẵn sàng");

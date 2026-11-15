@@ -51,6 +51,7 @@ export const IPC = {
   inviteGroup: "lan:invite-group",
   leaveGroup: "lan:leave-group",
   renameGroup: "lan:rename-group",
+  setMemberRole: "lan:set-member-role",
   setNickname: "lan:set-nickname",
   deleteSession: "lan:delete-session",
 } as const;
@@ -266,7 +267,7 @@ export type LanApi = {
   send: (peerId: string, text: string, attachmentPath?: string) => Promise<void>;
   pickDiscuss: () => Promise<string | null>;
   dialogue: (peerId: string, topic: string, replies: number) => Promise<void>;
-  saveBrief: (peerId: string, patch: { topic: string; goal: string; turnLimit: number }) => Promise<AppState>;
+  saveBrief: (peerId: string, patch: { topic: string; goal: string; turnLimit: number; coding?: boolean }) => Promise<AppState>;
   pickBriefFiles: () => Promise<string[]>;
   addBriefFiles: (peerId: string, paths: string[]) => Promise<AppState>;
   removeBriefFile: (peerId: string, name: string) => Promise<AppState>;
@@ -277,6 +278,7 @@ export type LanApi = {
   inviteGroup: (groupId: string, peerId: string) => Promise<AppState>;
   leaveGroup: (groupId: string, peerId?: string) => Promise<AppState>;
   renameGroup: (groupId: string, title: string) => Promise<AppState>;
+  setMemberRole: (groupId: string, peerId: string, role: string) => Promise<AppState>;
   setNickname: (peerId: string, nickname: string) => Promise<AppState>;
   deleteSession: (peerId: string, sessionId: string) => Promise<AppState>;
   stop: (peerId: string) => Promise<void>;
