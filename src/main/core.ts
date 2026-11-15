@@ -63,7 +63,7 @@ import type {
   WireGroupTurn,
   WireResume,
 } from "../shared/types";
-import { DEFAULT_PORT, PORT_SPAN, REPLY_WAIT_MS } from "../shared/types";
+import { DEFAULT_PORT, PORT_SPAN, REPLY_WAIT_MS, providerLabel } from "../shared/types";
 import { AccessDenied, deniedRoles, denialText, latestRequest } from "../shared/access";
 import { AgentHost, CliResumeUnsupported, CliSessionLost, type ModelTurn } from "./agents";
 import { detectLocalClis, installedCliList, parseCliList } from "./cliDetect";
@@ -115,6 +115,7 @@ export class AppCore {
   private readonly seenOrder: string[] = [];
   private readonly greeted = new Set<string>();
   private readonly manualClose = new Set<string>();
+  private readonly linkHost = new Map<string, string>();
   private readonly lastError = new Map<string, string>();
   private readonly deltaTimers = new Map<string, NodeJS.Timeout>();
   private logs: string[] = [];
@@ -373,7 +374,10 @@ export class AppCore {
       if (!res.ok) throw new Error(`Máy đó trả về HTTP ${res.status}.`);
       body = (await res.json()) as typeof body;
     } catch (err) {
-      throw new Error(err instanceof Error ? err.message : "Không gọi được /identity.");
+      this.recordError(`gọi ${cleanHost}:${port}`, err, "Không gọi được máy đó.");
+      const wrapped = new Error(err instanceof Error ? err.message : "Không gọi được /identity.");
+      wrapped.cause = err;
+      throw wrapped;
     }
     if (!body.peerId || body.peerId === this.store.peerId) throw new Error("Đó là chính máy này.");
     this.remoteClis.set(body.peerId, parseCliList(body.clis));
@@ -457,7 +461,7 @@ export class AppCore {
     try {
       if (attachmentPath?.trim()) attachment = await this.deliverDiscuss(peerId, attachmentPath);
     } catch (err) {
-      this.system(peerId, err instanceof Error ? err.message : "Không gửi được file đính kèm.");
+      this.system(peerId, this.recordError(`gửi file đính kèm cho ${this.who(peerId)}`, err, "Không gửi được file đính kèm."));
       return;
     }
     const spoken = clean || (attachment ? `Đọc file đính kèm ${attachment.name} và trao đổi nội dung.` : "");
@@ -510,7 +514,7 @@ export class AppCore {
       const name = this.endpoints.get(peerId)?.name || this.store.trusted[peerId]?.name || "Máy kia";
       this.appendLine(sessionId, this.makeLine(peerId, peerId, name, "agent", reply));
     } catch (err) {
-      this.system(peerId, err instanceof Error ? err.message : "Không gửi được.");
+      this.system(peerId, this.recordError(`gọi agent của ${this.who(peerId)} qua HTTP`, err, "Không gửi được."));
     }
   }
 
@@ -582,7 +586,7 @@ export class AppCore {
         if (index >= 0) brief.files[index] = next;
         else brief.files.push(next);
       } catch (err) {
-        this.system(peerId, err instanceof Error ? err.message : "Không thêm được file context.");
+        this.system(peerId, this.recordError(`thêm file context cho ${this.who(peerId)}`, err, "Không thêm được file context."));
       }
     }
     if (offline) this.system(peerId, "File context đang ở máy này. Khi bắt đầu và đã nối, file được gửi sang máy kia.");
@@ -625,7 +629,7 @@ export class AppCore {
       await this.pushBriefFiles(peerId, sessionId, brief);
     } catch (err) {
       brief.running = false;
-      this.system(peerId, err instanceof Error ? err.message : "Không gửi được file context.");
+      this.system(peerId, this.recordError(`gửi file context cho ${this.who(peerId)}`, err, "Không gửi được file context."));
       return this.snapshot();
     }
     this.nameSession(peerId, sessionId, brief.topic);
@@ -708,7 +712,7 @@ export class AppCore {
       this.bindIo(io);
       try {
         await listen(server, port);
-        server.on("error", (err) => this.log(`HTTP: ${err.message}`));
+        server.on("error", (err) => this.recordError(`máy chủ HTTP cổng ${port}`, err, "Lỗi máy chủ"));
         this.server = server;
         this.io = io;
         this.port = port;
@@ -718,10 +722,15 @@ export class AppCore {
         server.close();
         const code = (err as NodeJS.ErrnoException).code;
         last = err instanceof Error ? err.message : String(err);
-        if (code !== "EADDRINUSE") throw err;
+        if (code !== "EADDRINUSE") {
+          this.recordError(`mở cổng ${port}`, err, last);
+          throw err;
+        }
       }
     }
-    throw new Error(`Không mở được cổng từ ${start}: ${last}`);
+    const error = new Error(`Không mở được cổng từ ${start}: ${last}`);
+    this.recordError(`mở cổng từ ${start}`, error, error.message);
+    throw error;
   }
 
   private bindIo(io: Server): void {
@@ -768,7 +777,7 @@ export class AppCore {
       });
       socket.on("aside", (body: { text?: string }) => {
         if (!bound || !body?.text) return;
-        this.system(bound, body.text.slice(0, 500));
+        this.system(bound, body.text.slice(0, 500), undefined, false);
       });
       socket.on("activity", (body: ActivityPatch) => {
         if (!bound) return;
@@ -779,21 +788,27 @@ export class AppCore {
         this.onSocketDown(bound, socket);
       });
       this.bindRoom(socket, () => bound);
+      this.bindFileTransfer(socket, () => bound);
     });
   }
 
   private onHello(socket: Socket, hello: HelloPayload): { ack: HelloAck; bound: string | null } {
     const peerId = hello.peerId;
     const host = normalizeIp(socket.handshake.address);
-    this.upsertEndpoint(peerId, {
-      name: hello.name,
-      host,
-      port: hello.port,
-      provider: hello.provider,
-      viaLocalhost: host === "127.0.0.1",
-      discovered: true,
-      lastSeen: Date.now(),
-    });
+    this.upsertEndpoint(
+      peerId,
+      {
+        name: hello.name,
+        host,
+        port: hello.port,
+        provider: hello.provider,
+        viaLocalhost: host === "127.0.0.1",
+        discovered: true,
+        lastSeen: Date.now(),
+      },
+      true,
+    );
+    this.pinHost(peerId, host);
     const trusted = this.store.trusted[peerId];
     const tokenOk = Boolean(hello.token && trusted && trusted.token === hello.token);
     const weInitiated = hello.initiatedBy === this.store.peerId;
@@ -817,7 +832,8 @@ export class AppCore {
     existing?.disconnect();
     this.status.set(peerId, "connecting");
     this.pushNow();
-    const socket = ioClient(`http://${endpoint.host}:${endpoint.port}`, {
+    const targetHost = endpoint.host;
+    const socket = ioClient(`http://${targetHost}:${endpoint.port}`, {
       reconnection: true,
       timeout: 8000,
       transports: ["websocket", "polling"],
@@ -834,11 +850,12 @@ export class AppCore {
       };
       socket.timeout(8000).emit("hello", payload, (err: unknown, ack?: HelloAck) => {
         if (err || !ack) {
-          this.log(`${endpoint.name} chưa trả lời lời chào`);
+          this.recordError(`lời chào ${endpoint.name} tại ${targetHost}:${endpoint.port}`, err ?? new Error("Không có phản hồi sau 8 giây"), "Không có phản hồi sau 8 giây");
           this.push();
           return;
         }
         if (ack.ok) {
+          this.pinHost(peerId, targetHost);
           this.trust(peerId, ack.token, ack.name || endpoint.name);
           this.markConnected(peerId, ack.name || endpoint.name);
           return;
@@ -872,13 +889,14 @@ export class AppCore {
     socket.on("resume", (body: WireResume) => this.onResume(peerId, body));
     socket.on("after-me", (body: WireResume) => this.onAfterMe(peerId, body));
     socket.on("aside", (body: { text?: string }) => {
-      if (body?.text) this.system(peerId, body.text.slice(0, 500));
+      if (body?.text) this.system(peerId, body.text.slice(0, 500), undefined, false);
     });
     socket.on("activity", (body: ActivityPatch) => this.noteActivity(peerId, body));
     this.bindRoom(socket, () => peerId);
+    this.bindFileTransfer(socket, () => peerId);
     socket.on("disconnect", () => this.onSocketDown(peerId, socket));
     socket.on("connect_error", (err: Error) => {
-      this.log(`Lỗi nối ${endpoint.name}: ${err.message}`);
+      this.recordError(`nối ${endpoint.name} tại ${targetHost}:${endpoint.port}`, err, "Không nối được");
       this.push();
     });
   }
@@ -902,8 +920,11 @@ export class AppCore {
     } catch (err) {
       this.status.set(peerId, "none");
       const message = friendlyNet(err, "Không gõ được cửa máy kia.");
+      this.recordError(`gõ cửa ${endpoint.name} tại ${endpoint.host}:${endpoint.port}`, err, message);
       this.system(peerId, message);
-      throw new Error(message);
+      const wrapped = new Error(message);
+      wrapped.cause = err;
+      throw wrapped;
     }
     this.status.set(peerId, this.autoAccept() ? "connecting" : "pending-out");
     this.log(`Đã hỏi ${endpoint.name} mở kết nối`);
@@ -972,6 +993,7 @@ export class AppCore {
       }
       sendJson(res, 404, { ok: false, error: "Không có route này" });
     } catch (err) {
+      this.recordError(`HTTP ${req.url || ""}`, err, "Lỗi máy chủ");
       if (res.headersSent) return;
       sendJson(res, 500, { ok: false, error: err instanceof Error ? err.message : "Lỗi" });
     }
@@ -1069,22 +1091,24 @@ export class AppCore {
       return;
     }
     const name = fileNameFromHeader(req.headers["x-file-name"]);
-    const briefSession = String(req.headers["x-brief-session"] || "");
+    const saved = await this.storeInbox(peerId, name, data, req.headers["x-discuss"] === "1", String(req.headers["x-brief-session"] || ""));
+    sendJson(res, 200, { ok: true, name: saved, bytes: data.length });
+  }
+
+  private async storeInbox(peerId: string, name: string, data: Buffer, discuss: boolean, briefSession: string): Promise<string> {
     if (/^[a-zA-Z0-9_-]{1,80}$/.test(briefSession)) {
       const saved = await saveExact(briefFolder(this.store.settings.workDir, briefSession), name, data);
       if (fileRef(saved)) allowPreview(saved);
-      sendJson(res, 200, { ok: true, name: path.basename(saved), bytes: data.length });
-      return;
+      return path.basename(saved);
     }
     const saved = await saveReceivedFile(this.store.settings.workDir, name, data);
-    const discuss = req.headers["x-discuss"] === "1";
     if (!discuss) {
       const from = this.endpoints.get(peerId)?.name || this.store.trusted[peerId]?.name || "Máy kia";
       this.system(peerId, `${from} đã gửi file ${path.basename(saved)} (${formatBytes(data.length)}). Lưu tại ${saved}`, fileRef(saved) ?? undefined);
     } else if (fileRef(saved)) {
       allowPreview(saved);
     }
-    sendJson(res, 200, { ok: true, name: path.basename(saved), bytes: data.length });
+    return path.basename(saved);
   }
 
   private async deliverDiscuss(peerId: string, filePath: string): Promise<DiscussFile> {
@@ -1108,10 +1132,73 @@ export class AppCore {
   private async postFile(peerId: string, name: string, data: Buffer, discuss = false, briefSession = ""): Promise<string> {
     const endpoint = this.endpoints.get(peerId) ?? this.endpointFromTrusted(peerId);
     const token = this.store.trusted[peerId]?.token;
-    if (!endpoint?.host || !endpoint.port || !token) throw new Error("Hãy nối máy kia trước khi gửi file.");
+    if (!endpoint?.port || !token) throw new Error("Hãy nối máy kia trước khi gửi file.");
+    const hosts = this.fileHosts(peerId);
+    if (!hosts.length) throw new Error("Hãy nối máy kia trước khi gửi file.");
+    let last: Error | null = null;
+    for (const host of hosts) {
+      try {
+        const saved = await this.postFileHttp(host, endpoint.port, token, name, data, discuss, briefSession);
+        this.pinHost(peerId, host);
+        return saved;
+      } catch (err) {
+        const next = err instanceof Error ? err : new Error("Không gửi được file.");
+        if (last && !next.cause) next.cause = last;
+        last = next;
+      }
+    }
+    if (this.isLinked(peerId)) {
+      try {
+        return await this.postFileSocket(peerId, name, data, discuss, briefSession);
+      } catch (err) {
+        const next = err instanceof Error ? err : new Error("Không gửi được file.");
+        if (last && !next.cause) next.cause = last;
+        last = next;
+      }
+    }
+    const where = hosts.join(" hoặc ");
+    const error = new Error(`Không gửi được file tới ${where}. ${last?.message || "Máy kia không nhận file."}`);
+    if (last) error.cause = last;
+    throw error;
+  }
+
+  private fileHosts(peerId: string): string[] {
+    const hosts: string[] = [];
+    const add = (host?: string) => {
+      const clean = normalizeIp((host || "").trim());
+      if (!clean || clean === "0.0.0.0" || hosts.includes(clean)) return;
+      hosts.push(clean);
+    };
+    add(this.linkHost.get(peerId));
+    add(this.endpoints.get(peerId)?.host);
+    add(this.store.trusted[peerId]?.host);
+    return hosts;
+  }
+
+  private pinHost(peerId: string, host: string): void {
+    const clean = normalizeIp(host.trim());
+    if (!clean || clean === "0.0.0.0") return;
+    this.linkHost.set(peerId, clean);
+    const endpoint = this.endpoints.get(peerId);
+    if (!endpoint || endpoint.host === clean) return;
+    endpoint.host = clean;
+    endpoint.viaLocalhost = clean === "127.0.0.1";
+    this.rememberReach(peerId, endpoint);
+    this.push();
+  }
+
+  private async postFileHttp(
+    host: string,
+    port: number,
+    token: string,
+    name: string,
+    data: Buffer,
+    discuss: boolean,
+    briefSession: string,
+  ): Promise<string> {
     let res: Response;
     try {
-      res = await fetch(`http://${endpoint.host}:${endpoint.port}/inbox-file`, {
+      res = await fetch(`http://${host}:${port}/inbox-file`, {
         method: "POST",
         headers: {
           authorization: `Bearer ${token}`,
@@ -1124,12 +1211,136 @@ export class AppCore {
         signal: AbortSignal.timeout(120_000),
       });
     } catch (err) {
-      throw new Error(err instanceof Error ? err.message : "Không gửi được file qua LAN.");
+      const wrapped = new Error(`${host}:${port} · ${netCause(err) || "Không gửi được file."}`);
+      wrapped.cause = err;
+      throw wrapped;
     }
     const body = (await res.json().catch(() => ({}))) as { ok?: boolean; name?: string; error?: string };
     if (res.status === 404) throw new Error("Máy kia cần cài bản LAN Agents mới thì mới nhận được file.");
     if (!res.ok || !body.ok) throw new Error(body.error || `Máy kia không nhận file (HTTP ${res.status}).`);
     return body.name || name;
+  }
+
+  private liveSocket(peerId: string): LiveSocket | null {
+    const outbound = this.outbound.get(peerId);
+    if (outbound?.connected) return outbound;
+    const inbound = this.inbound.get(peerId);
+    if (inbound?.connected) return inbound;
+    return null;
+  }
+
+  private postFileSocket(peerId: string, name: string, data: Buffer, discuss: boolean, briefSession: string): Promise<string> {
+    const socket = this.liveSocket(peerId);
+    if (!socket) return Promise.reject(new Error("Kết nối đang mở không còn để gửi file."));
+    const id = randomUUID();
+    const chunk = 48 * 1024;
+    const total = Math.max(1, Math.ceil(data.length / chunk));
+    const send = (event: string, body: unknown) =>
+      new Promise<string>((resolve, reject) => {
+        socket.timeout(20_000).emit(event, body, (err: unknown, ack?: { ok?: boolean; name?: string; error?: string }) => {
+          if (err) {
+            const detail = err instanceof Error && err.message ? err.message : "";
+            const wrapped = new Error(
+              detail
+                ? `Máy kia không nhận file qua kết nối đang mở (${event}): ${detail}`
+                : `Máy kia không nhận file qua kết nối đang mở (${event}).`,
+            );
+            wrapped.cause = err;
+            reject(wrapped);
+            return;
+          }
+          if (!ack?.ok) {
+            reject(new Error(ack?.error || "Máy kia không nhận file."));
+            return;
+          }
+          resolve(ack.name || name);
+        });
+      });
+    return (async () => {
+      await send("file-begin", {
+        id,
+        name,
+        size: data.length,
+        total,
+        discuss: discuss ? 1 : 0,
+        briefSession: briefSession.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 80),
+      });
+      for (let seq = 0; seq < total; seq += 1) {
+        const slice = data.subarray(seq * chunk, (seq + 1) * chunk);
+        await send("file-chunk", { id, seq, data: slice.toString("base64") });
+      }
+      return send("file-end", { id });
+    })();
+  }
+
+  private bindFileTransfer(socket: LiveSocket, peerId: () => string | null): void {
+    const pending = new Map<string, { name: string; total: number; parts: Array<Buffer | undefined>; discuss: boolean; brief: string }>();
+    const replyFail = (ack: unknown, error: string) => {
+      if (typeof ack === "function") (ack as (body: { ok: boolean; error: string }) => void)({ ok: false, error });
+    };
+    const fail = (ack: unknown, error: string) => {
+      const owner = peerId();
+      this.recordError(`nhận file${owner ? ` từ ${this.who(owner)}` : ""}`, new Error(error), error);
+      replyFail(ack, error);
+    };
+    socket.on("disconnect", () => pending.clear());
+    socket.on("file-begin", (body: { id?: string; name?: string; size?: number; total?: number; discuss?: number; briefSession?: string }, ack?: (body: { ok: boolean; error?: string }) => void) => {
+      const id = String(body?.id || "");
+      const owner = peerId();
+      const total = Math.round(Number(body?.total) || 0);
+      const size = Math.round(Number(body?.size) || 0);
+      if (!owner || !this.isLinked(owner) || !id || total < 1 || total > 2000 || size < 1 || size > MAX_FILE_BYTES) {
+        fail(ack, "File không hợp lệ.");
+        return;
+      }
+      pending.set(id, {
+        name: safeFileName(String(body?.name || "file.bin")),
+        total,
+        parts: Array.from({ length: total }),
+        discuss: body?.discuss === 1,
+        brief: String(body?.briefSession || ""),
+      });
+      if (typeof ack === "function") ack({ ok: true });
+    });
+    socket.on("file-chunk", (body: { id?: string; seq?: number; data?: string }, ack?: (body: { ok: boolean; error?: string }) => void) => {
+      const item = pending.get(String(body?.id || ""));
+      const seq = Math.round(Number(body?.seq) || -1);
+      const raw = typeof body?.data === "string" ? body.data : "";
+      if (!item || seq < 0 || seq >= item.total || !raw || raw.length > 80_000) {
+        fail(ack, "Mảnh file không hợp lệ.");
+        return;
+      }
+      const bytes = Buffer.from(raw, "base64");
+      if (!bytes.length || bytes.length > 64 * 1024) {
+        fail(ack, "Mảnh file không hợp lệ.");
+        return;
+      }
+      item.parts[seq] = bytes;
+      if (typeof ack === "function") ack({ ok: true });
+    });
+    socket.on("file-end", (body: { id?: string }, ack?: (body: { ok: boolean; name?: string; error?: string }) => void) => {
+      const id = String(body?.id || "");
+      const item = pending.get(id);
+      const owner = peerId();
+      pending.delete(id);
+      if (!item || !owner || item.parts.some((part) => !part)) {
+        fail(ack, "File chưa nhận đủ.");
+        return;
+      }
+      const data = Buffer.concat(item.parts as Buffer[]);
+      if (!data.length || data.length > MAX_FILE_BYTES) {
+        fail(ack, "File không hợp lệ.");
+        return;
+      }
+      void this.storeInbox(owner, item.name, data, item.discuss, item.brief)
+        .then((saved) => {
+          if (typeof ack === "function") ack({ ok: true, name: saved });
+        })
+        .catch((err: unknown) => {
+          const message = this.recordError(`lưu file từ ${owner ? this.who(owner) : "máy kia"}`, err, "Không lưu được file.");
+          replyFail(ack, message);
+        });
+    });
   }
 
   private async onTrigger(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -1398,6 +1609,7 @@ export class AppCore {
         clearTimeout(waitTimer);
         if (err instanceof AccessDenied && (this.epochs.get(peerId) ?? 0) === epoch) {
           const text = err.message;
+          this.recordError(`từ chối quyền ${providerLabel(this.store.settings.provider)} trong ${this.who(peerId)}`, err, text);
           const line = this.findLine(bound, id);
           if (line) {
             line.kind = "agent";
@@ -1409,11 +1621,21 @@ export class AppCore {
           return;
         }
         if (isAbort(err) || (this.epochs.get(peerId) ?? 0) !== epoch) {
+          if (timedOut) {
+            this.log(
+              `Lỗi · ${providerLabel(this.store.settings.provider)} quá hạn trong ${this.who(peerId)} · không trả lời trong ${Math.round(REPLY_WAIT_MS / 1000)} giây`,
+            );
+            this.push();
+          }
           this.finishAborted(bound, id, timedOut ? "Agent trả lời quá lâu, đã dừng. Bạn có thể nhắn tiếp." : "Đã dừng.");
           resolveOut("");
           return;
         }
-        const message = err instanceof Error ? err.message : "Agent lỗi";
+        const message = this.recordError(
+          `${providerLabel(this.store.settings.provider)} trả lời trong ${this.who(peerId)}`,
+          err,
+          "Agent lỗi",
+        );
         this.lastError.set(peerId, message);
         this.upsertLine(bound, {
           id,
@@ -1424,7 +1646,6 @@ export class AppCore {
           pending: false,
           createdAt,
         });
-        this.log(message);
         this.pushNow();
         this.scheduleSave();
         resolveOut("");
@@ -1506,7 +1727,9 @@ export class AppCore {
       if (!res.ok || !body.ok || !body.reply) throw new Error(body.error || `HTTP ${res.status}`);
       return body.reply;
     } catch (err) {
-      throw new Error(friendlyNet(err, "Không gọi được HTTP trigger."));
+      const wrapped = new Error(friendlyNet(err, "Không gọi được HTTP trigger."));
+      wrapped.cause = err;
+      throw wrapped;
     }
   }
 
@@ -1656,8 +1879,8 @@ export class AppCore {
     if (next.port > 0) prev.port = next.port;
     prev.lastSeen = Math.max(prev.lastSeen, next.lastSeen);
     if (next.discovered) prev.discovered = true;
-    if (preferHost || next.viaLocalhost || !prev.viaLocalhost) {
-      if (next.host) prev.host = next.host;
+    if (next.host && (preferHost || (!this.isLinked(peerId) && (next.viaLocalhost || !prev.viaLocalhost)))) {
+      prev.host = next.host;
       prev.viaLocalhost = next.viaLocalhost;
     }
     this.rememberReach(peerId, prev);
@@ -2325,7 +2548,8 @@ export class AppCore {
     return this.store.transcripts[sessionId]?.find((line) => line.id === id);
   }
 
-  private system(peerId: string, text: string, file?: FileRef): void {
+  private system(peerId: string, text: string, file?: FileRef, journal = true): void {
+    if (journal) this.journalProblem(this.who(peerId), text);
     const line = this.makeLine(peerId, this.store.peerId, this.store.settings.name, "system", text);
     if (file) line.file = file;
     this.appendLine(this.ensureSession(peerId), line);
@@ -2477,7 +2701,7 @@ export class AppCore {
     try {
       if (attachmentPath?.trim()) attachment = await this.deliverGroupFile(room, attachmentPath);
     } catch (err) {
-      this.groupNote(room, err instanceof Error ? err.message : "Không gửi được file đính kèm.", false);
+      this.groupNote(room, this.recordError(`gửi file đính kèm trong nhóm ${room.title}`, err, "Không gửi được file đính kèm."), false);
       return;
     }
     const spoken = text.trim().slice(0, LINE_CAP) || (attachment ? `Đọc file đính kèm ${attachment.name} và trao đổi nội dung.` : "");
@@ -2538,7 +2762,7 @@ export class AppCore {
       else await this.pushBriefFiles(room.hostId, sessionId, brief);
     } catch (err) {
       brief.running = false;
-      this.groupNote(room, err instanceof Error ? err.message : "Không gửi được file context.", false);
+      this.groupNote(room, this.recordError(`gửi file context trong nhóm ${room.title}`, err, "Không gửi được file context."), false);
       return this.snapshot();
     }
     const mentions = mentionTargets(brief.topic, this.aliasList(room.members.map((member) => this.memberRecord(member))));
@@ -2641,7 +2865,7 @@ export class AppCore {
         if (index >= 0) brief.files[index] = next;
         else brief.files.push(next);
       } catch (err) {
-        this.groupNote(room, err instanceof Error ? err.message : "Không thêm được file context.", false);
+        this.groupNote(room, this.recordError(`thêm file context trong nhóm ${room.title}`, err, "Không thêm được file context."), false);
       }
     }
     if (missed) this.groupNote(room, "Có máy trong nhóm chưa nối, file context sẽ gửi khi bắt đầu nếu máy đó đã vào.", false);
@@ -2768,14 +2992,14 @@ export class AppCore {
         try {
           await this.pushBriefFilesGroup(room, sessionId, msg.fromPeerId);
         } catch (err) {
-          this.groupNote(room, err instanceof Error ? err.message : "Không chuyển được file context.", true);
+          this.groupNote(room, this.recordError(`chuyển file context trong nhóm ${room.title}`, err, "Không chuyển được file context."), true);
         }
       }
       if (msg.attachment) {
         try {
           await this.forwardAttachment(room, msg);
         } catch (err) {
-          this.groupNote(room, err instanceof Error ? err.message : "Không chuyển được file đính kèm.", true);
+          this.groupNote(room, this.recordError(`chuyển file đính kèm trong nhóm ${room.title}`, err, "Không chuyển được file đính kèm."), true);
         }
       }
       this.planIncoming(room, msg);
@@ -3240,7 +3464,7 @@ export class AppCore {
       try {
         await this.postFile(member.peerId, name, data, true);
       } catch (err) {
-        this.groupNote(room, err instanceof Error ? err.message : "Không chuyển được file đính kèm.", false);
+        this.groupNote(room, this.recordError(`chuyển file đính kèm cho ${this.who(member.peerId)}`, err, "Không chuyển được file đính kèm."), false);
       }
     }
   }
@@ -3277,6 +3501,7 @@ export class AppCore {
   }
 
   private groupNote(room: GroupRoom, text: string, tell: boolean): ChatLine {
+    this.journalProblem(`nhóm ${room.title}`, text);
     const sessionId = this.roomSession(room);
     const line = this.makeLine(groupKey(room.id), this.store.peerId, this.store.settings.name, "system", text);
     this.appendLine(sessionId, line);
@@ -3392,7 +3617,7 @@ export class AppCore {
       this.scheduleSave();
       this.pushNow();
     } catch (err) {
-      this.groupNote(room, err instanceof Error ? err.message : "Không chuyển được file kết quả.", true);
+      this.groupNote(room, this.recordError(`chuyển file kết quả trong nhóm ${room.title}`, err, "Không chuyển được file kết quả."), true);
     }
   }
 
@@ -3416,7 +3641,7 @@ export class AppCore {
       try {
         await this.postBriefFile(member.peerId, sessionId, CODING_RESULT_FILE, data);
       } catch (err) {
-        this.groupNote(room, err instanceof Error ? err.message : "Không chuyển được file kết quả.", false);
+        this.groupNote(room, this.recordError(`chuyển file kết quả cho ${this.who(member.peerId)}`, err, "Không chuyển được file kết quả."), false);
       }
     }
   }
@@ -3481,12 +3706,105 @@ export class AppCore {
     this.onChange();
   }
 
+  noteError(scope: string, err: unknown): void {
+    try {
+      this.recordError(scope, err, "Có lỗi");
+    } catch (crash) {
+      console.error("[lan]", scope, err, crash);
+    }
+  }
+
+  private who(peerId: string): string {
+    const groupId = parseGroupKey(peerId);
+    if (groupId) {
+      const room = this.groupById(groupId);
+      return room ? `nhóm ${room.title}` : "nhóm";
+    }
+    const name = this.endpoints.get(peerId)?.name || this.store.trusted[peerId]?.name || "máy kia";
+    const endpoint = this.endpoints.get(peerId) ?? this.endpointFromTrusted(peerId);
+    const host = this.linkHost.get(peerId) || endpoint?.host || "";
+    const port = endpoint?.port || 0;
+    return host && port ? `${name} (${host}:${port})` : name;
+  }
+
+  private recordError(scope: string, err: unknown, fallback = "Lỗi"): string {
+    const friendly = err instanceof Error && err.message.trim() ? err.message.trim() : fallback;
+    const parts = errorParts(err, fallback);
+    const head = clipLog(parts[0] || fallback, 500);
+    const probe = head.slice(0, 160);
+    if (probe && this.logs.slice(-8).some((line) => line.includes(probe))) return friendly;
+    this.log(`Lỗi · ${scope} · ${head}`);
+    for (const extra of parts.slice(1, 6)) this.log(`Chi tiết · ${clipLog(extra, 500)}`);
+    this.push();
+    return friendly;
+  }
+
+  private journalProblem(scope: string, text: string): void {
+    if (!isProblem(text)) return;
+    const clean = clipLog(text.replace(/\s+/g, " ").trim(), 500);
+    if (!clean) return;
+    const probe = clean.slice(0, 160);
+    if (this.logs.slice(-8).some((line) => line.includes(probe))) return;
+    this.log(`Lỗi · ${scope} · ${clean}`);
+  }
+
   private log(line: string): void {
     const stamp = new Date().toLocaleTimeString("vi-VN", { hour12: false });
     this.logs.push(`${stamp}  ${line}`);
-    if (this.logs.length > 80) this.logs.splice(0, this.logs.length - 80);
+    if (this.logs.length > 200) this.logs.splice(0, this.logs.length - 200);
     console.log(`[lan] ${line}`);
   }
+}
+
+function clipLog(text: string, max: number): string {
+  const clean = text.replace(/\s+$/g, "");
+  return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
+}
+
+function isProblem(text: string): boolean {
+  return /không |chưa |lỗi|từ chối|cần nối|cần kết nối|hãy |quá lâu|không còn|econn|eaddr|enotfound|etimedout|eacces|eperm|timeout|http \d{3}/i.test(text);
+}
+
+function errorParts(err: unknown, fallback: string): string[] {
+  const lines: string[] = [];
+  const seen = new Set<string>();
+  const meta: string[] = [];
+  let exit = "";
+  const push = (text: string) => {
+    for (const raw of text.split(/\r?\n/)) {
+      const clean = raw.replace(/\s+/g, " ").trim();
+      if (!clean || clean === "fetch failed" || seen.has(clean)) continue;
+      if (/^Mã thoát /.test(clean) || /CLI dừng trước khi trả mã thoát/.test(clean)) {
+        exit = clean;
+        seen.add(clean);
+        continue;
+      }
+      seen.add(clean);
+      if (lines.length < 4) lines.push(clean);
+    }
+  };
+  let current: unknown = err;
+  let depth = 0;
+  while (current && depth < 5) {
+    if (!(current instanceof Error)) {
+      push(String(current));
+      break;
+    }
+    const node = current as NodeJS.ErrnoException & { address?: string; port?: number };
+    if (node.message) push(node.message);
+    if (typeof node.code === "string" && node.code) meta.push(`mã ${node.code}`);
+    if (node.syscall) meta.push(String(node.syscall));
+    if (node.address) meta.push(node.port ? `${node.address}:${node.port}` : String(node.address));
+    current = node.cause;
+    depth += 1;
+  }
+  if (exit) lines.push(exit);
+  if (meta.length) {
+    const blob = lines.join(" ");
+    const fresh = meta.filter((item) => !blob.includes(item.replace(/^mã /, "")));
+    if (fresh.length) lines.push(fresh.join(" · "));
+  }
+  return lines.length ? lines.slice(0, 6) : [fallback];
 }
 
 function cliIntro(provider: ProviderId): string {
@@ -3529,6 +3847,12 @@ function friendlyNet(err: unknown, fallback: string): string {
   if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
     return "Máy kia không trả lời kịp.";
   }
-  if (err instanceof Error && err.message) return err.message;
-  return fallback;
+  return netCause(err) || fallback;
+}
+
+function netCause(err: unknown): string {
+  if (err instanceof Error && "cause" in err && err.cause instanceof Error && err.cause.message) return err.cause.message;
+  if (err instanceof Error && err.message && err.message !== "fetch failed") return err.message;
+  if (err instanceof Error && "cause" in err && err.cause instanceof Error) return err.cause.message;
+  return err instanceof Error ? err.message : "";
 }

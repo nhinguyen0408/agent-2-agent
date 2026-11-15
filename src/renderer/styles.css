@@ -337,12 +337,21 @@ label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 12px; co
 
 .logs {
   margin: 0;
-  white-space: pre-wrap;
   color: var(--muted);
   font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
   font-size: 11px;
   line-height: 1.45;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
 }
+
+.logs div {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.logs .log-error { color: #9f1239; }
 
 .history-list {
   display: flex;

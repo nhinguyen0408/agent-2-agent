@@ -63,10 +63,10 @@ function rankInterface(iface: Iface): number {
 }
 
 function chooseHost(announced: string | undefined, observed: string): string {
+  if (isUsableIPv4(observed)) return observed;
   const declared = (announced ?? "").trim();
-  if (!isIPv4(declared)) return observed;
-  if (isDirectLan(observed)) return observed;
-  return declared;
+  if (isUsableIPv4(declared)) return declared;
+  return observed || declared;
 }
 
 function isIPv4(value: string): boolean {
@@ -79,8 +79,8 @@ function isIPv4(value: string): boolean {
   });
 }
 
-function isDirectLan(value: string): boolean {
-  return value.startsWith("192.168.") || value.startsWith("10.");
+function isUsableIPv4(value: string): boolean {
+  return isIPv4(value) && value !== "0.0.0.0" && value !== "127.0.0.1";
 }
 
 function broadcastFrom(address: string, netmask: string): string {
@@ -109,7 +109,9 @@ export class Discovery {
     const socket = dgram.createSocket({ type: "udp4", reuseAddr: true });
     this.socket = socket;
     socket.on("error", (err) => {
-      this.onLog(`Discovery UDP lỗi: ${err.message}`);
+      const code = (err as NodeJS.ErrnoException).code;
+      const suffix = typeof code === "string" && code ? ` · mã ${code}` : "";
+      this.onLog(`Lỗi · discovery UDP · ${err.message}${suffix}`);
     });
     socket.on("message", (msg, rinfo) => {
       this.ingest(msg, normalizeIp(rinfo.address));
@@ -122,7 +124,7 @@ export class Discovery {
         socket.addMembership(MULTICAST_ADDR);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        this.onLog(`Multicast không bật được (${message}). Vẫn gửi broadcast.`);
+        this.onLog(`Lỗi · multicast · ${message}. Vẫn gửi broadcast.`);
       }
       this.timer = setInterval(() => this.broadcast(getAnnounce()), 2000);
       this.broadcast(getAnnounce());

@@ -171,7 +171,7 @@ function boot(host: HTMLElement): void {
           </div>
         </div>
         <div class="panel-body" data-pane="logs" hidden>
-          <pre id="logs" class="logs" aria-live="polite"></pre>
+          <div id="logs" class="logs" aria-live="polite"></div>
         </div>
       </aside>
       <section class="chat">
@@ -313,6 +313,10 @@ function boot(host: HTMLElement): void {
       button.classList.toggle("active", button.dataset.nav === nav);
     }
     must<HTMLElement>("#pane-title").textContent = navTitles[nav];
+    if (nav === "logs") {
+      const pane = document.querySelector<HTMLElement>('[data-pane="logs"]');
+      if (pane) pane.scrollTop = pane.scrollHeight;
+    }
     setIcon(must("#nav-toggle"), "sidebar", navOpen ? "Thu gọn thanh bên" : "Mở thanh bên");
     localStorage.setItem("lan-nav", nav);
     localStorage.setItem("lan-nav-open", navOpen ? "1" : "0");
@@ -358,6 +362,7 @@ function boot(host: HTMLElement): void {
   let focusLine = "";
   let mentionIndex = 0;
   let watchedKey = "";
+  let logsKey = "";
 
   peersEl.addEventListener("click", (event) => {
     const nick = (event.target as HTMLElement).closest<HTMLElement>("[data-nick]");
@@ -868,7 +873,24 @@ function boot(host: HTMLElement): void {
     paintGroups(next);
     paintHistory(next);
     paintChat(next);
-    must<HTMLPreElement>("#logs").textContent = next.logs.slice(-14).join("\n");
+    paintLogs(next.logs);
+  }
+
+  function paintLogs(lines: string[]): void {
+    const key = lines.join("\n");
+    if (key === logsKey) return;
+    logsKey = key;
+    const box = must<HTMLElement>("#logs");
+    const pane = box.closest(".panel-body");
+    const stuck = !pane || pane.scrollHeight - pane.scrollTop - pane.clientHeight < 64;
+    box.replaceChildren();
+    for (const line of lines) {
+      const row = document.createElement("div");
+      if (line.includes("Lỗi ·") || line.includes("Chi tiết ·")) row.className = "log-error";
+      row.textContent = line;
+      box.append(row);
+    }
+    if (stuck && pane) pane.scrollTop = pane.scrollHeight;
   }
 
   function paintPeers(next: AppState): void {

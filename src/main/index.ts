@@ -22,11 +22,15 @@ if (debugArg) {
 
 app.setPath("userData", path.join(app.getPath("appData"), "lan-agents", profile));
 
+let reportCrash: (scope: string, err: unknown) => void = () => undefined;
+
 process.on("uncaughtException", (err) => {
   console.error("[lan] uncaught", err);
+  reportCrash("lỗi ngoài ý muốn", err);
 });
 process.on("unhandledRejection", (err) => {
   console.error("[lan] rejection", err);
+  reportCrash("tác vụ nền", err);
 });
 
 const gotLock = app.requestSingleInstanceLock();
@@ -34,6 +38,19 @@ if (!gotLock) {
   app.quit();
 } else {
   let core: AppCore | null = null;
+  reportCrash = (scope, err) => core?.noteError(scope, err);
+
+  const expose = (channel: string, fn: (event: Electron.IpcMainInvokeEvent, ...args: any[]) => unknown) => {
+    ipcMain.handle(channel, async (event, ...args) => {
+      try {
+        return await fn(event, ...args);
+      } catch (err) {
+        const label = channel.replace(/^lan:/, "").replace(/-/g, " ");
+        core?.noteError(label, err);
+        throw err;
+      }
+    });
+  };
   let mainWindow: BrowserWindow | null = null;
   let previewWindow: BrowserWindow | null = null;
   let pendingPreview: FileRef | null = null;
@@ -175,35 +192,35 @@ if (!gotLock) {
   app
     .whenReady()
     .then(() => {
-      ipcMain.handle(IPC.getState, () => {
+      expose(IPC.getState, () => {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.snapshot();
       });
-      ipcMain.handle(IPC.watch, (_event, peerId: string, sessionId: string) => {
+      expose(IPC.watch, (_event, peerId: string, sessionId: string) => {
         core?.setWatch(String(peerId ?? ""), String(sessionId ?? ""));
       });
-      ipcMain.handle(IPC.saveSettings, (_event, settings: Settings) => {
+      expose(IPC.saveSettings, (_event, settings: Settings) => {
         if (!core) throw new Error("App chưa sẵn sàng");
         const state = core.saveSettings(settings);
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setTitle(`LAN Agents — ${state.self.name}`);
         return state;
       });
-      ipcMain.handle(IPC.connect, (_event, peerId: string) => core?.connect(peerId));
-      ipcMain.handle(IPC.connectAddress, (_event, host: string, port: number) => core?.connectAddress(host, port));
-      ipcMain.handle(IPC.disconnect, (_event, peerId: string) => core?.disconnect(peerId));
-      ipcMain.handle(IPC.accept, (_event, peerId: string) => core?.accept(peerId));
-      ipcMain.handle(IPC.reject, (_event, peerId: string) => core?.reject(peerId));
-      ipcMain.handle(IPC.send, (_event, peerId: string, text: string, attachmentPath?: string) =>
+      expose(IPC.connect, (_event, peerId: string) => core?.connect(peerId));
+      expose(IPC.connectAddress, (_event, host: string, port: number) => core?.connectAddress(host, port));
+      expose(IPC.disconnect, (_event, peerId: string) => core?.disconnect(peerId));
+      expose(IPC.accept, (_event, peerId: string) => core?.accept(peerId));
+      expose(IPC.reject, (_event, peerId: string) => core?.reject(peerId));
+      expose(IPC.send, (_event, peerId: string, text: string, attachmentPath?: string) =>
         core?.sendHuman(peerId, text, attachmentPath),
       );
-      ipcMain.handle(IPC.pickDiscuss, async () => {
+      expose(IPC.pickDiscuss, async () => {
         const picked = await choosePath({
           properties: ["openFile"],
           filters: [{ name: "File để trao đổi", extensions: DISCUSS_EXTENSIONS }],
         });
         return picked;
       });
-      ipcMain.handle(IPC.pickBriefFiles, async () => {
+      expose(IPC.pickBriefFiles, async () => {
         const options: OpenDialogOptions = {
           properties: ["openFile", "multiSelections"],
           filters: [{ name: "File context", extensions: DISCUSS_EXTENSIONS }],
@@ -212,19 +229,19 @@ if (!gotLock) {
         const picked = host ? await dialog.showOpenDialog(host, options) : await dialog.showOpenDialog(options);
         return picked.canceled ? [] : picked.filePaths;
       });
-      ipcMain.handle(IPC.saveBrief, (_event, peerId: string, patch: { topic?: string; goal?: string; turnLimit?: number; coding?: boolean }) => {
+      expose(IPC.saveBrief, (_event, peerId: string, patch: { topic?: string; goal?: string; turnLimit?: number; coding?: boolean }) => {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.saveBrief(String(peerId), patch ?? {});
       });
-      ipcMain.handle(IPC.addBriefFiles, (_event, peerId: string, paths: string[]) => {
+      expose(IPC.addBriefFiles, (_event, peerId: string, paths: string[]) => {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.addBriefFiles(String(peerId), Array.isArray(paths) ? paths : []);
       });
-      ipcMain.handle(IPC.removeBriefFile, (_event, peerId: string, name: string) => {
+      expose(IPC.removeBriefFile, (_event, peerId: string, name: string) => {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.removeBriefFile(String(peerId), String(name ?? ""));
       });
-      ipcMain.handle(IPC.openBriefFile, async (_event, sessionId: string, name: string) => {
+      expose(IPC.openBriefFile, async (_event, sessionId: string, name: string) => {
         if (!core) throw new Error("App chưa sẵn sàng");
         const found = core.locateBriefFile(String(sessionId), String(name ?? ""));
         if (!found) return null;
@@ -236,67 +253,67 @@ if (!gotLock) {
         if (error) throw new Error("Không mở được file đính kèm.");
         return null;
       });
-      ipcMain.handle(IPC.startBrief, (_event, peerId: string) => {
+      expose(IPC.startBrief, (_event, peerId: string) => {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.startBrief(String(peerId));
       });
-      ipcMain.handle(IPC.extendBrief, (_event, peerId: string, extra?: number) => {
+      expose(IPC.extendBrief, (_event, peerId: string, extra?: number) => {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.extendBrief(String(peerId), Number(extra) || BRIEF_EXTEND);
       });
-      ipcMain.handle(IPC.createGroup, () => {
+      expose(IPC.createGroup, () => {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.createGroup();
       });
-      ipcMain.handle(IPC.inviteGroup, (_event, groupId: string, peerId: string) => {
+      expose(IPC.inviteGroup, (_event, groupId: string, peerId: string) => {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.inviteGroup(String(groupId), String(peerId));
       });
-      ipcMain.handle(IPC.leaveGroup, (_event, groupId: string, peerId?: string) => {
+      expose(IPC.leaveGroup, (_event, groupId: string, peerId?: string) => {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.leaveGroup(String(groupId), peerId ? String(peerId) : undefined);
       });
-      ipcMain.handle(IPC.setMemberRole, (_event, groupId: string, peerId: string, role: string) => {
+      expose(IPC.setMemberRole, (_event, groupId: string, peerId: string, role: string) => {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.setMemberRole(String(groupId), String(peerId), String(role ?? ""));
       });
-      ipcMain.handle(IPC.renameGroup, (_event, groupId: string, title: string) => {
+      expose(IPC.renameGroup, (_event, groupId: string, title: string) => {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.renameGroup(String(groupId), String(title ?? ""));
       });
-      ipcMain.handle(IPC.setNickname, (_event, peerId: string, nickname: string) => {
+      expose(IPC.setNickname, (_event, peerId: string, nickname: string) => {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.setNickname(String(peerId), String(nickname ?? ""));
       });
-      ipcMain.handle(IPC.deleteSession, (_event, peerId: string, sessionId: string) => {
+      expose(IPC.deleteSession, (_event, peerId: string, sessionId: string) => {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.deleteSession(String(peerId), String(sessionId));
       });
-      ipcMain.handle(IPC.dialogue, (_event, peerId: string, topic: string, replies: number) =>
+      expose(IPC.dialogue, (_event, peerId: string, topic: string, replies: number) =>
         core?.startDialogue(peerId, topic, replies),
       );
-      ipcMain.handle(IPC.stop, (_event, peerId: string) => core?.stopTalk(peerId));
-      ipcMain.handle(IPC.activity, (_event, peerId: string, patch: { typing?: boolean; replying?: boolean }) => {
+      expose(IPC.stop, (_event, peerId: string) => core?.stopTalk(peerId));
+      expose(IPC.activity, (_event, peerId: string, patch: { typing?: boolean; replying?: boolean }) => {
         core?.notifyActivity(peerId, patch);
       });
-      ipcMain.handle(IPC.rescanClis, () => {
+      expose(IPC.rescanClis, () => {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.rescanClis();
       });
       attachPreviewProtocol(() => core?.store.settings.workDir ?? "");
-      ipcMain.handle(IPC.createSession, (_event, peerId: string) => {
+      expose(IPC.createSession, (_event, peerId: string) => {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.createSession(String(peerId));
       });
-      ipcMain.handle(IPC.openSession, (_event, peerId: string, sessionId: string) => {
+      expose(IPC.openSession, (_event, peerId: string, sessionId: string) => {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.openSession(String(peerId), String(sessionId));
       });
-      ipcMain.handle(IPC.renameSession, (_event, peerId: string, sessionId: string, title: string) => {
+      expose(IPC.renameSession, (_event, peerId: string, sessionId: string, title: string) => {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.renameSession(String(peerId), String(sessionId), String(title ?? ""));
       });
-      ipcMain.handle(IPC.listWorkFiles, async (_event, dir: string, root?: string) => {
+      expose(IPC.listWorkFiles, async (_event, dir: string, root?: string) => {
         if (typeof dir !== "string" || !dir.trim()) return { found: false, files: [] };
         const base = path.resolve(typeof root === "string" && root.trim() ? root : dir);
         const target = path.resolve(dir);
@@ -307,14 +324,14 @@ if (!gotLock) {
         }
         return listed;
       });
-      ipcMain.handle(IPC.showPreview, (_event, raw: unknown) => {
+      expose(IPC.showPreview, (_event, raw: unknown) => {
         const picked = raw && typeof raw === "object" && "path" in raw ? fileRef(String((raw as { path: unknown }).path)) : null;
         if (!picked) return false;
         allowPreview(picked.path);
         openPreviewWindow(picked);
         return true;
       });
-      ipcMain.handle(IPC.openPreview, async () => {
+      expose(IPC.openPreview, async () => {
         const picked = await choosePath({
           properties: ["openFile"],
           filters: [
@@ -329,14 +346,14 @@ if (!gotLock) {
         allowPreview(ref.path);
         return ref;
       });
-      ipcMain.handle(IPC.sendFile, async (_event, peerId: string) => {
+      expose(IPC.sendFile, async (_event, peerId: string) => {
         if (!core) throw new Error("App chưa sẵn sàng");
         const filePath = await choosePath({ properties: ["openFile"] });
         if (!filePath) return null;
         await core.sendFile(peerId, filePath, true);
         return filePath;
       });
-      ipcMain.handle(IPC.pickCwd, () => choosePath({ properties: ["openDirectory"] }));
+      expose(IPC.pickCwd, () => choosePath({ properties: ["openDirectory"] }));
       return createWindow();
     })
     .catch((err) => {

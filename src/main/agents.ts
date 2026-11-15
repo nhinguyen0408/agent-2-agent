@@ -275,7 +275,9 @@ export class AgentHost {
         input.signal.removeEventListener("abort", onAbort);
         if (blocked) return;
         if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-          reject(new Error(missing));
+          const wrapped = new Error(missing);
+          wrapped.cause = err;
+          reject(wrapped);
           return;
         }
         reject(err);
@@ -320,7 +322,9 @@ export class AgentHost {
           return;
         }
         const message = stderr.trim() || stdout.trim();
-        reject(new Error(message || `Lệnh thoát với mã ${code ?? "?"}. ${missing}`));
+        const exit = typeof code === "number" ? `Mã thoát ${code}` : "CLI dừng trước khi trả mã thoát";
+        const body = message || `${exit}. ${missing}`;
+        reject(new Error(body.includes(exit) ? body : `${body}\n${exit}`));
       });
     });
   }
