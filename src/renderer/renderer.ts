@@ -1,7 +1,7 @@
 import { BRIEF_FILE_MAX, BRIEF_TURN_MAX, resultText, type BriefFile, type ProjectBrief } from "../shared/brief";
 import { GROUP_MAX, groupKey, mentionRanges, parseGroupKey, rewriteMentionLabels, type GroupMember, type GroupRoom, type MentionRef } from "../shared/group";
 import type { AppState, ChatLine, ChatNotice, CliReport, CliToolState, FileRef, PeerActivity, PeerView, Settings, WorkFile } from "../shared/types";
-import { cliClientLabel, providerLabel } from "../shared/types";
+import { REPLY_WAIT_MS, cliClientLabel, providerLabel } from "../shared/types";
 import { fileRef, type PreviewKind } from "../shared/preview";
 import { previewSrc, renderMarkdownHtml, renderPreview } from "./previewView";
 
@@ -42,7 +42,7 @@ declare global {
       sendFile: (peerId: string) => Promise<string | null>;
       openPreview: () => Promise<FileRef | null>;
       showPreview: (file: FileRef) => Promise<boolean>;
-      listWorkFiles: (dir: string) => Promise<{ found: boolean; files: WorkFile[] }>;
+      listWorkFiles: (dir: string, root?: string) => Promise<{ found: boolean; files: WorkFile[] }>;
       onState: (listener: (state: AppState) => void) => () => void;
       onNotice: (listener: (notice: ChatNotice) => void) => () => void;
       onPreviewFile: (listener: (file: FileRef) => void) => () => void;
@@ -107,13 +107,43 @@ function boot(host: HTMLElement): void {
           <div class="pane-tools">${iconButton("new-session", "plus", "Phiên mới với máy đang chọn")}</div>
         </div>
         <div class="panel-body" data-pane="files" hidden>
-          <label class="cwd">Thư mục làm việc
-            <span>
-              <input id="set-cwd" spellcheck="false" data-tip="Thư mục agent đọc và ghi file" aria-label="Thư mục làm việc" />
-              ${iconButton("pick-cwd", "folder", "Chọn thư mục")}
-            </span>
-          </label>
-          <div id="workdir-files" class="workdir-files"></div>
+          <section class="dir-block">
+            <label class="cwd">Thư mục làm việc
+              <span>
+                <input id="set-cwd" spellcheck="false" data-tip="Thư mục agent đọc và ghi file" aria-label="Thư mục làm việc" />
+                ${iconButton("pick-cwd", "folder", "Chọn thư mục")}
+              </span>
+            </label>
+            <label class="check confine">
+              <input id="set-confine" type="checkbox" />
+              <span>Agent máy khác chỉ điều khiển được file và lệnh trong thư mục đã lưu này, kể cả thư mục con.</span>
+            </label>
+            <p class="hint">Bấm một thư mục để mở bên trong.</p>
+            <div id="workdir-files" class="workdir-files"></div>
+          </section>
+          <section class="skill-block">
+            <p class="section-note">Thư mục skill</p>
+            <p class="hint">Agent trên máy này đọc skill của runtime đang chọn khi làm yêu cầu của máy khác. Được đọc skill. File ghi ra vẫn nằm trong thư mục làm việc.</p>
+            <label class="cwd">Skill Claude
+              <span>
+                <input id="set-claude-skill" spellcheck="false" placeholder="Thư mục skill của Claude" aria-label="Thư mục skill Claude" />
+                ${iconButton("pick-claude-skill", "folder", "Chọn thư mục skill Claude")}
+              </span>
+            </label>
+            <label class="cwd">Skill Cursor
+              <span>
+                <input id="set-cursor-skill" spellcheck="false" placeholder="Thư mục skill của Cursor" aria-label="Thư mục skill Cursor" />
+                ${iconButton("pick-cursor-skill", "folder", "Chọn thư mục skill Cursor")}
+              </span>
+            </label>
+            <label class="cwd">Skill Codex
+              <span>
+                <input id="set-codex-skill" spellcheck="false" placeholder="Thư mục skill của Codex" aria-label="Thư mục skill Codex" />
+                ${iconButton("pick-codex-skill", "folder", "Chọn thư mục skill Codex")}
+              </span>
+            </label>
+            <div class="save-row">${iconButton("save-dirs", "check", "Lưu thư mục làm việc và skill", "", "", "button", "icon-btn primary")}</div>
+          </section>
         </div>
         <div class="panel-body" data-pane="settings" hidden>
           <label>Tên máy này<input id="set-name" maxlength="40" /></label>
@@ -307,7 +337,11 @@ function boot(host: HTMLElement): void {
   let active: string | null = null;
   let settingsReady = false;
   let toastTimer = 0;
-  let lastFiles: WorkFile[] = [];
+  let rootFiles: WorkFile[] = [];
+  let treeRoot = "";
+  const openDirs = new Set<string>();
+  const dirChildren = new Map<string, WorkFile[]>();
+  const dirLoaded = new Set<string>();
   let selectedFile = "";
   let filesTimer = 0;
   let filesKey = "";
@@ -386,31 +420,82 @@ function boot(host: HTMLElement): void {
     const dir = must<HTMLInputElement>("#set-cwd").value.trim();
     const box = must<HTMLElement>("#workdir-files");
     if (!dir) {
-      lastFiles = [];
+      rootFiles = [];
+      treeRoot = "";
+      openDirs.clear();
+      dirChildren.clear();
+      dirLoaded.clear();
       filesKey = "";
       box.textContent = "Chưa chọn thư mục.";
       return;
     }
+    if (dir !== treeRoot) {
+      treeRoot = dir;
+      openDirs.clear();
+      dirChildren.clear();
+      dirLoaded.clear();
+    }
     try {
-      const listed = await window.lan.listWorkFiles(dir);
+      const listed = await window.lan.listWorkFiles(dir, dir);
       if (must<HTMLInputElement>("#set-cwd").value.trim() !== dir) return;
       if (!listed.found) {
-        lastFiles = [];
+        rootFiles = [];
         filesKey = "";
         box.textContent = "Không thấy thư mục này.";
         return;
       }
-      lastFiles = listed.files;
-      paintFileList(listed.files);
+      rootFiles = listed.files;
+      for (const folder of [...openDirs]) {
+        if (!underRoot(dir, folder)) {
+          openDirs.delete(folder);
+          dirChildren.delete(folder);
+          dirLoaded.delete(folder);
+          continue;
+        }
+        const child = await window.lan.listWorkFiles(folder, dir);
+        if (must<HTMLInputElement>("#set-cwd").value.trim() !== dir) return;
+        if (!child.found) {
+          openDirs.delete(folder);
+          dirChildren.delete(folder);
+          dirLoaded.delete(folder);
+          continue;
+        }
+        dirChildren.set(folder, child.files);
+        dirLoaded.add(folder);
+      }
+      paintFileTree();
     } catch (err) {
       box.textContent = messageOf(err);
     }
   }
 
-  function paintFileList(files: WorkFile[]): void {
+  async function toggleDir(folder: string): Promise<void> {
+    if (openDirs.has(folder)) {
+      openDirs.delete(folder);
+      paintFileTree();
+      return;
+    }
+    openDirs.add(folder);
+    paintFileTree();
+    const root = treeRoot;
+    const listed = await window.lan.listWorkFiles(folder, root);
+    if (treeRoot !== root || !openDirs.has(folder)) return;
+    if (!listed.found) {
+      openDirs.delete(folder);
+      dirChildren.delete(folder);
+      dirLoaded.delete(folder);
+    } else {
+      dirChildren.set(folder, listed.files);
+      dirLoaded.add(folder);
+    }
+    paintFileTree();
+  }
+
+  function paintFileTree(): void {
     const box = must<HTMLElement>("#workdir-files");
-    const key = files.map((file) => `${file.path}:${file.size}`).join("|");
-    if (key === filesKey && box.querySelector("[data-file]")) {
+    const rows = treeRows(rootFiles, 0);
+    const key = rows.map((row) => `${row.depth}:${row.file?.path ?? row.label}:${row.file?.size ?? 0}:${row.file && openDirs.has(row.file.path) ? 1 : 0}`).join("|");
+    if (key === filesKey && box.querySelector("[data-file], [data-note]")) {
       for (const button of Array.from(box.querySelectorAll<HTMLButtonElement>("[data-file]"))) {
         button.classList.toggle("active", button.dataset.file === selectedFile);
       }
@@ -418,26 +503,79 @@ function boot(host: HTMLElement): void {
     }
     filesKey = key;
     box.replaceChildren();
-    if (!files.length) {
-      box.textContent = "Thư mục chưa có file.";
+    if (!rows.length) {
+      box.textContent = "Thư mục trống.";
       return;
     }
-    for (const file of files) {
+    for (const row of rows) {
+      if (!row.file) {
+        const note = document.createElement("p");
+        note.className = "hint tree-note";
+        note.dataset.note = "1";
+        note.style.paddingLeft = `${12 + row.depth * 14}px`;
+        note.textContent = row.label;
+        box.append(note);
+        continue;
+      }
+      const file = row.file;
+      const open = file.dir && openDirs.has(file.path);
       const button = document.createElement("button");
       button.type = "button";
-      button.className = `workdir-file${file.path === selectedFile ? " active" : ""}`;
+      button.className = `workdir-file${file.dir ? " dir" : ""}${file.path === selectedFile ? " active" : ""}`;
+      button.style.paddingLeft = `${8 + row.depth * 14}px`;
       button.dataset.file = file.path;
       button.dataset.name = file.name;
+      button.dataset.dir = file.dir ? "1" : "";
       button.dataset.preview = file.preview ?? "";
-      button.dataset.tip = file.preview ? `Xem ${file.name}` : `${file.name} — chưa xem trước được`;
+      button.dataset.tip = file.dir ? (open ? `Thu gọn ${file.name}` : `Mở ${file.name}`) : file.preview ? `Xem ${file.name}` : `${file.name} — chưa xem trước được`;
       button.setAttribute("aria-label", file.name);
+      const main = document.createElement("span");
+      main.className = "tree-main";
+      const twist = document.createElement("span");
+      twist.className = "twist";
+      twist.textContent = file.dir ? (open ? "▾" : "▸") : "";
+      const kind = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      kind.setAttribute("class", "icon tree-kind");
+      kind.setAttribute("aria-hidden", "true");
+      const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+      use.setAttribute("href", file.dir ? "#i-folder" : "#i-file");
+      kind.append(use);
       const name = document.createElement("span");
+      name.className = "tree-name";
       name.textContent = file.name;
-      const meta = document.createElement("small");
-      meta.textContent = `${kindLabel(file.preview)} · ${formatFileSize(file.size)}`;
-      button.append(name, meta);
+      main.append(twist, kind, name);
+      button.append(main);
+      if (!file.dir) {
+        const meta = document.createElement("small");
+        meta.textContent = `${kindLabel(file.preview)} · ${formatFileSize(file.size)}`;
+        button.append(meta);
+      }
       box.append(button);
     }
+  }
+
+  function underRoot(root: string, target: string): boolean {
+    const base = root.replace(/[\\/]+$/, "");
+    const full = target.replace(/[\\/]+$/, "");
+    if (full.toLowerCase() === base.toLowerCase()) return true;
+    const slash = base.includes("\\") ? "\\" : "/";
+    return full.toLowerCase().startsWith(`${base.toLowerCase()}${slash}`);
+  }
+
+  function treeRows(files: WorkFile[], depth: number): { file: WorkFile | null; depth: number; label: string }[] {
+    const rows: { file: WorkFile | null; depth: number; label: string }[] = [];
+    for (const file of files) {
+      rows.push({ file, depth, label: file.name });
+      if (!file.dir || !openDirs.has(file.path)) continue;
+      if (!dirLoaded.has(file.path)) {
+        rows.push({ file: null, depth: depth + 1, label: "Đang mở…" });
+        continue;
+      }
+      const nested = dirChildren.get(file.path) ?? [];
+      if (!nested.length) rows.push({ file: null, depth: depth + 1, label: "Thư mục trống" });
+      else rows.push(...treeRows(nested, depth + 1));
+    }
+    return rows;
   }
 
   must<HTMLButtonElement>("#pick-cwd").addEventListener("click", () => {
@@ -454,14 +592,42 @@ function boot(host: HTMLElement): void {
   must<HTMLElement>("#workdir-files").addEventListener("click", (event) => {
     const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-file]");
     if (!button?.dataset.file) return;
+    if (button.dataset.dir === "1") {
+      void guard(() => toggleDir(button.dataset.file || ""));
+      return;
+    }
     const kind = button.dataset.preview;
     if (kind !== "image" && kind !== "html" && kind !== "markdown" && kind !== "audio" && kind !== "video") {
       flash("Loại file này chưa xem trước được.");
       return;
     }
     selectedFile = button.dataset.file;
-    paintFileList(lastFiles);
+    paintFileTree();
     showDock({ name: button.dataset.name || button.dataset.file, path: button.dataset.file, preview: kind });
+  });
+  for (const [buttonId, inputId] of [
+    ["#pick-claude-skill", "#set-claude-skill"],
+    ["#pick-cursor-skill", "#set-cursor-skill"],
+    ["#pick-codex-skill", "#set-codex-skill"],
+  ] as const) {
+    must<HTMLButtonElement>(buttonId).addEventListener("click", () => {
+      void guard(async () => {
+        const picked = await window.lan.pickCwd();
+        if (picked) must<HTMLInputElement>(inputId).value = picked;
+      });
+    });
+  }
+  must<HTMLInputElement>("#set-confine").addEventListener("change", () => {
+    void guard(async () => {
+      await window.lan.saveSettings(readSettings());
+      flash(must<HTMLInputElement>("#set-confine").checked ? "Đã bật giới hạn thư mục làm việc" : "Đã tắt giới hạn thư mục làm việc");
+    });
+  });
+  must<HTMLButtonElement>("#save-dirs").addEventListener("click", () => {
+    void guard(async () => {
+      await window.lan.saveSettings(readSettings());
+      flash("Đã lưu thư mục làm việc và skill");
+    });
   });
   window.setInterval(() => void refreshFiles(), 4000);
 
@@ -725,6 +891,46 @@ function boot(host: HTMLElement): void {
     }
   }
 
+  let composerTimer = 0;
+  const remoteReplyAt = new Map<string, number>();
+
+  function composerWait(lines: ChatLine[], peerIds: string[], sessionId: string, activity: Record<string, PeerActivity>): { locked: boolean; stop: boolean } {
+    const pending = lines.find((line) => line.kind === "agent" && line.pending);
+    const remoteIds = peerIds.filter((id) => {
+      const item = activity[id];
+      return Boolean(item?.replying && (!item.replyingSessionId || item.replyingSessionId === sessionId));
+    });
+    const remoteKey = `${sessionId}|${[...remoteIds].sort().join(",")}`;
+    if (!remoteIds.length) {
+      for (const key of remoteReplyAt.keys()) {
+        if (key.startsWith(`${sessionId}|`)) remoteReplyAt.delete(key);
+      }
+    } else if (!remoteReplyAt.has(remoteKey)) remoteReplyAt.set(remoteKey, Date.now());
+    const stamps = [pending?.createdAt ?? 0, remoteIds.length ? remoteReplyAt.get(remoteKey) ?? 0 : 0].filter((value) => value > 0);
+    const since = stamps.length ? Math.min(...stamps) : 0;
+    const age = since ? Date.now() - since : 0;
+    const waiting = Boolean(pending || remoteIds.length);
+    const locked = waiting && age < REPLY_WAIT_MS;
+    window.clearTimeout(composerTimer);
+    if (locked && since) {
+      composerTimer = window.setTimeout(() => {
+        if (state) paint(state);
+      }, Math.max(0, REPLY_WAIT_MS - age) + 40);
+    }
+    return { locked, stop: waiting };
+  }
+
+  function setComposer(locked: boolean, canSend: boolean, placeholder: string, stop: boolean): void {
+    draft.disabled = locked;
+    draft.placeholder = locked ? "Đang đợi agent trả lời…" : placeholder;
+    must<HTMLButtonElement>("#attach").disabled = locked || !canSend;
+    must<HTMLButtonElement>("#send").disabled = locked || !canSend;
+    must<HTMLButtonElement>("#send-file").disabled = locked || !canSend;
+    must<HTMLButtonElement>("#stop").disabled = !stop;
+    must<HTMLElement>("#mention-pop").hidden = locked || must<HTMLElement>("#mention-pop").hidden;
+    must<HTMLFormElement>("#composer").classList.toggle("waiting", locked);
+  }
+
   function paintChat(next: AppState): void {
     const group = active ? next.groups.find((item) => groupKey(item.id) === active) ?? null : null;
     if (group && active) {
@@ -791,14 +997,9 @@ function boot(host: HTMLElement): void {
       hit?.scrollIntoView({ block: "center" });
     }
     const canSend = connected || Boolean(peer.token);
-    must<HTMLButtonElement>("#send").disabled = !canSend;
-    must<HTMLButtonElement>("#send-file").disabled = !canSend;
-    const replyingSomewhere = next.sessions
-      .filter((item) => item.peerId === active)
-      .some((item) => (next.transcripts[item.id] ?? []).some((line) => line.pending));
-    must<HTMLButtonElement>("#stop").disabled = !replyingSomewhere;
+    const waiting = composerWait(lines, [peer.peerId], sessionId, next.activity);
+    setComposer(waiting.locked, canSend, "Nhắn cho agent máy kia. Gõ @ để gọi máy, @me là agent máy này…", waiting.stop);
     paintBrief(sessionId, next.briefs[sessionId], lines, connected, "");
-    draft.placeholder = "Nhắn cho agent máy kia. Gõ @ để gọi máy, @me là agent máy này…";
     must<HTMLInputElement>("#brief-topic").placeholder = "Việc hai agent cần bàn";
     const snippet = peer.token
       ? [
@@ -890,14 +1091,12 @@ function boot(host: HTMLElement): void {
       focusLine = "";
       hit?.scrollIntoView({ block: "center" });
     }
-    must<HTMLButtonElement>("#send").disabled = !linked;
-    must<HTMLButtonElement>("#send-file").disabled = !linked;
     must<HTMLButtonElement>("#new-session").disabled = true;
-    const replyingSomewhere = lines.some((line) => line.pending);
-    must<HTMLButtonElement>("#stop").disabled = !replyingSomewhere;
+    const others = group.members.filter((member) => member.peerId !== next.self.peerId).map((member) => member.peerId);
+    const waiting = composerWait(lines, others, sessionId, next.activity);
+    setComposer(waiting.locked, linked, "Nhắn trong nhóm. Gõ @ để gọi agent, @me là máy này…", waiting.stop);
     paintBrief(sessionId, next.briefs[sessionId], lines, linked, turnName);
     paintGroupBar(next, group);
-    draft.placeholder = "Nhắn trong nhóm. Gõ @ để gọi agent, @me là máy này…";
     const topic = must<HTMLInputElement>("#brief-topic");
     topic.placeholder = "Chủ đề chung. Gõ @tên hoặc @me nếu chỉ muốn vài agent nói";
   }
@@ -1164,6 +1363,10 @@ function boot(host: HTMLElement): void {
     must<HTMLInputElement>("#set-cursor-command").value = settings.cursorCommand;
     must<HTMLInputElement>("#set-codex-command").value = settings.codexCommand;
     must<HTMLInputElement>("#set-cwd").value = settings.workDir;
+    must<HTMLInputElement>("#set-claude-skill").value = settings.claudeSkillDir;
+    must<HTMLInputElement>("#set-cursor-skill").value = settings.cursorSkillDir;
+    must<HTMLInputElement>("#set-codex-skill").value = settings.codexSkillDir;
+    must<HTMLInputElement>("#set-confine").checked = settings.confineWorkDir;
     must<HTMLInputElement>("#set-auto").checked = settings.autoAccept;
     settingsReady = true;
     void refreshFiles();
@@ -1178,6 +1381,10 @@ function boot(host: HTMLElement): void {
       claudeCommand: must<HTMLInputElement>("#set-claude-command").value,
       cursorCommand: must<HTMLInputElement>("#set-cursor-command").value,
       codexCommand: must<HTMLInputElement>("#set-codex-command").value,
+      claudeSkillDir: must<HTMLInputElement>("#set-claude-skill").value,
+      cursorSkillDir: must<HTMLInputElement>("#set-cursor-skill").value,
+      codexSkillDir: must<HTMLInputElement>("#set-codex-skill").value,
+      confineWorkDir: must<HTMLInputElement>("#set-confine").checked,
       autoAccept: must<HTMLInputElement>("#set-auto").checked,
     };
   }
@@ -1229,7 +1436,7 @@ function boot(host: HTMLElement): void {
   });
 
   async function sendDraft(): Promise<void> {
-    if (!active) return;
+    if (!active || draft.disabled) return;
     const text = draft.value;
     const file = attached;
     if (!text.trim() && !file) return;

@@ -3,7 +3,7 @@ import { app, BrowserWindow, dialog, ipcMain, Notification, screen, shell, type 
 import { BRIEF_EXTEND } from "../shared/brief";
 import { IPC, type ChatNotice, type FileRef, type Settings } from "../shared/types";
 import { fileRef } from "../shared/preview";
-import { listWorkFiles } from "./files";
+import { insideDir, listWorkFiles } from "./files";
 import { AppCore } from "./core";
 import { allowPreview, attachPreviewProtocol, registerPreviewScheme } from "./preview";
 
@@ -292,9 +292,12 @@ if (!gotLock) {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.renameSession(String(peerId), String(sessionId), String(title ?? ""));
       });
-      ipcMain.handle(IPC.listWorkFiles, async (_event, dir: string) => {
+      ipcMain.handle(IPC.listWorkFiles, async (_event, dir: string, root?: string) => {
         if (typeof dir !== "string" || !dir.trim()) return { found: false, files: [] };
-        const listed = await listWorkFiles(dir);
+        const base = path.resolve(typeof root === "string" && root.trim() ? root : dir);
+        const target = path.resolve(dir);
+        if (!insideDir(base, target)) return { found: false, files: [] };
+        const listed = await listWorkFiles(target);
         for (const file of listed.files) {
           if (file.preview) allowPreview(file.path);
         }

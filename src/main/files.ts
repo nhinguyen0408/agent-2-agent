@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import type { Settings } from "../shared/types";
 import type { WorkFile } from "../shared/preview";
 import { previewKind } from "../shared/preview";
 
@@ -30,11 +31,69 @@ export function fileNameFromHeader(value: string | string[] | undefined): string
 export function resolveInside(workDir: string, requested: string): string {
   const root = path.resolve(workDir);
   const target = path.resolve(root, requested.trim());
-  const rel = path.relative(root, target);
-  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
-    throw new Error("File phải nằm trong thư mục làm việc.");
-  }
+  if (!insideDir(root, target)) throw new Error("File phải nằm trong thư mục làm việc.");
   return target;
+}
+
+export function insideDir(root: string, target: string): boolean {
+  const base = path.resolve(root);
+  const full = path.resolve(target);
+  const rel = path.relative(base, full);
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+export function configuredSkillDir(settings: Settings): string {
+  const raw =
+    settings.provider === "claude-cli"
+      ? settings.claudeSkillDir
+      : settings.provider === "cursor-cli"
+        ? settings.cursorSkillDir
+        : settings.provider === "codex-cli"
+          ? settings.codexSkillDir
+          : "";
+  return raw.trim();
+}
+
+export function skillIndex(dir: string): string {
+  const root = dir.trim();
+  if (!root) return "";
+  let entries: fs.Dirent[];
+  try {
+    if (!fs.statSync(root).isDirectory()) return "";
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return "";
+  }
+  const lines: string[] = [];
+  const folders = entries.filter((entry) => entry.isDirectory()).sort((a, b) => a.name.localeCompare(b.name, "vi"));
+  for (const folder of folders) {
+    if (lines.length >= 8) break;
+    const base = path.join(root, folder.name);
+    const skill = ["SKILL.md", "skill.md", "AGENTS.md"].map((name) => path.join(base, name)).find((file) => fs.existsSync(file));
+    if (!skill) continue;
+    const note = firstTextLine(skill);
+    lines.push(note ? `- ${folder.name}: ${base} — ${note}` : `- ${folder.name}: ${base}`);
+  }
+  const docs = entries
+    .filter((entry) => entry.isFile() && /\.(md|markdown)$/i.test(entry.name))
+    .sort((a, b) => a.name.localeCompare(b.name, "vi"));
+  for (const file of docs) {
+    if (lines.length >= 8) break;
+    const full = path.join(root, file.name);
+    const note = firstTextLine(full);
+    lines.push(note ? `- ${file.name}: ${full} — ${note}` : `- ${file.name}: ${full}`);
+  }
+  return lines.join("\n");
+}
+
+function firstTextLine(file: string): string {
+  try {
+    const text = fs.readFileSync(file, "utf8").slice(0, 2000);
+    const line = text.split(/\r?\n/).map((item) => item.replace(/^#+\s*/, "").trim()).find(Boolean) ?? "";
+    return line.slice(0, 80);
+  } catch {
+    return "";
+  }
 }
 
 export async function listWorkFiles(dir: string): Promise<{ found: boolean; files: WorkFile[] }> {
@@ -49,6 +108,10 @@ export async function listWorkFiles(dir: string): Promise<{ found: boolean; file
   }
   const files: WorkFile[] = [];
   for (const entry of entries) {
+    if (entry.isDirectory()) {
+      files.push({ name: entry.name, path: path.join(root, entry.name), preview: null, size: 0, dir: true });
+      continue;
+    }
     if (!entry.isFile()) continue;
     const full = path.join(root, entry.name);
     let size = 0;
@@ -57,11 +120,13 @@ export async function listWorkFiles(dir: string): Promise<{ found: boolean; file
     } catch {
       continue;
     }
-    files.push({ name: entry.name, path: full, preview: previewKind(entry.name), size });
-    if (files.length >= 300) break;
+    files.push({ name: entry.name, path: full, preview: previewKind(entry.name), size, dir: false });
   }
-  files.sort((a, b) => a.name.localeCompare(b.name, "vi"));
-  return { found: true, files };
+  files.sort((a, b) => {
+    if (a.dir !== b.dir) return a.dir ? -1 : 1;
+    return a.name.localeCompare(b.name, "vi");
+  });
+  return { found: true, files: files.slice(0, 300) };
 }
 
 export async function readFileLimited(filePath: string, maxBytes: number): Promise<Buffer> {

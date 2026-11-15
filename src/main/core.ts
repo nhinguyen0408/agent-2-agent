@@ -55,11 +55,11 @@ import type {
   WireGroupTurn,
   WireResume,
 } from "../shared/types";
-import { DEFAULT_PORT, PORT_SPAN } from "../shared/types";
+import { DEFAULT_PORT, PORT_SPAN, REPLY_WAIT_MS } from "../shared/types";
 import { AgentHost, CliResumeUnsupported, CliSessionLost, type ModelTurn } from "./agents";
 import { detectLocalClis, installedCliList, parseCliList } from "./cliDetect";
 import { Discovery, lanIPv4, normalizeIp } from "./discovery";
-import { briefFolder, fileNameFromHeader, formatBytes, MAX_FILE_BYTES, readFileLimited, resolveInside, safeFileName, saveExact, saveReceivedFile } from "./files";
+import { briefFolder, configuredSkillDir, fileNameFromHeader, formatBytes, MAX_FILE_BYTES, readFileLimited, resolveInside, safeFileName, saveExact, saveReceivedFile, skillIndex } from "./files";
 import { allowPreview } from "./preview";
 import { discussExcerpt, discussKind, isDiscussKind } from "../shared/discuss";
 import { fileRef, type FileRef } from "../shared/preview";
@@ -117,6 +117,7 @@ export class AppCore {
   private readonly remoteClis = new Map<string, string>();
   private readonly activity = new Map<string, PeerActivity>();
   private readonly activityTimers = new Map<string, NodeJS.Timeout>();
+  private readonly replyTimers = new Map<string, NodeJS.Timeout>();
   private readonly replySessions = new Map<string, string>();
   private readonly unread = new Set<string>();
   private readonly noticeAt = new Map<string, number>();
@@ -199,6 +200,8 @@ export class AppCore {
     if (this.cliTimer) clearInterval(this.cliTimer);
     for (const timer of this.activityTimers.values()) clearTimeout(timer);
     this.activityTimers.clear();
+    for (const timer of this.replyTimers.values()) clearTimeout(timer);
+    this.replyTimers.clear();
     for (const timer of this.deltaTimers.values()) clearTimeout(timer);
     this.deltaTimers.clear();
     this.discovery?.stop();
@@ -1017,7 +1020,7 @@ export class AppCore {
       sendJson(res, 400, { ok: false, error: "Thiếu đường dẫn file" });
       return;
     }
-    await this.sendFile(peerId, requested, false);
+    await this.sendFile(peerId, requested, !this.store.settings.confineWorkDir);
     sendJson(res, 200, { ok: true, name: path.basename(requested) });
   }
 
@@ -1196,6 +1199,11 @@ export class AppCore {
       }
       const controller = new AbortController();
       this.aborts.set(peerId, controller);
+      let timedOut = false;
+      const waitTimer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, REPLY_WAIT_MS);
       this.replySessions.set(peerId, bound);
       const id = randomUUID();
       const createdAt = Date.now();
@@ -1213,6 +1221,7 @@ export class AppCore {
       const room = groupId ? this.groupById(groupId) : undefined;
       try {
         const provider = this.store.settings.provider;
+        const skillDir = configuredSkillDir(this.store.settings);
         const ask = (resume: boolean) => {
           const link = resume ? this.cliLink(bound, provider) : undefined;
           return this.agents.reply({
@@ -1229,6 +1238,10 @@ export class AppCore {
             fileRelay: room ? undefined : { url: `http://127.0.0.1:${this.port}/relay-file/${peerId}` },
             readings: this.readings(bound),
             brief: this.promptBrief(bound),
+            workDir: this.store.settings.workDir,
+            confine: this.store.settings.confineWorkDir,
+            skillDir,
+            skills: skillIndex(skillDir),
             room: room
               ? { title: room.title, members: room.members.map((member) => this.memberRecord(member).name).join(", ") }
               : undefined,
@@ -1265,8 +1278,9 @@ export class AppCore {
           result = await ask(false);
         }
         const text = result.text;
+        clearTimeout(waitTimer);
         if ((this.epochs.get(peerId) ?? 0) !== epoch || controller.signal.aborted) {
-          this.finishAborted(bound, id);
+          this.finishAborted(bound, id, timedOut ? "Agent trả lời quá lâu, đã dừng. Bạn có thể nhắn tiếp." : "Đã dừng.");
           resolveOut("");
           return;
         }
@@ -1298,8 +1312,9 @@ export class AppCore {
         this.scheduleSave();
         resolveOut(text);
       } catch (err) {
+        clearTimeout(waitTimer);
         if (isAbort(err) || (this.epochs.get(peerId) ?? 0) !== epoch) {
-          this.finishAborted(bound, id);
+          this.finishAborted(bound, id, timedOut ? "Agent trả lời quá lâu, đã dừng. Bạn có thể nhắn tiếp." : "Đã dừng.");
           resolveOut("");
           return;
         }
@@ -1319,6 +1334,7 @@ export class AppCore {
         this.scheduleSave();
         resolveOut("");
       } finally {
+        clearTimeout(waitTimer);
         if (this.replySessions.get(peerId) === bound) this.replySessions.delete(peerId);
         this.notifyActivity(peerId, { replying: false, sessionId: bound });
         if (this.aborts.get(peerId) === controller) this.aborts.delete(peerId);
@@ -1664,6 +1680,7 @@ export class AppCore {
       const timer = this.activityTimers.get(peerId);
       if (timer) clearTimeout(timer);
       this.activityTimers.delete(peerId);
+      this.clearReplyTimer(peerId);
       this.advanceIfSpeakerLeft(peerId);
     }
     this.push();
@@ -2046,7 +2063,7 @@ export class AppCore {
     return undefined;
   }
 
-  private finishAborted(sessionId: string, id: string): void {
+  private finishAborted(sessionId: string, id: string, note = "Đã dừng."): void {
     const line = this.findLine(sessionId, id);
     if (!line) return;
     if (!line.text.trim()) {
@@ -2056,8 +2073,7 @@ export class AppCore {
       line.pending = false;
       line.text = `${line.text}\n(đã dừng)`;
     }
-    const note = this.makeLine(sessionId, this.store.peerId, this.store.settings.name, "system", "Đã dừng.");
-    this.appendLine(sessionId, note);
+    this.appendLine(sessionId, this.makeLine(sessionId, this.store.peerId, this.store.settings.name, "system", note));
   }
 
   notifyActivity(peerId: string, patch: ActivityPatch): void {
@@ -2079,6 +2095,7 @@ export class AppCore {
 
   private noteActivity(peerId: string, patch: ActivityPatch | undefined): void {
     const current = this.activity.get(peerId) ?? { typing: false, replying: false, typingSessionId: "", replyingSessionId: "" };
+    const startedReply = patch?.replying === true && !current.replying;
     const next: PeerActivity = {
       typing: typeof patch?.typing === "boolean" ? patch.typing : current.typing,
       replying: typeof patch?.replying === "boolean" ? patch.replying : current.replying,
@@ -2106,7 +2123,30 @@ export class AppCore {
       }, 2500);
       this.activityTimers.set(peerId, expire);
     }
+    if (startedReply) this.armReplyTimer(peerId);
+    else if (!next.replying) this.clearReplyTimer(peerId);
     this.push();
+  }
+
+  private armReplyTimer(peerId: string): void {
+    this.clearReplyTimer(peerId);
+    const timer = setTimeout(() => {
+      this.replyTimers.delete(peerId);
+      const live = this.activity.get(peerId);
+      if (!live?.replying) return;
+      live.replying = false;
+      live.replyingSessionId = "";
+      if (!live.typing) this.activity.delete(peerId);
+      this.push();
+    }, REPLY_WAIT_MS);
+    this.replyTimers.set(peerId, timer);
+  }
+
+  private clearReplyTimer(peerId: string): void {
+    const timer = this.replyTimers.get(peerId);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.replyTimers.delete(peerId);
   }
 
   private sendTo(peerId: string, event: string, payload: unknown): boolean {

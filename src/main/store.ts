@@ -37,6 +37,10 @@ export function defaultSettings(profile: string): Settings {
     claudeCommand: "claude",
     cursorCommand: "agent",
     codexCommand: "codex",
+    claudeSkillDir: "",
+    cursorSkillDir: "",
+    codexSkillDir: "",
+    confineWorkDir: true,
     autoAccept: false,
   };
 }
@@ -111,8 +115,16 @@ export function sanitizeSettings(input: Partial<Settings> & { cursorCwd?: string
     claudeCommand: (input.claudeCommand || "claude").trim() || "claude",
     cursorCommand: (input.cursorCommand || "agent").trim() || "agent",
     codexCommand: (input.codexCommand || "codex").trim() || "codex",
+    claudeSkillDir: cleanDir(input.claudeSkillDir),
+    cursorSkillDir: cleanDir(input.cursorSkillDir),
+    codexSkillDir: cleanDir(input.codexSkillDir),
+    confineWorkDir: input.confineWorkDir !== false,
     autoAccept: Boolean(input.autoAccept),
   };
+}
+
+function cleanDir(value: unknown): string {
+  return String(value ?? "").trim().slice(0, 260);
 }
 
 function sanitizeNicknames(input: unknown): Record<string, string> {

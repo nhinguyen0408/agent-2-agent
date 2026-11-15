@@ -8,6 +8,7 @@ export type { DiscussFile, DiscussKind } from "./discuss";
 export type { GroupMember, GroupRoom, MentionRef, TurnTicket } from "./group";
 export type { FileRef, WorkFile } from "./preview";
 
+export const REPLY_WAIT_MS = 180_000;
 export const DEFAULT_PORT = 3940;
 export const PORT_SPAN = 30;
 export const DISCOVERY_PORT = 41234;
@@ -79,6 +80,10 @@ export type Settings = {
   claudeCommand: string;
   cursorCommand: string;
   codexCommand: string;
+  claudeSkillDir: string;
+  cursorSkillDir: string;
+  codexSkillDir: string;
+  confineWorkDir: boolean;
   autoAccept: boolean;
 };
 
@@ -280,7 +285,7 @@ export type LanApi = {
   sendFile: (peerId: string) => Promise<string | null>;
   openPreview: () => Promise<FileRef | null>;
   showPreview: (file: FileRef) => Promise<boolean>;
-  listWorkFiles: (dir: string) => Promise<{ found: boolean; files: WorkFile[] }>;
+  listWorkFiles: (dir: string, root?: string) => Promise<{ found: boolean; files: WorkFile[] }>;
   createSession: (peerId: string) => Promise<AppState>;
   openSession: (peerId: string, sessionId: string) => Promise<AppState>;
   renameSession: (peerId: string, sessionId: string, title: string) => Promise<AppState>;

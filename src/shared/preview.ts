@@ -11,6 +11,7 @@ export type WorkFile = {
   path: string;
   preview: PreviewKind | null;
   size: number;
+  dir: boolean;
 };
 
 const KINDS: Record<string, PreviewKind> = {
