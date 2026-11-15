@@ -1,7 +1,7 @@
 import { BRIEF_FILE_MAX, BRIEF_TURN_MAX, resultText, type BriefFile, type ProjectBrief } from "../shared/brief";
 import { GROUP_MAX, groupKey, mentionRanges, parseGroupKey, rewriteMentionLabels, type GroupMember, type GroupRoom, type MentionRef } from "../shared/group";
 import type { AppState, ChatLine, ChatNotice, CliReport, CliToolState, FileRef, PeerActivity, PeerView, Settings, WorkFile } from "../shared/types";
-import { providerLabel } from "../shared/types";
+import { cliClientLabel, providerLabel } from "../shared/types";
 import { fileRef, type PreviewKind } from "../shared/preview";
 import { previewSrc, renderMarkdownHtml, renderPreview } from "./previewView";
 
@@ -781,7 +781,7 @@ function boot(host: HTMLElement): void {
     const nameInput = must<HTMLInputElement>("#session-title");
     nameInput.disabled = !session;
     if (document.activeElement !== nameInput) nameInput.value = session?.title ?? "";
-    must<HTMLElement>("#chat-status").textContent = [providerLabel(peer.provider), where, peerCliNote(peer.clis), statusText(peer)]
+    must<HTMLElement>("#chat-status").textContent = [providerLabel(peer.provider), where, peerCliNote(peer.clis), sessionLinkNote(next, session), statusText(peer)]
       .filter(Boolean)
       .join(" · ");
     paintMessages(messagesEl, lines, next.self.peerId, nearBottom(messagesEl), historyQuery);
@@ -875,10 +875,12 @@ function boot(host: HTMLElement): void {
     if (document.activeElement !== nameInput) nameInput.value = group.title;
     const turnMember = group.turn ? group.members.find((member) => member.peerId === group.turn?.speakerId) : undefined;
     const turnName = turnMember ? displayName(next, turnMember.peerId, turnMember.name) : "";
+    const groupSession = next.sessions.find((item) => item.id === sessionId);
     must<HTMLElement>("#chat-status").textContent = [
       `${group.members.length}/${GROUP_MAX} máy`,
       host ? "Bạn tạo nhóm" : "Máy khác tạo nhóm",
       turnName ? `Đến lượt ${turnName}` : "",
+      sessionLinkNote(next, groupSession),
     ]
       .filter(Boolean)
       .join(" · ");
@@ -1291,7 +1293,8 @@ function boot(host: HTMLElement): void {
       const meta = document.createElement("small");
       const when = new Date(row.session.updatedAt).toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" });
       const preview = shownMentionText(row.matched?.text || row.last?.text || "").replace(/\s+/g, " ").trim().slice(0, 72);
-      meta.textContent = `${row.lines.length} dòng · ${when}${preview ? ` · ${preview}` : ""}`;
+      const client = linkedClient(next, row.session);
+      meta.textContent = `${client ? `${client} · ` : ""}${row.lines.length} dòng · ${when}${preview ? ` · ${preview}` : ""}`;
       open.append(title, meta);
       const edit = document.createElement("button");
       edit.type = "button";
@@ -1348,11 +1351,7 @@ function boot(host: HTMLElement): void {
     if (!sessionId) return;
     const groupId = parseGroupKey(peerId);
     const host = groupId ? current.groups.some((group) => group.id === groupId && group.hostId === current.self.peerId) : false;
-    const message = groupId
-      ? host
-        ? "Xóa hội thoại của cả nhóm?"
-        : "Xóa hội thoại nhóm trên máy này?"
-      : "Xóa phiên hội thoại này trên máy này?";
+    const message = deletePrompt(current, peerId, sessionId, Boolean(groupId), host);
     if (!window.confirm(message)) return;
     void guard(() => window.lan.deleteSession(peerId, sessionId));
   });
@@ -1372,11 +1371,7 @@ function boot(host: HTMLElement): void {
       const groupId = parseGroupKey(peerId);
       const current = state;
       const host = Boolean(groupId && current?.groups.some((group) => group.id === groupId && group.hostId === current.self.peerId));
-      const message = groupId
-        ? host
-          ? "Xóa hội thoại của cả nhóm?"
-          : "Xóa hội thoại nhóm trên máy này?"
-        : "Xóa phiên hội thoại này trên máy này?";
+      const message = current ? deletePrompt(current, peerId, sessionId, Boolean(groupId), host) : "Xóa phiên hội thoại này trên máy này?";
       if (!window.confirm(message)) return;
       void guard(() => window.lan.deleteSession(peerId, sessionId));
       return;
@@ -1832,6 +1827,29 @@ function peerCliNote(clis: string | undefined): string {
     .map((id) => (id === "claude" ? "Claude CLI" : id === "cursor" ? "Cursor CLI" : id === "codex" ? "Codex" : ""))
     .filter(Boolean);
   return names.length ? `có ${names.join(", ")}` : "";
+}
+
+function linkedClient(state: AppState, session: { cli?: AppState["sessions"][number]["cli"] } | undefined): string {
+  const provider = state.self.provider;
+  if (!session || provider === "echo") return "";
+  const link = session.cli?.[provider];
+  if (!link?.id) return "";
+  return cliClientLabel(provider);
+}
+
+function sessionLinkNote(state: AppState, session: { cli?: AppState["sessions"][number]["cli"] } | undefined): string {
+  const client = linkedClient(state, session);
+  return client ? `cùng phiên ${client}` : "";
+}
+
+function deletePrompt(state: AppState, peerId: string, sessionId: string, group: boolean, host: boolean): string {
+  const session = state.sessions.find((item) => item.id === sessionId && item.peerId === peerId);
+  const linked = Boolean(linkedClient(state, session));
+  if (group) {
+    const base = host ? "Xóa hội thoại của cả nhóm?" : "Xóa hội thoại nhóm trên máy này?";
+    return linked ? `${base} Phiên trong client vẫn giữ để bạn mở lại.` : base;
+  }
+  return linked ? "Xóa phiên này trong LAN Agents? Phiên trong client vẫn giữ để bạn mở lại." : "Xóa phiên hội thoại này trên máy này?";
 }
 
 function statusText(peer: PeerView): string {

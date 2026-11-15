@@ -5,7 +5,7 @@ import path from "node:path";
 import { app } from "electron";
 import { sanitizeBrief, type ProjectBrief } from "../shared/brief";
 import { sanitizeMembers, type GroupRoom } from "../shared/group";
-import type { ChatLine, ChatSession, Settings } from "../shared/types";
+import type { ChatLine, ChatSession, CliLinks, Settings } from "../shared/types";
 import { normalizeProvider } from "../shared/types";
 
 export type TrustedPeer = {
@@ -145,7 +145,7 @@ function migrateHistory(disk: Disk | null): {
   const raw = disk?.transcripts ?? {};
   if (disk?.sessions) {
     return {
-      sessions: disk.sessions,
+      sessions: sanitizeSessionMap(disk.sessions),
       openSessions: disk.openSessions ?? {},
       transcripts: raw,
     };
@@ -165,6 +165,35 @@ function migrateHistory(disk: Disk | null): {
     openSessions[peerId] = id;
   }
   return { sessions, openSessions, transcripts };
+}
+
+function sanitizeSessionMap(raw: Record<string, ChatSession[]>): Record<string, ChatSession[]> {
+  const sessions: Record<string, ChatSession[]> = {};
+  for (const [peerId, list] of Object.entries(raw)) {
+    if (!Array.isArray(list)) continue;
+    sessions[peerId] = list.map((session) => {
+      const cli = sanitizeCli(session?.cli);
+      const next = { ...session };
+      if (cli) next.cli = cli;
+      else delete next.cli;
+      return next;
+    });
+  }
+  return sessions;
+}
+
+function sanitizeCli(input: unknown): CliLinks | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const links: CliLinks = {};
+  for (const provider of ["claude-cli", "cursor-cli", "codex-cli"] as const) {
+    const raw = (input as Record<string, unknown>)[provider];
+    if (!raw || typeof raw !== "object") continue;
+    const id = String((raw as { id?: unknown }).id ?? "").trim();
+    const syncedLineId = String((raw as { syncedLineId?: unknown }).syncedLineId ?? "").trim();
+    if (!id || id.length > 80 || syncedLineId.length > 80) continue;
+    links[provider] = { id, syncedLineId };
+  }
+  return Object.keys(links).length ? links : undefined;
 }
 
 function sanitizeGroups(raw: GroupRoom[] | undefined): GroupRoom[] {

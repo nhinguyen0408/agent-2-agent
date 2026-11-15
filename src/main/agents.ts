@@ -1,8 +1,9 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { Settings } from "../shared/types";
+import type { ProviderId, Settings } from "../shared/types";
 import { findExecutable } from "./cliDetect";
 
 export type ModelTurn = { role: "user" | "assistant" | "note"; text: string; speaker?: string };
@@ -19,17 +20,47 @@ export type ReplyInput = {
   brief?: { topic: string; goal: string; turn: number; limit: number; last: boolean };
   room?: { title: string; members: string };
   together?: string;
+  resume?: boolean;
+  sessionId?: string;
+  sessionTitle?: string;
 };
+
+export type AgentResult = { text: string; sessionId: string };
+
+type SessionBind = { id: string; resume: boolean; kind: "claude" | "cursor" | "codex" };
+
+export class CliSessionLost extends Error {
+  constructor() {
+    super("Phiên CLI không còn");
+    this.name = "CliSessionLost";
+  }
+}
+
+export class CliResumeUnsupported extends Error {
+  constructor() {
+    super("CLI chưa nhận cờ nối lại phiên");
+    this.name = "CliResumeUnsupported";
+  }
+}
 
 export class AgentHost {
   private readonly running = new Map<string, ChildProcess>();
+  private readonly resumeOff = new Set<string>();
 
   constructor(private readonly settings: () => Settings) {}
 
-  async reply(input: ReplyInput): Promise<string> {
+  resumes(provider: ProviderId): boolean {
+    return provider !== "echo" && !this.resumeOff.has(provider);
+  }
+
+  disableResume(provider: ProviderId): void {
+    if (provider !== "echo") this.resumeOff.add(provider);
+  }
+
+  async reply(input: ReplyInput): Promise<AgentResult> {
     if (input.signal.aborted) throw abortError();
     const settings = this.settings();
-    if (settings.provider === "echo") return echoReply(input);
+    if (settings.provider === "echo") return { text: await echoReply(input), sessionId: "" };
     if (settings.provider === "claude-cli") return this.claudeCli(input, settings);
     if (settings.provider === "codex-cli") return this.codexCli(input, settings);
     return this.cursorCli(input, settings);
@@ -47,12 +78,14 @@ export class AgentHost {
     killChild(child);
   }
 
-  private claudeCli(input: ReplyInput, settings: Settings): Promise<string> {
+  private claudeCli(input: ReplyInput, settings: Settings): Promise<AgentResult> {
     const prompt = oneLine(conversationPrompt(input));
+    const resume = Boolean(input.resume && input.sessionId);
     return this.runCli(input, {
       command: settings.claudeCommand || "claude",
       cwd: settings.workDir,
       missing: "Không tìm thấy lệnh claude. Cài Claude Code, rồi chạy `claude auth login` một lần trên máy này.",
+      session: { id: resume ? input.sessionId || "" : randomUUID(), resume, kind: "claude" },
       attempts: [
         ["-p", prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-mode", "bypassPermissions"],
         ["-p", prompt, "--output-format", "text", "--permission-mode", "bypassPermissions"],
@@ -61,12 +94,14 @@ export class AgentHost {
     });
   }
 
-  private cursorCli(input: ReplyInput, settings: Settings): Promise<string> {
+  private cursorCli(input: ReplyInput, settings: Settings): Promise<AgentResult> {
     const prompt = clip(conversationPrompt(input), 12000);
+    const resume = Boolean(input.resume && input.sessionId);
     return this.runCli(input, {
       command: settings.cursorCommand || "agent",
       cwd: settings.workDir,
       missing: "Không tìm thấy lệnh agent. Cài Cursor CLI, rồi chạy `agent login` một lần trên máy này.",
+      session: { id: input.sessionId || "", resume, kind: "cursor" },
       attempts: [
         ["-p", "--trust", "--force", "--output-format", "stream-json", "--stream-partial-output", prompt],
         ["-p", "--trust", "--force", prompt],
@@ -75,13 +110,15 @@ export class AgentHost {
     });
   }
 
-  private codexCli(input: ReplyInput, settings: Settings): Promise<string> {
+  private codexCli(input: ReplyInput, settings: Settings): Promise<AgentResult> {
     const prompt = oneLine(conversationPrompt(input), 4500);
     const cwd = settings.workDir;
+    const resume = Boolean(input.resume && input.sessionId);
     return this.runCli(input, {
       command: settings.codexCommand || "codex",
       cwd,
       missing: "Không tìm thấy lệnh codex. Cài Codex CLI, rồi chạy `codex login` một lần trên máy này.",
+      session: { id: input.sessionId || "", resume, kind: "codex" },
       attempts: [
         ["exec", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "--cd", cwd, prompt],
         ["exec", "--json", "--skip-git-repo-check", "--sandbox", "danger-full-access", "--cd", cwd, prompt],
@@ -92,11 +129,11 @@ export class AgentHost {
 
   private runCli(
     input: ReplyInput,
-    spec: { command: string; cwd: string; missing: string; attempts: string[][] },
-  ): Promise<string> {
+    spec: { command: string; cwd: string; missing: string; attempts: string[][]; session?: SessionBind },
+  ): Promise<AgentResult> {
     if (!fs.existsSync(spec.cwd)) throw new Error(`Thư mục làm việc không tồn tại: ${spec.cwd}`);
     const command = resolveCommand(spec.command);
-    return this.spawnAttempt(input, command, spec.cwd, spec.attempts, 0, spec.missing);
+    return this.spawnAttempt(input, command, spec.cwd, spec.attempts, 0, spec.missing, spec.session, true);
   }
 
   private spawnAttempt(
@@ -106,9 +143,12 @@ export class AgentHost {
     attempts: string[][],
     index: number,
     missing: string,
-  ): Promise<string> {
-    const args = attempts[index];
-    if (!args) return Promise.reject(new Error(missing));
+    session: SessionBind | undefined,
+    useSession: boolean,
+  ): Promise<AgentResult> {
+    const raw = attempts[index];
+    if (!raw) return Promise.reject(new Error(missing));
+    const args = useSession ? bindArgs(raw, session) : raw;
     return new Promise((resolve, reject) => {
       let child: ChildProcess;
       try {
@@ -123,6 +163,7 @@ export class AgentHost {
       let lineBuf = "";
       let streamed = "";
       let finalText = "";
+      let capturedSession = "";
       const onAbort = () => killChild(child);
       if (input.signal.aborted) onAbort();
       input.signal.addEventListener("abort", onAbort, { once: true });
@@ -131,6 +172,8 @@ export class AgentHost {
       child.stdout?.on("data", (chunk: string) => {
         stdout += chunk;
         lineBuf = consumeLines(lineBuf, chunk, (event) => {
+          const found = sessionIdOf(event);
+          if (found) capturedSession = found;
           const codex = codexAgentText(event);
           if (codex) {
             finalText = codex;
@@ -174,16 +217,31 @@ export class AgentHost {
         const text = (finalText || streamed || plainText(stdout)).trim();
         if (code === 0 && text) {
           if (!streamed && !finalText) input.onDelta(text);
-          resolve(text);
+          const sessionId = capturedSession || (useSession && session?.id ? session.id : "");
+          resolve({ text, sessionId });
           return;
         }
+        const detail = `${stderr}\n${stdout}`;
         const badFlag = /unknown (?:option|flag|argument)|unrecognized option|unexpected argument/i.test(stderr);
-        if (badFlag && index + 1 < attempts.length) {
-          this.spawnAttempt(input, command, cwd, attempts, index + 1, missing).then(resolve, reject);
+        const sessionFlag = /resume|session-id|session_id/i.test(stderr);
+        if (badFlag && useSession && session?.resume && sessionFlag) {
+          reject(new CliResumeUnsupported());
           return;
         }
-        const detail = stderr.trim() || stdout.trim();
-        reject(new Error(detail || `Lệnh thoát với mã ${code ?? "?"}. ${missing}`));
+        if (useSession && session?.resume && isLostSession(detail, session.id, streamed)) {
+          reject(new CliSessionLost());
+          return;
+        }
+        if (badFlag && useSession && sessionFlag) {
+          this.spawnAttempt(input, command, cwd, attempts, index, missing, session, false).then(resolve, reject);
+          return;
+        }
+        if (badFlag && index + 1 < attempts.length) {
+          this.spawnAttempt(input, command, cwd, attempts, index + 1, missing, session, useSession).then(resolve, reject);
+          return;
+        }
+        const message = stderr.trim() || stdout.trim();
+        reject(new Error(message || `Lệnh thoát với mã ${code ?? "?"}. ${missing}`));
       });
     });
   }
@@ -200,20 +258,9 @@ function clip(value: string, max: number): string {
 }
 
 function conversationPrompt(input: ReplyInput): string {
-  const transcript = input.history
-    .map((turn) => {
-      if (turn.role === "note") return turn.text;
-      const who = turn.speaker || (turn.role === "user" ? input.peerName : input.selfName);
-      return `${who}: ${turn.text}`;
-    })
-    .join("\n");
-  const readings = (input.readings ?? [])
-    .map((file) => {
-      const excerpt = file.excerpt?.trim().slice(0, 800);
-      return `- ${file.name} (${file.kind}): ${file.path}${excerpt ? `\n${excerpt}` : ""}`;
-    })
-    .join("\n");
-  return [
+  if (input.resume) return continuePrompt(input);
+  const title = input.sessionTitle?.replace(/\s+/g, " ").trim();
+  const body = [
     briefLead(input),
     input.room
       ? `Bạn là ${input.selfName}. Bạn đang trong nhóm "${input.room.title}" với ${input.room.members}. Đến lượt bạn. Các agent khác có lượt riêng, đừng nói hộ họ.`
@@ -228,19 +275,86 @@ function conversationPrompt(input: ReplyInput): string {
     `- Nếu ${input.peerName} nhờ một việc trên máy này, làm trong thư mục làm việc rồi nói kết quả. Lệnh và sửa file được tự chạy, không hỏi lại.`,
     "- Nếu đối phương chỉ trò chuyện, chỉ trả lời bằng lời. Không chạy lệnh và không sửa file. Riêng khi họ nhờ gửi file thì dùng đúng lệnh gửi file bên dưới.",
     "- Nếu có file trong hồ sơ hoặc file đính kèm, hãy đọc đúng file tại đường dẫn trên máy này. txt, md và csv có thể đã có đoạn trích; ảnh, pdf, docx và excel phải mở file khi đoạn trích trống hoặc chưa đủ. Không bịa phần chưa đọc được.",
-    input.fileRelay
-      ? `- Để gửi file cho ${input.peerName}, không copy sang ổ đĩa máy kia và không dùng đường UNC. File phải nằm trong thư mục làm việc. Chạy: curl.exe -s -H "Content-Type: text/plain; charset=utf-8" --data-binary "ĐƯỜNG_DẪN_ĐẦY_ĐỦ" ${input.fileRelay.url} . Khi kết quả có ok, file đã tới thư mục làm việc của ${input.peerName}.`
-      : "",
+    relayLine(input),
     "",
     "Hội thoại:",
-    transcript,
-    readings ? `\nFile context trên máy này:\n${readings}` : "",
+    formatHistory(input),
+    readingBlock(input),
     "",
     briefTail(input),
     `Hãy trả lời ${input.peerName}.`,
   ]
     .filter((part) => part !== "")
     .join("\n");
+  return title ? `Phiên: ${title}\n${body}` : body;
+}
+
+function continuePrompt(input: ReplyInput): string {
+  const pace = input.brief?.topic && !input.brief.last ? `Lượt ${input.brief.turn}/${input.brief.limit} của hồ sơ: ${input.brief.topic}` : "";
+  return [
+    formatHistory(input),
+    pace,
+    briefTail(input),
+    `Hãy trả lời ${input.peerName}. Chỉ viết nội dung sẽ gửi, cùng ngôn ngữ với tin trên.`,
+  ]
+    .filter((part) => part !== "")
+    .join("\n");
+}
+
+function formatHistory(input: ReplyInput): string {
+  return input.history
+    .map((turn) => {
+      if (turn.role === "note") return turn.text;
+      const who = turn.speaker || (turn.role === "user" ? input.peerName : input.selfName);
+      return `${who}: ${turn.text}`;
+    })
+    .join("\n");
+}
+
+function readingBlock(input: ReplyInput): string {
+  const readings = (input.readings ?? [])
+    .map((file) => {
+      const excerpt = file.excerpt?.trim().slice(0, 800);
+      return `- ${file.name} (${file.kind}): ${file.path}${excerpt ? `\n${excerpt}` : ""}`;
+    })
+    .join("\n");
+  return readings ? `File context trên máy này:\n${readings}` : "";
+}
+
+function relayLine(input: ReplyInput): string {
+  if (!input.fileRelay) return "";
+  return `- Để gửi file cho ${input.peerName}, không copy sang ổ đĩa máy kia và không dùng đường UNC. File phải nằm trong thư mục làm việc. Chạy: curl.exe -s -H "Content-Type: text/plain; charset=utf-8" --data-binary "ĐƯỜNG_DẪN_ĐẦY_ĐỦ" ${input.fileRelay.url} . Khi kết quả có ok, file đã tới thư mục làm việc của ${input.peerName}.`;
+}
+
+function bindArgs(args: string[], session: SessionBind | undefined): string[] {
+  if (!session?.id) return args;
+  if (session.kind === "claude") {
+    if (args[0] !== "-p" || args.length < 2) return args;
+    const flag = session.resume ? ["--resume", session.id] : ["--session-id", session.id];
+    return [args[0], args[1], ...flag, ...args.slice(2)];
+  }
+  if (!session.resume) return args;
+  const prompt = args[args.length - 1];
+  const head = args.slice(0, -1);
+  if (session.kind === "cursor") return [...head, `--resume=${session.id}`, prompt];
+  if (session.kind === "codex" && head[0] === "exec") return ["exec", "resume", ...head.slice(1), session.id, prompt];
+  return args;
+}
+
+function isLostSession(detail: string, sessionId: string, streamed: string): boolean {
+  if (streamed.trim()) return false;
+  if (sessionId && detail.includes(sessionId)) return true;
+  return /no conversation found|unable to resume|failed to resume|could not resume|cannot resume|unknown session|no session found|session does not exist|no rollout found|thread not found/i.test(detail);
+}
+
+function sessionIdOf(event: unknown): string {
+  if (!event || typeof event !== "object") return "";
+  const record = event as { session_id?: unknown; thread_id?: unknown; type?: unknown };
+  if (typeof record.session_id === "string" && record.session_id.trim()) return record.session_id.trim().slice(0, 80);
+  if (record.type === "thread.started" && typeof record.thread_id === "string" && record.thread_id.trim()) {
+    return record.thread_id.trim().slice(0, 80);
+  }
+  return "";
 }
 
 function briefLead(input: ReplyInput): string {

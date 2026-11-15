@@ -46,6 +46,7 @@ import type {
   LinkStatus,
   PeerActivity,
   PeerView,
+  ProviderId,
   Settings,
   WireBrief,
   WireChat,
@@ -55,7 +56,7 @@ import type {
   WireResume,
 } from "../shared/types";
 import { DEFAULT_PORT, PORT_SPAN } from "../shared/types";
-import { AgentHost, type ModelTurn } from "./agents";
+import { AgentHost, CliResumeUnsupported, CliSessionLost, type ModelTurn } from "./agents";
 import { detectLocalClis, installedCliList, parseCliList } from "./cliDetect";
 import { Discovery, lanIPv4, normalizeIp } from "./discovery";
 import { briefFolder, fileNameFromHeader, formatBytes, MAX_FILE_BYTES, readFileLimited, resolveInside, safeFileName, saveExact, saveReceivedFile } from "./files";
@@ -1211,32 +1212,59 @@ export class AppCore {
       this.notifyActivity(peerId, { replying: true, sessionId: bound });
       const room = groupId ? this.groupById(groupId) : undefined;
       try {
-        const text = await this.agents.reply({
-          peerId,
-          selfName: this.store.settings.name,
-          peerName: room
-            ? room.members
-                .filter((member) => member.peerId !== this.store.peerId)
-                .map((member) => member.name)
-                .join(", ") || "cả nhóm"
-            : this.endpoints.get(peerId)?.name || this.store.trusted[peerId]?.name || "máy kia",
-          history: this.modelHistory(bound),
-          signal: controller.signal,
-          fileRelay: room ? undefined : { url: `http://127.0.0.1:${this.port}/relay-file/${peerId}` },
-          readings: this.readings(bound),
-          brief: this.promptBrief(bound),
-          room: room
-            ? { title: room.title, members: room.members.map((member) => this.memberRecord(member).name).join(", ") }
-            : undefined,
-          together: room ? "cả nhóm" : undefined,
-          onDelta: (chunk) => {
-            if ((this.epochs.get(peerId) ?? 0) !== epoch) return;
-            const line = this.findLine(bound, id);
-            if (!line?.pending) return;
-            line.text += chunk;
-            this.scheduleDelta(peerId, bound, id);
-          },
-        });
+        const provider = this.store.settings.provider;
+        const ask = (resume: boolean) => {
+          const link = resume ? this.cliLink(bound, provider) : undefined;
+          return this.agents.reply({
+            peerId,
+            selfName: this.store.settings.name,
+            peerName: room
+              ? room.members
+                  .filter((member) => member.peerId !== this.store.peerId)
+                  .map((member) => member.name)
+                  .join(", ") || "cả nhóm"
+              : this.endpoints.get(peerId)?.name || this.store.trusted[peerId]?.name || "máy kia",
+            history: this.modelHistory(bound, link?.syncedLineId),
+            signal: controller.signal,
+            fileRelay: room ? undefined : { url: `http://127.0.0.1:${this.port}/relay-file/${peerId}` },
+            readings: this.readings(bound),
+            brief: this.promptBrief(bound),
+            room: room
+              ? { title: room.title, members: room.members.map((member) => this.memberRecord(member).name).join(", ") }
+              : undefined,
+            together: room ? "cả nhóm" : undefined,
+            resume: Boolean(link),
+            sessionId: link?.id,
+            sessionTitle: this.sessionTitle(bound),
+            onDelta: (chunk) => {
+              if ((this.epochs.get(peerId) ?? 0) !== epoch) return;
+              const line = this.findLine(bound, id);
+              if (!line?.pending) return;
+              line.text += chunk;
+              this.scheduleDelta(peerId, bound, id);
+            },
+          });
+        };
+        let resumeEnabled = this.agents.resumes(provider);
+        let result;
+        try {
+          result = await ask(resumeEnabled);
+        } catch (err) {
+          if (!resumeEnabled || (!(err instanceof CliSessionLost) && !(err instanceof CliResumeUnsupported))) throw err;
+          const line = this.findLine(bound, id);
+          if (line?.pending) line.text = "";
+          if (err instanceof CliSessionLost) {
+            this.clearCli(bound, provider);
+            this.tell(bound, peerId, "Phiên trong client không còn. Đã mở phiên mới.");
+          } else {
+            this.agents.disableResume(provider);
+            this.clearCli(bound, provider);
+            resumeEnabled = false;
+            this.tell(bound, peerId, "Bản CLI này chưa nhận cờ nối lại phiên. Mỗi lượt vẫn mang theo hội thoại.");
+          }
+          result = await ask(false);
+        }
+        const text = result.text;
         if ((this.epochs.get(peerId) ?? 0) !== epoch || controller.signal.aborted) {
           this.finishAborted(bound, id);
           resolveOut("");
@@ -1247,6 +1275,7 @@ export class AppCore {
           line.text = text;
           line.pending = false;
         }
+        if (resumeEnabled && result.sessionId) this.rememberCli(bound, peerId, provider, result.sessionId, id);
         const published = this.publishMentions(text, this.mentionPeople(groupId ? groupKey(groupId) : peerId));
         const wire: WireChat = {
           id,
@@ -1370,10 +1399,63 @@ export class AppCore {
     }
   }
 
-  private modelHistory(sessionId: string): ModelTurn[] {
+  private cliLink(sessionId: string, provider: ProviderId): { id: string; syncedLineId: string } | undefined {
+    if (provider === "echo") return undefined;
+    return this.sessionRecord(sessionId)?.cli?.[provider];
+  }
+
+  private rememberCli(sessionId: string, peerId: string, provider: ProviderId, cliSessionId: string, syncedLineId: string): void {
+    if (provider === "echo" || !cliSessionId) return;
+    const session = this.sessionRecord(sessionId);
+    if (!session) return;
+    const previous = session.cli?.[provider]?.id;
+    session.cli = { ...session.cli, [provider]: { id: cliSessionId, syncedLineId } };
+    if (previous !== cliSessionId) this.tell(sessionId, peerId, cliIntro(provider));
+    this.scheduleSave();
+  }
+
+  private clearCli(sessionId: string, provider?: ProviderId): void {
+    const session = this.sessionRecord(sessionId);
+    if (!session?.cli) return;
+    if (!provider || provider === "echo") {
+      delete session.cli;
+    } else {
+      const next = { ...session.cli };
+      delete next[provider];
+      session.cli = Object.keys(next).length ? next : undefined;
+    }
+    this.scheduleSave();
+  }
+
+  private sessionRecord(sessionId: string): ChatSession | undefined {
+    for (const list of Object.values(this.store.sessions)) {
+      const session = list.find((item) => item.id === sessionId);
+      if (session) return session;
+    }
+    return undefined;
+  }
+
+  private tell(sessionId: string, peerId: string, text: string): void {
+    const clean = text.trim();
+    if (!clean) return;
+    this.appendLine(sessionId, this.makeLine(peerId, this.store.peerId, this.store.settings.name, "system", clean));
+    this.pushNow();
+  }
+
+  private modelHistory(sessionId: string, afterLineId = ""): ModelTurn[] {
     const lines = this.store.transcripts[sessionId] ?? [];
-    const items: ModelTurn[] = [];
+    let skipping = Boolean(afterLineId);
+    const picked: ChatLine[] = [];
     for (const line of lines) {
+      if (skipping) {
+        if (line.id === afterLineId) skipping = false;
+        continue;
+      }
+      picked.push(line);
+    }
+    const source = afterLineId && skipping ? lines.filter((line) => !line.pending).slice(-1) : picked;
+    const items: ModelTurn[] = [];
+    for (const line of source) {
       if (line.pending || line.kind === "system") continue;
       const text = this.turnText(line);
       if (!text.trim()) continue;
@@ -1814,6 +1896,7 @@ export class AppCore {
     room.turn = null;
     this.store.transcripts[sessionId] = [];
     delete this.store.briefs[sessionId];
+    this.clearCli(sessionId);
     if (host) {
       this.relay(room, "group-clear", { groupId: room.id, sessionId });
       this.relay(room, "group-turn", { groupId: room.id, sessionId, turn: null, go: false } satisfies WireGroupTurn);
@@ -2644,6 +2727,7 @@ export class AppCore {
     if (room.sessionId) {
       this.store.transcripts[room.sessionId] = [];
       delete this.store.briefs[room.sessionId];
+      this.clearCli(room.sessionId);
     }
     this.groupNote(room, "Máy tạo nhóm đã xóa hội thoại.", false);
     this.scheduleSave();
@@ -3145,6 +3229,13 @@ export class AppCore {
     if (this.logs.length > 80) this.logs.splice(0, this.logs.length - 80);
     console.log(`[lan] ${line}`);
   }
+}
+
+function cliIntro(provider: ProviderId): string {
+  if (provider === "claude-cli") return "Phiên này nằm trong Claude Code. Mở claude và chọn Resume để xem cùng hội thoại. Các lượt sau nối tiếp phiên đó.";
+  if (provider === "cursor-cli") return "Phiên này nằm trong Cursor CLI. Chạy agent ls hoặc agent resume để mở lại. Khung chat trong Cursor IDE là kho riêng, chưa hiện phiên CLI.";
+  if (provider === "codex-cli") return "Phiên này nằm trong Codex. Chạy codex resume để mở lại cùng hội thoại.";
+  return "";
 }
 
 function basePort(profile: string): number {

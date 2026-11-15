@@ -116,6 +116,13 @@ export type PeerView = {
   token: string | null;
 };
 
+export type CliLink = {
+  id: string;
+  syncedLineId: string;
+};
+
+export type CliLinks = Partial<Record<Exclude<ProviderId, "echo">, CliLink>>;
+
 export type ChatSession = {
   id: string;
   peerId: string;
@@ -123,6 +130,7 @@ export type ChatSession = {
   createdAt: number;
   updatedAt: number;
   pinned?: boolean;
+  cli?: CliLinks;
 };
 
 export type ChatLine = {
@@ -298,4 +306,11 @@ export function providerLabel(provider: string): string {
   if (provider === "cursor" || provider === "cursor-cli") return "Cursor terminal";
   if (provider === "codex" || provider === "codex-cli") return "Codex terminal";
   return provider || "Agent";
+}
+
+export function cliClientLabel(provider: string): string {
+  if (provider === "claude" || provider === "claude-cli") return "Claude Code";
+  if (provider === "cursor" || provider === "cursor-cli") return "Cursor CLI";
+  if (provider === "codex" || provider === "codex-cli") return "Codex";
+  return "";
 }
