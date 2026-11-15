@@ -14,7 +14,8 @@
     "start": "node scripts/build.mjs && electron .",
     "typecheck": "tsc --noEmit",
     "smoke": "node scripts/smoke.mjs",
-    "dist": "node scripts/build.mjs && electron-builder --win"
+    "dist": "node scripts/build.mjs && electron-builder --win",
+    "dist:mac": "node scripts/build.mjs && electron-builder --mac zip --x64 --arm64"
   },
   "dependencies": {
     "socket.io": "^4.8.1",
@@ -48,6 +49,12 @@
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true
+    },
+    "mac": {
+      "identity": null,
+      "category": "public.app-category.productivity",
+      "target": ["zip"],
+      "artifactName": "${productName}-${version}-${arch}-mac.${ext}"
     }
   }
 }
