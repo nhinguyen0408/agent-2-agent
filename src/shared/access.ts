@@ -236,5 +236,9 @@ export function toolBlob(event: unknown): string {
     return "";
   }
   if (type === "tool_call" && record.subtype !== "completed") return JSON.stringify(record.tool_call ?? record);
+  if (type === "tool_use") {
+    const parameters = record.parameters && typeof record.parameters === "object" ? (record.parameters as Record<string, unknown>) : {};
+    return JSON.stringify({ name: record.tool_name, ...parameters });
+  }
   return "";
 }

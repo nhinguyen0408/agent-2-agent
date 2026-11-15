@@ -3,7 +3,7 @@
   "productName": "LAN Agents",
   "version": "0.1.0",
   "private": true,
-  "description": "Hai agent local tren mang LAN, goi Claude Code hoac Cursor CLI da dang nhap.",
+  "description": "Hai agent local tren mang LAN, goi Claude Code, Cursor CLI, Codex hoac Gemini CLI da dang nhap.",
   "main": "dist/main.js",
   "author": "LAN Agents",
   "scripts": {

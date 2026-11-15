@@ -72,7 +72,7 @@ export type PeerActivity = {
   replyingSessionId: string;
 };
 
-export type ProviderId = "echo" | "claude-cli" | "cursor-cli" | "codex-cli";
+export type ProviderId = "echo" | "claude-cli" | "cursor-cli" | "codex-cli" | "gemini-cli";
 
 export type Settings = {
   name: string;
@@ -81,9 +81,11 @@ export type Settings = {
   claudeCommand: string;
   cursorCommand: string;
   codexCommand: string;
+  geminiCommand: string;
   claudeSkillDir: string;
   cursorSkillDir: string;
   codexSkillDir: string;
+  geminiSkillDir: string;
   confineWorkDir: boolean;
   access: string[];
   autoAccept: boolean;
@@ -97,7 +99,7 @@ export type LinkStatus =
   | "connected";
 
 export type CliToolState = {
-  id: "claude" | "cursor" | "codex";
+  id: "claude" | "cursor" | "codex" | "gemini";
   label: string;
   installed: boolean;
   path: string | null;
@@ -108,6 +110,7 @@ export type CliReport = {
   claude: CliToolState;
   cursor: CliToolState;
   codex: CliToolState;
+  gemini: CliToolState;
 };
 
 export type PeerView = {
@@ -301,11 +304,12 @@ export function normalizeProvider(value: string): ProviderId {
   if (value === "claude" || value === "claude-cli") return "claude-cli";
   if (value === "cursor" || value === "cursor-cli") return "cursor-cli";
   if (value === "codex" || value === "codex-cli") return "codex-cli";
+  if (value === "gemini" || value === "gemini-cli") return "gemini-cli";
   return "echo";
 }
 
 export function isProviderId(value: string): value is ProviderId {
-  return value === "echo" || value === "claude-cli" || value === "cursor-cli" || value === "codex-cli";
+  return value === "echo" || value === "claude-cli" || value === "cursor-cli" || value === "codex-cli" || value === "gemini-cli";
 }
 
 export function providerLabel(provider: string): string {
@@ -313,6 +317,7 @@ export function providerLabel(provider: string): string {
   if (provider === "claude" || provider === "claude-cli") return "Claude terminal";
   if (provider === "cursor" || provider === "cursor-cli") return "Cursor terminal";
   if (provider === "codex" || provider === "codex-cli") return "Codex terminal";
+  if (provider === "gemini" || provider === "gemini-cli") return "Gemini terminal";
   return provider || "Agent";
 }
 
@@ -320,5 +325,6 @@ export function cliClientLabel(provider: string): string {
   if (provider === "claude" || provider === "claude-cli") return "Claude Code";
   if (provider === "cursor" || provider === "cursor-cli") return "Cursor CLI";
   if (provider === "codex" || provider === "codex-cli") return "Codex";
+  if (provider === "gemini" || provider === "gemini-cli") return "Gemini CLI";
   return "";
 }

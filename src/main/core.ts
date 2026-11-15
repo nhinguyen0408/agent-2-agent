@@ -123,6 +123,7 @@ export class AppCore {
     claude: { id: "claude", label: "Claude CLI", installed: false, path: null, loggedIn: null },
     cursor: { id: "cursor", label: "Cursor CLI", installed: false, path: null, loggedIn: null },
     codex: { id: "codex", label: "Codex CLI", installed: false, path: null, loggedIn: null },
+    gemini: { id: "gemini", label: "Gemini CLI", installed: false, path: null, loggedIn: null },
   };
   private cliSignature = "";
   private readonly remoteClis = new Map<string, string>();
@@ -334,9 +335,10 @@ export class AppCore {
       prev.workDir !== next.workDir ||
       prev.claudeCommand !== next.claudeCommand ||
       prev.cursorCommand !== next.cursorCommand ||
-      prev.codexCommand !== next.codexCommand;
+      prev.codexCommand !== next.codexCommand ||
+      prev.geminiCommand !== next.geminiCommand;
     if (runtimeChanged) void this.agents.dispose();
-    if (prev.claudeCommand !== next.claudeCommand || prev.cursorCommand !== next.cursorCommand || prev.codexCommand !== next.codexCommand) {
+    if (prev.claudeCommand !== next.claudeCommand || prev.cursorCommand !== next.cursorCommand || prev.codexCommand !== next.codexCommand || prev.geminiCommand !== next.geminiCommand) {
       this.noteClis(detectLocalClis(next), false);
     }
     this.scheduleSave();
@@ -3683,6 +3685,9 @@ export class AppCore {
       report.codex.installed,
       report.codex.path ?? "",
       report.codex.loggedIn,
+      report.gemini.installed,
+      report.gemini.path ?? "",
+      report.gemini.loggedIn,
     ].join("|");
     const changed = signature !== this.cliSignature;
     this.cliSignature = signature;
@@ -3811,6 +3816,7 @@ function cliIntro(provider: ProviderId): string {
   if (provider === "claude-cli") return "Phiên này nằm trong Claude Code. Mở claude và chọn Resume để xem cùng hội thoại. Các lượt sau nối tiếp phiên đó.";
   if (provider === "cursor-cli") return "Phiên này nằm trong Cursor CLI. Chạy agent ls hoặc agent resume để mở lại. Khung chat trong Cursor IDE là kho riêng, chưa hiện phiên CLI.";
   if (provider === "codex-cli") return "Phiên này nằm trong Codex. Chạy codex resume để mở lại cùng hội thoại.";
+  if (provider === "gemini-cli") return "Phiên này nằm trong Gemini CLI. Chạy gemini --resume trong cùng thư mục làm việc để mở lại. Các lượt sau nối tiếp phiên đó.";
   return "";
 }
 
@@ -3823,7 +3829,8 @@ function cliLine(report: CliReport): string {
   const claude = toolLine(report.claude);
   const cursor = toolLine(report.cursor);
   const codex = toolLine(report.codex);
-  return `CLI trên máy này — ${claude} · ${cursor} · ${codex}`;
+  const gemini = toolLine(report.gemini);
+  return `CLI trên máy này — ${claude} · ${cursor} · ${codex} · ${gemini}`;
 }
 
 function toolLine(tool: CliReport["claude"]): string {

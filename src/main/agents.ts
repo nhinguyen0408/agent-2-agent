@@ -38,7 +38,7 @@ export type ReplyInput = {
 
 export type AgentResult = { text: string; sessionId: string };
 
-type SessionBind = { id: string; resume: boolean; kind: "claude" | "cursor" | "codex" };
+type SessionBind = { id: string; resume: boolean; kind: "claude" | "cursor" | "codex" | "gemini" };
 
 export class CliSessionLost extends Error {
   constructor() {
@@ -74,6 +74,7 @@ export class AgentHost {
     if (settings.provider === "echo") return { text: await echoReply(input), sessionId: "" };
     if (settings.provider === "claude-cli") return this.claudeCli(input, settings);
     if (settings.provider === "codex-cli") return this.codexCli(input, settings);
+    if (settings.provider === "gemini-cli") return this.geminiCli(input, settings);
     return this.cursorCli(input, settings);
   }
 
@@ -184,6 +185,29 @@ export class AgentHost {
     });
   }
 
+  private geminiCli(input: ReplyInput, settings: Settings): Promise<AgentResult> {
+    const prompt = oneLine(conversationPrompt(input), 4500);
+    const resume = Boolean(input.resume && input.sessionId);
+    const skill = mountedSkill(input, settings.workDir);
+    const attempts = uniqueAttempts([
+      geminiArgs(prompt, "stream-json", "approval", skill, true),
+      geminiArgs(prompt, "stream-json", "approval", "", true),
+      geminiArgs(prompt, "stream-json", "yolo", skill, true),
+      geminiArgs(prompt, "json", "approval", skill, true),
+      geminiArgs(prompt, "json", "yolo", "", false),
+      geminiArgs(prompt, "", "yolo", "", false),
+      ["-p", prompt],
+    ]);
+    return this.runCli(input, {
+      command: settings.geminiCommand || "gemini",
+      cwd: settings.workDir,
+      missing: "Không tìm thấy lệnh gemini. Cài Gemini CLI, rồi chạy `gemini` và đăng nhập một lần trên máy này.",
+      session: { id: input.sessionId || "", resume, kind: "gemini" },
+      attempts,
+      confine: Boolean(input.confine),
+    });
+  }
+
   private runCli(
     input: ReplyInput,
     spec: { command: string; cwd: string; missing: string; attempts: string[][]; session?: SessionBind; confine?: boolean },
@@ -226,46 +250,65 @@ export class AgentHost {
       const onAbort = () => killChild(child);
       if (input.signal.aborted) onAbort();
       input.signal.addEventListener("abort", onAbort, { once: true });
+      const take = (event: unknown) => {
+        const blob = toolBlob(event);
+        if (blob) {
+          const hits = deniedRoles(blob, input.access ?? defaultAccess(), "command");
+          if (hits.length) {
+            if (!blocked) {
+              blocked = new AccessDenied(hits);
+              killChild(child);
+              input.signal.removeEventListener("abort", onAbort);
+              reject(blocked);
+            }
+            return;
+          }
+        }
+        const found = sessionIdOf(event);
+        if (found) capturedSession = found;
+        const codex = codexAgentText(event);
+        if (codex) {
+          finalText = codex;
+          if (codex.startsWith(streamed)) {
+            const extra = codex.slice(streamed.length);
+            if (extra) {
+              streamed = codex;
+              input.onDelta(extra);
+            }
+          }
+          return;
+        }
+        const gemini = geminiAgentText(event);
+        if (gemini?.mode === "delta") {
+          if (gemini.text) {
+            streamed += gemini.text;
+            input.onDelta(gemini.text);
+          }
+          return;
+        }
+        if (gemini?.mode === "full") {
+          if (streamed && !gemini.text.startsWith(streamed)) return;
+          finalText = gemini.text;
+          const extra = gemini.text.slice(streamed.length);
+          if (extra) {
+            streamed = gemini.text;
+            input.onDelta(extra);
+          }
+          return;
+        }
+        const piece = streamPiece(event);
+        if (piece) {
+          streamed += piece;
+          input.onDelta(piece);
+        }
+        const result = resultText(event);
+        if (result) finalText = result;
+      };
       child.stdout?.setEncoding("utf8");
       child.stderr?.setEncoding("utf8");
       child.stdout?.on("data", (chunk: string) => {
         stdout += chunk;
-        lineBuf = consumeLines(lineBuf, chunk, (event) => {
-          const blob = toolBlob(event);
-          if (blob) {
-            const hits = deniedRoles(blob, input.access ?? defaultAccess(), "command");
-            if (hits.length) {
-              if (!blocked) {
-                blocked = new AccessDenied(hits);
-                killChild(child);
-                input.signal.removeEventListener("abort", onAbort);
-                reject(blocked);
-              }
-              return;
-            }
-          }
-          const found = sessionIdOf(event);
-          if (found) capturedSession = found;
-          const codex = codexAgentText(event);
-          if (codex) {
-            finalText = codex;
-            if (codex.startsWith(streamed)) {
-              const extra = codex.slice(streamed.length);
-              if (extra) {
-                streamed = codex;
-                input.onDelta(extra);
-              }
-            }
-            return;
-          }
-          const piece = streamPiece(event);
-          if (piece) {
-            streamed += piece;
-            input.onDelta(piece);
-          }
-          const result = resultText(event);
-          if (result) finalText = result;
-        });
+        lineBuf = consumeLines(lineBuf, chunk, take);
       });
       child.stderr?.on("data", (chunk: string) => {
         stderr += chunk;
@@ -285,12 +328,22 @@ export class AgentHost {
       child.on("close", (code) => {
         this.running.delete(input.peerId);
         input.signal.removeEventListener("abort", onAbort);
+        const tail = lineBuf.trim();
+        if (tail.startsWith("{")) {
+          try {
+            take(JSON.parse(tail));
+          } catch {
+            /* dòng cuối không phải JSON */
+          }
+        }
         if (blocked) return;
         if (input.signal.aborted) {
           reject(abortError());
           return;
         }
-        const text = (finalText || streamed || plainText(stdout)).trim();
+        const blob = readGeminiBlob(stdout);
+        if (!capturedSession && blob.sessionId) capturedSession = blob.sessionId;
+        const text = (finalText || streamed || blob.response || plainText(stdout)).trim();
         if (code === 0 && text) {
           if (!streamed && !finalText) input.onDelta(text);
           const sessionId = capturedSession || (useSession && session?.id ? session.id : "");
@@ -501,13 +554,16 @@ function bindArgs(args: string[], session: SessionBind | undefined): string[] {
   const head = args.slice(0, -1);
   if (session.kind === "cursor") return [...head, `--resume=${session.id}`, prompt];
   if (session.kind === "codex" && head[0] === "exec") return ["exec", "resume", ...head.slice(1), session.id, prompt];
+  if (session.kind === "gemini" && args[0] === "-p" && args.length >= 2) {
+    return [args[0], args[1], "--resume", session.id, ...args.slice(2)];
+  }
   return args;
 }
 
 function isLostSession(detail: string, sessionId: string, streamed: string): boolean {
   if (streamed.trim()) return false;
   if (sessionId && detail.includes(sessionId)) return true;
-  return /no conversation found|unable to resume|failed to resume|could not resume|cannot resume|unknown session|no session found|session does not exist|no rollout found|thread not found/i.test(detail);
+  return /no conversation found|unable to resume|failed to resume|could not resume|cannot resume|unknown session|no sessions found|no session found|session does not exist|no matching session|could not find session|failed to load session|no rollout found|thread not found/i.test(detail);
 }
 
 function sessionIdOf(event: unknown): string {
@@ -646,6 +702,7 @@ function cliEnv(): NodeJS.ProcessEnv {
     path.join(process.env.LOCALAPPDATA || "", "cursor-agent"),
     path.join(process.env.APPDATA || "", "npm"),
     path.join(os.homedir(), ".codex"),
+    path.join(os.homedir(), ".gemini", "bin"),
   ].filter((dir) => dir && fs.existsSync(dir));
   const current = env.PATH || env.Path || "";
   const next = [...prefix, current].filter(Boolean).join(path.delimiter);
@@ -697,6 +754,58 @@ function resultText(event: unknown): string {
   const record = event as { type?: string; result?: unknown };
   if (record.type === "result" && typeof record.result === "string") return record.result;
   return "";
+}
+
+function geminiArgs(
+  prompt: string,
+  format: "stream-json" | "json" | "",
+  mode: "approval" | "yolo" | "none",
+  skill: string,
+  trust: boolean,
+): string[] {
+  const args = ["-p", prompt];
+  if (format) args.push("--output-format", format);
+  if (mode === "approval") args.push("--approval-mode", "yolo");
+  if (mode === "yolo") args.push("--yolo");
+  if (trust) args.push("--skip-trust");
+  if (skill) args.push("--include-directories", skill);
+  return args;
+}
+
+function geminiAgentText(event: unknown): { mode: "delta" | "full"; text: string } | null {
+  if (!event || typeof event !== "object") return null;
+  const record = event as { type?: string; role?: string; content?: unknown; delta?: boolean; response?: unknown };
+  if (!record.type && typeof record.response === "string" && record.response) return { mode: "full", text: record.response };
+  if (record.type !== "message" || (record.role !== "assistant" && record.role !== "model")) return null;
+  const text = joinedText(record.content);
+  if (!text) return null;
+  return record.delta ? { mode: "delta", text } : { mode: "full", text };
+}
+
+function joinedText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => {
+      if (typeof part === "string") return part;
+      if (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string") return (part as { text: string }).text;
+      return "";
+    })
+    .join("");
+}
+
+function readGeminiBlob(stdout: string): { response: string; sessionId: string } {
+  const trimmed = stdout.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) return { response: "", sessionId: "" };
+  try {
+    const parsed = JSON.parse(trimmed) as { response?: unknown; session_id?: unknown };
+    return {
+      response: typeof parsed.response === "string" ? parsed.response.trim() : "",
+      sessionId: typeof parsed.session_id === "string" ? parsed.session_id.trim().slice(0, 80) : "",
+    };
+  } catch {
+    return { response: "", sessionId: "" };
+  }
 }
 
 function codexAgentText(event: unknown): string {

@@ -38,9 +38,11 @@ export function defaultSettings(profile: string): Settings {
     claudeCommand: "claude",
     cursorCommand: "agent",
     codexCommand: "codex",
+    geminiCommand: "gemini",
     claudeSkillDir: "",
     cursorSkillDir: "",
     codexSkillDir: "",
+    geminiSkillDir: "",
     confineWorkDir: true,
     access: defaultAccess(),
     autoAccept: false,
@@ -117,9 +119,11 @@ export function sanitizeSettings(input: Partial<Settings> & { cursorCwd?: string
     claudeCommand: (input.claudeCommand || "claude").trim() || "claude",
     cursorCommand: (input.cursorCommand || "agent").trim() || "agent",
     codexCommand: (input.codexCommand || "codex").trim() || "codex",
+    geminiCommand: (input.geminiCommand || "gemini").trim() || "gemini",
     claudeSkillDir: cleanDir(input.claudeSkillDir),
     cursorSkillDir: cleanDir(input.cursorSkillDir),
     codexSkillDir: cleanDir(input.codexSkillDir),
+    geminiSkillDir: cleanDir(input.geminiSkillDir),
     confineWorkDir: input.confineWorkDir !== false,
     access: cleanAccess(input.access),
     autoAccept: Boolean(input.autoAccept),
@@ -200,7 +204,7 @@ function sanitizeSessionMap(raw: Record<string, ChatSession[]>): Record<string, 
 function sanitizeCli(input: unknown): CliLinks | undefined {
   if (!input || typeof input !== "object") return undefined;
   const links: CliLinks = {};
-  for (const provider of ["claude-cli", "cursor-cli", "codex-cli"] as const) {
+  for (const provider of ["claude-cli", "cursor-cli", "codex-cli", "gemini-cli"] as const) {
     const raw = (input as Record<string, unknown>)[provider];
     if (!raw || typeof raw !== "object") continue;
     const id = String((raw as { id?: unknown }).id ?? "").trim();

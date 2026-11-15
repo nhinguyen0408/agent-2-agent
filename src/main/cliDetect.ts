@@ -6,11 +6,12 @@ import type { CliReport, Settings } from "../shared/types";
 
 const TOKEN_MARK = /oauth|access_token|accessToken|refresh_token|refreshToken|claudeAiOauth/i;
 
-export function detectLocalClis(settings: Pick<Settings, "claudeCommand" | "cursorCommand" | "codexCommand">): CliReport {
+export function detectLocalClis(settings: Pick<Settings, "claudeCommand" | "cursorCommand" | "codexCommand" | "geminiCommand">): CliReport {
   return {
     claude: detectOne("claude", "Claude CLI", uniqueNames(settings.claudeCommand, "claude"), claudeLoggedIn),
     cursor: detectOne("cursor", "Cursor CLI", uniqueNames(settings.cursorCommand, "agent", "cursor-agent"), cursorLoggedIn),
     codex: detectOne("codex", "Codex CLI", uniqueNames(settings.codexCommand, "codex"), codexLoggedIn),
+    gemini: detectOne("gemini", "Gemini CLI", uniqueNames(settings.geminiCommand, "gemini"), geminiLoggedIn),
   };
 }
 
@@ -19,6 +20,7 @@ export function installedCliList(report: CliReport): string {
   if (report.claude.installed) ids.push("claude");
   if (report.cursor.installed) ids.push("cursor");
   if (report.codex.installed) ids.push("codex");
+  if (report.gemini.installed) ids.push("gemini");
   return ids.join(",");
 }
 
@@ -27,7 +29,7 @@ export function parseCliList(value: unknown): string {
   const ids = new Set<string>();
   for (const part of value.split(",")) {
     const id = part.trim().toLowerCase();
-    if (id === "claude" || id === "cursor" || id === "codex") ids.add(id);
+    if (id === "claude" || id === "cursor" || id === "codex" || id === "gemini") ids.add(id);
   }
   return [...ids].join(",");
 }
@@ -55,6 +57,11 @@ export function findExecutable(name: string): string | null {
     path.join(home, ".codex", `${trimmed}.exe`),
     path.join(local, "OpenAI", "Codex", `${trimmed}.exe`),
     path.join(local, "Programs", "Codex", `${trimmed}.exe`),
+    path.join(home, ".gemini", "bin", `${trimmed}.exe`),
+    path.join(home, ".gemini", "bin", `${trimmed}.cmd`),
+    path.join(home, ".gemini", "bin", trimmed),
+    path.join(local, "gemini-cli", `${trimmed}.exe`),
+    path.join(local, "gemini-cli", `${trimmed}.cmd`),
   ];
   for (const candidate of candidates) {
     if (candidate && fs.existsSync(candidate) && !isCursorIde(candidate)) return candidate;
@@ -70,7 +77,7 @@ function isCursorIde(file: string): boolean {
 }
 
 function detectOne(
-  id: "claude" | "cursor" | "codex",
+  id: "claude" | "cursor" | "codex" | "gemini",
   label: string,
   names: string[],
   login: () => boolean | null,
@@ -118,6 +125,19 @@ function codexLoggedIn(): boolean | null {
   if (text && (TOKEN_MARK.test(text) || /"tokens"\s*:/.test(text))) return true;
   if (process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY) return true;
   return text ? false : null;
+}
+
+function geminiLoggedIn(): boolean | null {
+  const home = path.join(os.homedir(), ".gemini");
+  const oauth = readHead(path.join(home, "oauth_creds.json"));
+  if (oauth && TOKEN_MARK.test(oauth)) return true;
+  const accounts = readHead(path.join(home, "google_accounts.json"));
+  if (accounts && /"active"\s*:\s*"[^"]+"/.test(accounts)) return true;
+  const envFile = readHead(path.join(home, ".env"));
+  if (envFile && /^\s*(GEMINI_API_KEY|GOOGLE_API_KEY|GOOGLE_GENAI_API_KEY)\s*=\s*\S+/m.test(envFile)) return true;
+  if (process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.GOOGLE_GENAI_API_KEY) return true;
+  if (oauth || accounts) return false;
+  return null;
 }
 
 function cursorLoggedIn(): boolean | null {

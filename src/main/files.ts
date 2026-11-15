@@ -43,15 +43,13 @@ export function insideDir(root: string, target: string): boolean {
 }
 
 export function configuredSkillDir(settings: Settings): string {
-  const raw =
-    settings.provider === "claude-cli"
-      ? settings.claudeSkillDir
-      : settings.provider === "cursor-cli"
-        ? settings.cursorSkillDir
-        : settings.provider === "codex-cli"
-          ? settings.codexSkillDir
-          : "";
-  return raw.trim();
+  const dirs: Partial<Record<Settings["provider"], string>> = {
+    "claude-cli": settings.claudeSkillDir,
+    "cursor-cli": settings.cursorSkillDir,
+    "codex-cli": settings.codexSkillDir,
+    "gemini-cli": settings.geminiSkillDir,
+  };
+  return (dirs[settings.provider] ?? "").trim();
 }
 
 export function skillIndex(dir: string): string {

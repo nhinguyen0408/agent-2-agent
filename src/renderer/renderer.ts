@@ -144,6 +144,12 @@ function boot(host: HTMLElement): void {
                 ${iconButton("pick-codex-skill", "folder", "Chọn thư mục skill Codex")}
               </span>
             </label>
+            <label class="cwd">Skill Gemini
+              <span>
+                <input id="set-gemini-skill" spellcheck="false" placeholder="Thư mục skill của Gemini" aria-label="Thư mục skill Gemini" />
+                ${iconButton("pick-gemini-skill", "folder", "Chọn thư mục skill Gemini")}
+              </span>
+            </label>
             <div class="save-row">${iconButton("save-dirs", "check", "Lưu thư mục làm việc và skill", "", "", "button", "icon-btn primary")}</div>
           </section>
         </div>
@@ -155,15 +161,17 @@ function boot(host: HTMLElement): void {
               <option value="claude-cli">Claude terminal — lệnh claude đã login</option>
               <option value="cursor-cli">Cursor terminal — lệnh agent đã login</option>
               <option value="codex-cli">Codex terminal — lệnh codex đã login</option>
+              <option value="gemini-cli">Gemini terminal — lệnh gemini đã login</option>
             </select>
           </label>
           <label>Lệnh Claude<input id="set-claude-command" spellcheck="false" /></label>
           <label>Lệnh Cursor<input id="set-cursor-command" spellcheck="false" /></label>
           <label>Lệnh Codex<input id="set-codex-command" spellcheck="false" /></label>
+          <label>Lệnh Gemini<input id="set-gemini-command" spellcheck="false" /></label>
           <label class="check"><input id="set-auto" type="checkbox" /> Tự chấp nhận máy trong LAN</label>
           <button id="open-access" type="button" class="access-open">Khả năng truy cập của agent khác</button>
           <div id="tools" class="tools"></div>
-          <p class="hint">Không dùng API key trong app. File đi qua app, không cần share Windows. Claude, Cursor và Codex dùng bản CLI đã đăng nhập trên máy này. Lệnh cursor của Cursor IDE không được tính là Cursor CLI.</p>
+          <p class="hint">Không dùng API key trong app. File đi qua app, không cần share Windows. Claude, Cursor, Codex và Gemini dùng bản CLI đã đăng nhập trên máy này. Gemini cũng nhận GEMINI_API_KEY nếu biến đó đã có sẵn. Lệnh cursor của Cursor IDE không được tính là Cursor CLI.</p>
           <div class="save-row">
             ${iconButton("save", "check", "Lưu cài đặt", "", "", "button", "icon-btn primary")}
             ${iconButton("rescan", "refresh", "Kiểm tra lại CLI")}
@@ -641,6 +649,7 @@ function boot(host: HTMLElement): void {
     ["#pick-claude-skill", "#set-claude-skill"],
     ["#pick-cursor-skill", "#set-cursor-skill"],
     ["#pick-codex-skill", "#set-codex-skill"],
+    ["#pick-gemini-skill", "#set-gemini-skill"],
   ] as const) {
     must<HTMLButtonElement>(buttonId).addEventListener("click", () => {
       void guard(async () => {
@@ -1512,10 +1521,12 @@ function boot(host: HTMLElement): void {
     must<HTMLInputElement>("#set-claude-command").value = settings.claudeCommand;
     must<HTMLInputElement>("#set-cursor-command").value = settings.cursorCommand;
     must<HTMLInputElement>("#set-codex-command").value = settings.codexCommand;
+    must<HTMLInputElement>("#set-gemini-command").value = settings.geminiCommand;
     must<HTMLInputElement>("#set-cwd").value = settings.workDir;
     must<HTMLInputElement>("#set-claude-skill").value = settings.claudeSkillDir;
     must<HTMLInputElement>("#set-cursor-skill").value = settings.cursorSkillDir;
     must<HTMLInputElement>("#set-codex-skill").value = settings.codexSkillDir;
+    must<HTMLInputElement>("#set-gemini-skill").value = settings.geminiSkillDir;
     must<HTMLInputElement>("#set-confine").checked = settings.confineWorkDir;
     must<HTMLInputElement>("#set-auto").checked = settings.autoAccept;
     paintAccess(settings.access);
@@ -1527,14 +1538,16 @@ function boot(host: HTMLElement): void {
     const provider = must<HTMLSelectElement>("#set-provider").value;
     return {
       name: must<HTMLInputElement>("#set-name").value,
-      provider: provider === "claude-cli" || provider === "cursor-cli" || provider === "codex-cli" ? provider : "echo",
+      provider: provider === "claude-cli" || provider === "cursor-cli" || provider === "codex-cli" || provider === "gemini-cli" ? provider : "echo",
       workDir: must<HTMLInputElement>("#set-cwd").value,
       claudeCommand: must<HTMLInputElement>("#set-claude-command").value,
       cursorCommand: must<HTMLInputElement>("#set-cursor-command").value,
       codexCommand: must<HTMLInputElement>("#set-codex-command").value,
+      geminiCommand: must<HTMLInputElement>("#set-gemini-command").value,
       claudeSkillDir: must<HTMLInputElement>("#set-claude-skill").value,
       cursorSkillDir: must<HTMLInputElement>("#set-cursor-skill").value,
       codexSkillDir: must<HTMLInputElement>("#set-codex-skill").value,
+      geminiSkillDir: must<HTMLInputElement>("#set-gemini-skill").value,
       confineWorkDir: must<HTMLInputElement>("#set-confine").checked,
       access: Array.from(document.querySelectorAll<HTMLInputElement>("[data-access]"))
         .filter((input) => input.checked)
@@ -2144,9 +2157,9 @@ function paintTools(report: CliReport | undefined): void {
   const box = document.querySelector<HTMLElement>("#tools");
   if (!box) return;
   box.replaceChildren();
-  const tools = report ? [report.claude, report.cursor, report.codex] : [];
+  const tools = report ? [report.claude, report.cursor, report.codex, report.gemini] : [];
   if (!tools.length) {
-    box.textContent = "Đang kiểm tra Claude CLI, Cursor CLI và Codex…";
+    box.textContent = "Đang kiểm tra Claude CLI, Cursor CLI, Codex và Gemini…";
     return;
   }
   for (const tool of tools) {
@@ -2176,6 +2189,7 @@ function installedNote(report: CliReport | undefined): string {
   if (report.claude.installed) names.push("Claude CLI");
   if (report.cursor.installed) names.push("Cursor CLI");
   if (report.codex.installed) names.push("Codex");
+  if (report.gemini.installed) names.push("Gemini CLI");
   return names.length ? `có ${names.join(", ")}` : "";
 }
 
@@ -2194,7 +2208,7 @@ function activitySentence(name: string, activity: PeerActivity | undefined, sess
 function peerCliNote(clis: string | undefined): string {
   const names = (clis ?? "")
     .split(",")
-    .map((id) => (id === "claude" ? "Claude CLI" : id === "cursor" ? "Cursor CLI" : id === "codex" ? "Codex" : ""))
+    .map((id) => (id === "claude" ? "Claude CLI" : id === "cursor" ? "Cursor CLI" : id === "codex" ? "Codex" : id === "gemini" ? "Gemini CLI" : ""))
     .filter(Boolean);
   return names.length ? `có ${names.join(", ")}` : "";
 }

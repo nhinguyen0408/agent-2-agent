@@ -2,7 +2,7 @@
 
 Hai cửa sổ (hoặc hai máy Windows trong cùng LAN) tự tìm nhau. Máy nhận chạy agent local và trả lời qua Socket.io. Mỗi máy cũng mở một HTTP server để nhận lệnh `POST /trigger`.
 
-Runtime mặc định là **Echo**: trả lại đúng câu nhận được. Claude và Cursor dùng terminal đã đăng nhập trên từng máy, không dùng API key.
+Runtime mặc định là **Echo**: trả lại đúng câu nhận được. Claude, Cursor, Codex và Gemini dùng terminal đã đăng nhập trên từng máy. App không có ô API key.
 
 Chi tiết khung chat, hội thoại hai agent, đính kèm và lệnh HTTP: [docs/chat.md](docs/chat.md).
 
@@ -38,7 +38,7 @@ File cài nằm trong `release/`. Cài file đó trên mỗi máy.
 
 Nếu danh sách LAN trống, nhập IP và cổng (mặc định 3940) vào ô dưới danh sách máy.
 
-## Claude và Cursor
+## Claude, Cursor, Codex và Gemini
 
 Trong **Cài đặt agent**, chọn terminal rồi bấm **Lưu cài đặt**. Không có ô API key.
 
@@ -46,12 +46,14 @@ Trên máy sẽ chạy agent, đăng nhập một lần trong terminal của má
 
 - Claude Code: cài `claude`, rồi chạy `claude auth login`. App gọi `claude -p`.
 - Cursor CLI: cài `agent`, rồi chạy `agent login`. App gọi thẳng `node` của Cursor CLI với `agent -p --trust --force`, nên không đi qua PowerShell và tự chấp nhận lệnh trong thư mục làm việc.
+- Codex: cài `codex`, rồi chạy `codex login`. App gọi `codex exec`.
+- Gemini CLI: cài `gemini`, rồi chạy `gemini` và đăng nhập một lần. App gọi `gemini -p` với `--approval-mode yolo`. Nếu máy đã có `GEMINI_API_KEY`, CLI dùng biến đó.
 - Hai bên dùng chung một prompt hội thoại. Ô chat xóa ngay khi gửi. Máy kia hiện "đang nhập…" hoặc "đang trả lời…".
 - Icon **Gửi file** hoặc lệnh local `POST /relay-file` chuyển byte qua LAN và lưu vào thư mục làm việc của máy nhận. Không cần share Windows.
 - Icon **Xem file** và danh sách trong thư mục làm việc mở một cửa sổ riêng, kéo và đổi kích thước được. Bấm file khác thì cửa sổ đó đổi nội dung. Dòng file trong hội thoại vẫn xem nhỏ trong chat. HTML không chạy script.
 - Icon kẹp giấy gửi kèm txt, Markdown, ảnh hoặc PDF. File được chuyển vào thư mục làm việc của máy kia, và cả hai agent đọc file đó rồi trao đổi nội dung.
 - Mục **Phiên chat** trên thanh bên tạo nhiều phiên với cùng một máy. Mỗi phiên giữ lịch sử riêng. Ô tên dưới tiêu đề, hoặc icon bút chì, đổi tên phiên. Máy kia nhận tên đó. Agent chỉ đọc phiên đang mở. Tin của phiên khác hiện chấm đỏ cho đến khi mở phiên đó.
-- App tự nhận `claude` và `agent` trên máy (kể cả thư mục cài mặc định), rồi hiện Đã cài hoặc Chưa có. Lệnh `cursor` của Cursor IDE không tính là Cursor CLI.
+- App tự nhận `claude`, `agent`, `codex` và `gemini` trên máy (kể cả thư mục cài mặc định), rồi hiện Đã cài hoặc Chưa có. Lệnh `cursor` của Cursor IDE không tính là Cursor CLI.
 
 Phiên đăng nhập nằm trên máy đó. App xóa `ANTHROPIC_API_KEY` và `CURSOR_API_KEY` khỏi tiến trình con để lệnh dùng đúng phiên này. Thư mục làm việc là thư mục terminal được mở khi có việc trên đĩa.
 

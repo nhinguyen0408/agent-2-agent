@@ -20,6 +20,7 @@ Runtime của máy trả lời nằm ở **Cài đặt agent**:
 | Echo | Lặp lại câu vừa nhận. Không cần đăng nhập. Dùng để thử kênh. |
 | Claude terminal | Gọi lệnh `claude` đã `claude auth login` trên máy đó. |
 | Cursor terminal | Gọi lệnh `agent` đã `agent login` trên máy đó. |
+| Gemini terminal | Gọi lệnh `gemini` đã đăng nhập trên máy đó. |
 
 Không có ô API key. App xóa `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` và `CURSOR_API_KEY` khỏi tiến trình con để lệnh dùng phiên đăng nhập trên máy.
 
@@ -59,7 +60,7 @@ Người gõ trên máy A. Agent chạy trên **máy B**. Agent máy A chỉ lê
 
 Mỗi peer có một hàng đợi. Lượt trả lời sau đợi lượt trước của cùng peer kết thúc. Đổi runtime, thư mục làm việc, hoặc lệnh CLI thì app dừng các tiến trình agent đang chạy.
 
-Prompt gửi cho Claude và Cursor được dựng từ hội thoại đã lưu của peer đó. Dòng hệ thống và dòng đang `pending` không đưa vào prompt. Cách xếp vai:
+Prompt gửi cho Claude, Cursor và Gemini được dựng từ hội thoại đã lưu của peer đó. Dòng hệ thống và dòng đang `pending` không đưa vào prompt. Cách xếp vai:
 
 - Tin của máy kia (người hoặc agent) thành lượt `user`, ghi tên máy kia.
 - Câu agent của chính máy này thành lượt `assistant`.
@@ -74,7 +75,7 @@ Prompt chung yêu cầu agent:
 - Nếu chỉ trò chuyện, chỉ trả lời bằng lời.
 - Nếu có file đính kèm, đọc đúng file trên máy này. Không bịa phần chưa đọc được.
 
-Claude nhận cả prompt trên **một dòng**, cắt còn 4000 ký tự. Cursor giữ xuống dòng, cắt còn 12000 ký tự (giữ đầu và đuôi). Thư mục làm việc phải tồn tại; nếu không, dòng chat thành lỗi hệ thống.
+Claude và Gemini nhận cả prompt trên **một dòng**, cắt còn 4000 ký tự với Claude và 4500 ký tự với Gemini. Cursor giữ xuống dòng, cắt còn 12000 ký tự (giữ đầu và đuôi). Thư mục làm việc phải tồn tại; nếu không, dòng chat thành lỗi hệ thống.
 
 ### Echo
 
@@ -103,6 +104,18 @@ Lệnh mặc định là `agent`. App gọi thẳng `node.exe` và `index.js` c�
 3. `agent -p --trust <prompt>`
 
 `--trust` và `--force` để lệnh tự chạy trong thư mục làm việc. Lệnh `cursor` của Cursor IDE không được tính là Cursor CLI.
+
+### Gemini
+
+Lệnh mặc định là `gemini`. Prompt là một dòng, cắt còn 4500 ký tự để còn chỗ trên dòng lệnh của Windows. App thử lần lượt:
+
+1. `gemini -p <prompt> --output-format stream-json --approval-mode yolo --skip-trust`
+2. `gemini -p <prompt> --output-format stream-json --yolo --skip-trust`
+3. `gemini -p <prompt> --output-format json --approval-mode yolo`
+4. `gemini -p <prompt> --yolo`
+5. `gemini -p <prompt>`
+
+Có thư mục skill nằm ngoài thư mục làm việc thì các lần đầu thêm `--include-directories`. Cờ không nhận thì thử cách sau. Phiên mới lấy `session_id` từ sự kiện `init` của `stream-json`. Lượt sau gọi `--resume <id>` trong cùng thư mục làm việc. Thiếu lệnh thì báo cài Gemini CLI và chạy `gemini` để đăng nhập một lần. App không có ô API key; nếu máy đã có `GEMINI_API_KEY`, `GOOGLE_API_KEY` hoặc `GOOGLE_GENAI_API_KEY` thì CLI dùng biến đó.
 
 ## Chữ hiện dần
 
@@ -258,6 +271,7 @@ Chỉ socket đã qua `hello` và đang nối mới được xử lý `chat`. Bu
 | Đoạn trích đưa vào prompt | 6000 ký tự |
 | Prompt Claude | 4000 ký tự, một dòng |
 | Prompt Cursor | 12000 ký tự |
+| Prompt Gemini | 4500 ký tự, một dòng |
 | Chờ `/trigger` từ app | 180 giây |
 | Chờ gửi file | 120 giây |
 | Nhịp gửi `delta` | 80 ms |
