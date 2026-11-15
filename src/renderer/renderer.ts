@@ -837,7 +837,6 @@ function boot(host: HTMLElement): void {
     state = next;
     mentionSelf = next.self.peerId;
     mentionNicks = next.nicknames;
-    mentionFaces = mentionFacesOf(next);
     const stillPeer = Boolean(active && next.peers.some((peer) => peer.peerId === active));
     const stillGroup = Boolean(active && next.groups.some((group) => groupKey(group.id) === active));
     if (!stillPeer && !stillGroup) {
@@ -846,6 +845,7 @@ function boot(host: HTMLElement): void {
         next.peers[0]?.peerId ??
         (next.groups[0] ? groupKey(next.groups[0].id) : null);
     }
+    mentionFaces = mentionFacesOf(next, active ?? "");
     must<HTMLElement>("#self-name").textContent = next.self.name;
     const localNote = installedNote(next.localClis);
     const meta = must<HTMLElement>("#self-meta");
@@ -1041,7 +1041,7 @@ function boot(host: HTMLElement): void {
     }
     const canSend = connected || Boolean(peer.token);
     const waiting = composerWait(lines, [peer.peerId], sessionId, next.activity);
-    setComposer(waiting.locked, canSend, "Nhắn cho agent máy kia. Gõ @ để gọi máy, @me là agent máy này…", waiting.stop);
+    setComposer(waiting.locked, canSend, "Tin nhắn thường. Gõ @đối phương để gọi agent đó, @me là máy này…", waiting.stop);
     paintBrief(sessionId, next.briefs[sessionId], lines, connected, "");
     must<HTMLInputElement>("#brief-topic").placeholder = "Việc hai agent cần bàn";
     const snippet = peer.token
@@ -1797,24 +1797,22 @@ function boot(host: HTMLElement): void {
 
   function mentionChoices(): MentionRef[] {
     if (!state || !active) return [];
-    const group = state.groups.find((item) => groupKey(item.id) === active);
-    const people = group ? group.members.slice() : [];
-    if (!group) {
-      const peer = state.peers.find((item) => item.peerId === active);
-      if (state.self.name) people.push({ peerId: state.self.peerId, name: state.self.name });
-      if (peer) people.push({ peerId: peer.peerId, name: peer.name });
-    }
-    const aliased: MentionRef[] = [];
-    for (const person of people) {
-      if (person.peerId === state.self.peerId) continue;
-      const nick = (state.nicknames?.[person.peerId] || "").trim();
-      if (!nick || nick.toLowerCase() === "me" || nick.toLowerCase() === person.name.toLowerCase()) continue;
-      aliased.push({ peerId: person.peerId, name: nick });
-    }
-    const base = [...aliased, ...people];
+    const people = conversationPeople(state, active);
+    const seen = new Set<string>();
+    const base: MentionRef[] = [];
     const selfId = state.self.peerId;
-    if (!selfId || base.some((person) => person.peerId === selfId && person.name.toLowerCase() === "me")) return base;
-    return [{ peerId: selfId, name: "me" }, ...base];
+    if (selfId) {
+      base.push({ peerId: selfId, name: "me" });
+      seen.add(selfId);
+    }
+    for (const person of people) {
+      if (!person.peerId || seen.has(person.peerId)) continue;
+      seen.add(person.peerId);
+      const nick = (state.nicknames?.[person.peerId] || "").trim();
+      const useNick = Boolean(nick) && nick.toLowerCase() !== "me" && nick.toLowerCase() !== person.name.toLowerCase();
+      base.push({ peerId: person.peerId, name: useNick ? nick : person.name });
+    }
+    return base;
   }
 
   function currentMention(): { start: number; query: string } | null {
@@ -2042,22 +2040,32 @@ function nickSignature(): string {
     .join("|");
 }
 
-function mentionFacesOf(state: AppState): GroupMember[] {
-  const faces: GroupMember[] = [
-    { peerId: state.self.peerId, name: state.self.name },
-    { peerId: state.self.peerId, name: "me" },
-  ];
+function conversationPeople(state: AppState, peerKey: string): GroupMember[] {
+  const group = state.groups.find((item) => groupKey(item.id) === peerKey);
+  if (group) return group.members.slice();
+  const people: GroupMember[] = [];
+  if (state.self.peerId && state.self.name) people.push({ peerId: state.self.peerId, name: state.self.name });
+  const peer = state.peers.find((item) => item.peerId === peerKey);
+  if (peer) people.push({ peerId: peer.peerId, name: peer.name });
+  return people;
+}
+
+function mentionFacesOf(state: AppState, peerKey: string): GroupMember[] {
+  const faces: GroupMember[] = [];
   const add = (peerId: string, name: string) => {
     const clean = name.replace(/\s+/g, " ").trim();
     if (!peerId || !clean) return;
     if (faces.some((face) => face.peerId === peerId && face.name.toLowerCase() === clean.toLowerCase())) return;
     faces.push({ peerId, name: clean });
   };
-  for (const peer of state.peers) add(peer.peerId, peer.name);
-  for (const group of state.groups) {
-    for (const member of group.members) add(member.peerId, member.name);
+  const people = conversationPeople(state, peerKey);
+  add(state.self.peerId, state.self.name);
+  add(state.self.peerId, "me");
+  for (const person of people) add(person.peerId, person.name);
+  const allowed = new Set(faces.map((face) => face.peerId));
+  for (const [peerId, name] of Object.entries(state.nicknames)) {
+    if (allowed.has(peerId)) add(peerId, name);
   }
-  for (const [peerId, name] of Object.entries(state.nicknames)) add(peerId, name);
   return faces;
 }
 

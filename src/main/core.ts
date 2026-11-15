@@ -480,9 +480,10 @@ export class AppCore {
     wire.text = published.text;
     wire.mentions = published.mentions;
     const callsSelf = Boolean(line.mentions?.some((item) => item.peerId === this.store.peerId));
-    const callsPeer = !line.mentions?.length || Boolean(line.mentions.some((item) => item.peerId === peerId));
+    const callsPeer = Boolean(line.mentions?.some((item) => item.peerId === peerId));
     const briefRunning = Boolean(this.store.briefs[sessionId]?.running);
-    if (callsSelf && !briefRunning) {
+    if (!callsPeer) wire.defer = true;
+    if (callsSelf && callsPeer && !briefRunning) {
       wire.defer = true;
       const sent = this.sendTo(peerId, "chat", wire);
       const epoch = this.epochs.get(peerId) ?? 0;
@@ -492,11 +493,13 @@ export class AppCore {
         this.sendTo(peerId, "after-me", { sessionId, sessionTitle: this.sessionTitle(sessionId) } satisfies WireResume);
         return;
       }
-      if (!callsPeer) return;
     } else {
       if (callsSelf) void this.enqueueReply(peerId, sessionId);
       if (this.sendTo(peerId, "chat", wire)) return;
-      if (!callsPeer) return;
+      if (!callsPeer) {
+        this.system(peerId, "Chưa nối được máy kia, tin nhắn chưa gửi.");
+        return;
+      }
     }
     if (attachment) {
       this.system(peerId, "File đã tới máy kia, nhưng cần kết nối đang mở thì agent mới đọc và trao đổi.");
@@ -1182,7 +1185,7 @@ export class AppCore {
     if (msg.brief) this.applyBrief(peerId, sessionId, msg.brief);
     const dialogue = msg.dialogue;
     const incomingMentions = Array.isArray(msg.mentions) ? msg.mentions : [];
-    const called = incomingMentions.length === 0 || incomingMentions.some((item) => item?.peerId === this.store.peerId);
+    const called = incomingMentions.some((item) => item?.peerId === this.store.peerId);
     const shouldReply = !msg.defer && (dialogue ? dialogue.repliesLeft > 0 : msg.kind === "human" && called);
     this.pushNow();
     if (!shouldReply) return;

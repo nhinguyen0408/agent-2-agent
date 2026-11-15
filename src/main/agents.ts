@@ -114,11 +114,12 @@ export class AgentHost {
     const resume = Boolean(input.resume && input.sessionId);
     const skill = mountedSkill(input, settings.workDir);
     const confine = Boolean(input.confine);
+    const sandbox = confine && cursorSandboxAvailable() ? "enabled" : "disabled";
     const locked = (workspace: boolean, skillDir: boolean) => [
       "-p",
       "--trust",
       "--sandbox",
-      "enabled",
+      sandbox,
       ...(workspace ? ["--workspace", settings.workDir] : []),
       ...(skillDir && skill ? ["--add-dir", skill] : []),
       "--force",
@@ -309,7 +310,8 @@ export class AgentHost {
           this.spawnAttempt(input, command, cwd, attempts, index, missing, session, false, confine).then(resolve, reject);
           return;
         }
-        if (badFlag && index + 1 < attempts.length) {
+        const sandboxMissing = /sandbox mode is enabled but not available|sandbox requires macos or linux/i.test(detail);
+        if ((badFlag || sandboxMissing) && index + 1 < attempts.length) {
           this.spawnAttempt(input, command, cwd, attempts, index + 1, missing, session, useSession, confine).then(resolve, reject);
           return;
         }
@@ -424,6 +426,10 @@ function scopeBlock(input: ReplyInput, full: boolean): string {
     lines.push(`Thư mục skill đã cài (${skill}) nhưng chưa đọc được. Không bịa skill.`);
   }
   return lines.filter(Boolean).join("\n");
+}
+
+function cursorSandboxAvailable(): boolean {
+  return process.platform === "darwin" || process.platform === "linux";
 }
 
 function mountedSkill(input: ReplyInput, workDir: string): string {
