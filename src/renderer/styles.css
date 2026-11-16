@@ -139,9 +139,26 @@ textarea { resize: vertical; min-height: 4.2rem; }
   grid-template-columns: 58px 272px minmax(0, 1fr);
 }
 
+body[data-nav="peers"] .shell { grid-template-columns: 58px 272px 272px minmax(0, 1fr); }
+
 body[data-collapsed="1"] .shell { grid-template-columns: 58px minmax(0, 1fr); }
 
-body[data-collapsed="1"] .panel { display: none; }
+body[data-collapsed="1"] .panel,
+body[data-collapsed="1"] .session-col,
+body:not([data-nav="peers"]) .session-col { display: none; }
+
+.session-col .panel-body { overflow: hidden; }
+
+.session-col .history-list { flex: 1; overflow: auto; }
+
+.pane-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 14px 6px;
+}
+
+.pane-title-row .pane-title { margin: 0; }
 
 .rail {
   display: flex;
@@ -360,27 +377,25 @@ label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 12px; co
   min-height: 0;
 }
 
-.dir-block,
-.skill-block {
+.panel-body[data-pane="files"] { overflow: hidden; }
+
+.dir-block {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  flex: 0 0 auto;
+  flex: 1 1 auto;
   min-width: 0;
+  min-height: 0;
 }
 
-.skill-block {
-  max-height: 360px;
-  overflow: auto;
-}
+.dir-block > :not(.workdir-files) { flex: none; }
 
 .workdir-files {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  flex: 0 0 auto;
+  flex: 1 1 auto;
   min-height: 0;
-  max-height: 280px;
   overflow: auto;
 }
 
@@ -1395,7 +1410,8 @@ label.coding-toggle span {
   border-radius: 8px;
 }
 
-.access-pop {
+.access-pop,
+.skill-pop {
   position: fixed;
   inset: 0;
   z-index: 40;
@@ -1406,9 +1422,11 @@ label.coding-toggle span {
   background: rgba(17, 24, 39, 0.38);
 }
 
-.access-pop[hidden] { display: none; }
+.access-pop[hidden],
+.skill-pop[hidden] { display: none; }
 
-.access-card {
+.access-card,
+.skill-card {
   display: flex;
   flex-direction: column;
   width: min(460px, 100%);
@@ -1419,7 +1437,10 @@ label.coding-toggle span {
   box-shadow: var(--shadow);
 }
 
-.access-card header {
+.skill-card { width: min(520px, 100%); }
+
+.access-card header,
+.skill-card header {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1428,7 +1449,17 @@ label.coding-toggle span {
   border-bottom: 1px solid var(--line);
 }
 
-.access-card header strong { flex: 1; min-width: 0; }
+.access-card header strong,
+.skill-card header strong { flex: 1; min-width: 0; }
+
+.skill-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: auto;
+  min-height: 0;
+  padding: 12px 18px 16px;
+}
 
 .access-hint { padding: 10px 18px 0; }
 

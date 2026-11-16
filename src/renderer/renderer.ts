@@ -71,7 +71,6 @@ function boot(host: HTMLElement): void {
       <nav class="rail" id="rail">
         ${iconButton("nav-toggle", "sidebar", "Thu gọn thanh bên")}
         ${iconButton("", "people", "Máy trong LAN", "peers")}
-        ${iconButton("", "bubble", "Phiên chat", "sessions", `<span id="nav-unread" class="badge count" hidden></span>`)}
         ${iconButton("", "folder", "Thư mục làm việc", "files")}
         <span class="spacer"></span>
         ${iconButton("", "gear", "Cài đặt", "settings")}
@@ -100,14 +99,6 @@ function boot(host: HTMLElement): void {
             ${iconButton("", "link", "Nối tới địa chỉ này", "", "", "submit")}
           </form>
         </div>
-        <div class="panel-body" data-pane="sessions" hidden>
-          <div class="search">
-            ${icon("search")}
-            <input id="history-query" placeholder="Tìm trong các phiên" autocomplete="off" aria-label="Tìm trong các phiên" />
-          </div>
-          <div id="history-list" class="history-list"></div>
-          <div class="pane-tools">${iconButton("new-session", "plus", "Phiên mới với máy đang chọn")}</div>
-        </div>
         <div class="panel-body" data-pane="files" hidden>
           <section class="dir-block">
             <label class="cwd">Thư mục làm việc
@@ -122,35 +113,7 @@ function boot(host: HTMLElement): void {
             </label>
             <p class="hint">Bấm một thư mục để mở bên trong.</p>
             <div id="workdir-files" class="workdir-files"></div>
-          </section>
-          <section class="skill-block">
-            <p class="section-note">Thư mục skill</p>
-            <p class="hint">Agent tự đọc skill của dự án đang mở, kể cả thư mục con trong .claude/skills, .cursor/skills, .agents/skills, .codex/skills, .gemini/skills và skills. Thư mục chọn thêm ở dưới cũng được quét nhiều tầng. Khi việc khớp mô tả trong SKILL.md, agent mở file đó rồi làm theo. File ghi ra vẫn nằm trong thư mục làm việc.</p>
-            <label class="cwd">Skill Claude
-              <span>
-                <input id="set-claude-skill" spellcheck="false" placeholder="Thư mục skill của Claude" aria-label="Thư mục skill Claude" />
-                ${iconButton("pick-claude-skill", "folder", "Chọn thư mục skill Claude")}
-              </span>
-            </label>
-            <label class="cwd">Skill Cursor
-              <span>
-                <input id="set-cursor-skill" spellcheck="false" placeholder="Thư mục skill của Cursor" aria-label="Thư mục skill Cursor" />
-                ${iconButton("pick-cursor-skill", "folder", "Chọn thư mục skill Cursor")}
-              </span>
-            </label>
-            <label class="cwd">Skill Codex
-              <span>
-                <input id="set-codex-skill" spellcheck="false" placeholder="Thư mục skill của Codex" aria-label="Thư mục skill Codex" />
-                ${iconButton("pick-codex-skill", "folder", "Chọn thư mục skill Codex")}
-              </span>
-            </label>
-            <label class="cwd">Skill Gemini
-              <span>
-                <input id="set-gemini-skill" spellcheck="false" placeholder="Thư mục skill của Gemini" aria-label="Thư mục skill Gemini" />
-                ${iconButton("pick-gemini-skill", "folder", "Chọn thư mục skill Gemini")}
-              </span>
-            </label>
-            <div class="save-row">${iconButton("save-dirs", "check", "Lưu thư mục làm việc và skill", "", "", "button", "icon-btn primary")}</div>
+            <div class="save-row">${iconButton("save-dirs", "check", "Lưu thư mục làm việc", "", "", "button", "icon-btn primary")}</div>
           </section>
         </div>
         <div class="panel-body" data-pane="settings" hidden>
@@ -169,6 +132,7 @@ function boot(host: HTMLElement): void {
           <label>Lệnh Codex<input id="set-codex-command" spellcheck="false" /></label>
           <label>Lệnh Gemini<input id="set-gemini-command" spellcheck="false" /></label>
           <label class="check"><input id="set-auto" type="checkbox" /> Tự chấp nhận máy trong LAN</label>
+          <button id="open-skills" type="button" class="access-open">Thư mục skill</button>
           <button id="open-access" type="button" class="access-open">Khả năng truy cập của agent khác</button>
           <div id="tools" class="tools"></div>
           <p class="hint">Không dùng API key trong app. File đi qua app, không cần share Windows. Claude, Cursor, Codex và Gemini dùng bản CLI đã đăng nhập trên máy này. Gemini cũng nhận GEMINI_API_KEY nếu biến đó đã có sẵn. Lệnh cursor của Cursor IDE không được tính là Cursor CLI.</p>
@@ -180,6 +144,24 @@ function boot(host: HTMLElement): void {
         </div>
         <div class="panel-body" data-pane="logs" hidden>
           <div id="logs" class="logs" aria-live="polite"></div>
+        </div>
+      </aside>
+      <aside class="panel session-col" id="session-col">
+        <div class="panel-head">
+          <strong id="session-peer">Chưa chọn máy</strong>
+          <span id="session-peer-meta">Phiên hiện ở cột này khi chọn một máy.</span>
+        </div>
+        <div class="pane-title-row">
+          <h2 class="pane-title">Phiên chat</h2>
+          <span id="session-unread" class="unread-count" hidden></span>
+        </div>
+        <div class="panel-body">
+          <div class="search">
+            ${icon("search")}
+            <input id="history-query" placeholder="Tìm trong phiên của máy này" autocomplete="off" aria-label="Tìm trong phiên của máy này" />
+          </div>
+          <div id="history-list" class="history-list"></div>
+          <div class="pane-tools">${iconButton("new-session", "plus", "Phiên mới với máy đang chọn")}</div>
         </div>
       </aside>
       <section class="chat">
@@ -288,6 +270,42 @@ function boot(host: HTMLElement): void {
     </div>
     <div id="tip" class="tip" hidden></div>
     <div id="toast" class="toast" hidden></div>
+    <div id="skill-pop" class="skill-pop" hidden>
+      <div class="skill-card" role="dialog" aria-modal="true" aria-labelledby="skill-title">
+        <header>
+          <strong id="skill-title">Thư mục skill</strong>
+          ${iconButton("skill-close", "x", "Đóng")}
+        </header>
+        <div class="skill-form">
+          <p class="hint">Agent tự đọc skill của dự án đang mở, kể cả thư mục con trong .claude/skills, .cursor/skills, .agents/skills, .codex/skills, .gemini/skills và skills. Thư mục chọn thêm ở dưới cũng được quét nhiều tầng. Khi việc khớp mô tả trong SKILL.md, agent mở file đó rồi làm theo. File ghi ra vẫn nằm trong thư mục làm việc.</p>
+          <label class="cwd">Skill Claude
+            <span>
+              <input id="set-claude-skill" spellcheck="false" placeholder="Thư mục skill của Claude" aria-label="Thư mục skill Claude" />
+              ${iconButton("pick-claude-skill", "folder", "Chọn thư mục skill Claude")}
+            </span>
+          </label>
+          <label class="cwd">Skill Cursor
+            <span>
+              <input id="set-cursor-skill" spellcheck="false" placeholder="Thư mục skill của Cursor" aria-label="Thư mục skill Cursor" />
+              ${iconButton("pick-cursor-skill", "folder", "Chọn thư mục skill Cursor")}
+            </span>
+          </label>
+          <label class="cwd">Skill Codex
+            <span>
+              <input id="set-codex-skill" spellcheck="false" placeholder="Thư mục skill của Codex" aria-label="Thư mục skill Codex" />
+              ${iconButton("pick-codex-skill", "folder", "Chọn thư mục skill Codex")}
+            </span>
+          </label>
+          <label class="cwd">Skill Gemini
+            <span>
+              <input id="set-gemini-skill" spellcheck="false" placeholder="Thư mục skill của Gemini" aria-label="Thư mục skill Gemini" />
+              ${iconButton("pick-gemini-skill", "folder", "Chọn thư mục skill Gemini")}
+            </span>
+          </label>
+          <div class="save-row">${iconButton("save-skills", "check", "Lưu thư mục skill", "", "", "button", "icon-btn primary")}</div>
+        </div>
+      </div>
+    </div>
     <div id="result-pop" class="result-pop" hidden>
       <div class="result-card" role="dialog" aria-modal="true" aria-labelledby="result-title">
         <header>
@@ -300,19 +318,20 @@ function boot(host: HTMLElement): void {
   `;
   buildAccessDialog(host);
 
-  const navIds = ["peers", "sessions", "files", "settings", "logs"] as const;
+  const navIds = ["peers", "files", "settings", "logs"] as const;
   type NavId = (typeof navIds)[number];
   const navTitles: Record<NavId, string> = {
     peers: "Máy trong LAN",
-    sessions: "Phiên chat",
     files: "Thư mục làm việc",
     settings: "Cài đặt",
     logs: "Nhật ký",
   };
-  let nav: NavId = navIds.includes(localStorage.getItem("lan-nav") as NavId) ? (localStorage.getItem("lan-nav") as NavId) : "peers";
+  const storedNav = localStorage.getItem("lan-nav");
+  let nav: NavId = navIds.includes(storedNav as NavId) ? (storedNav as NavId) : "peers";
   let navOpen = localStorage.getItem("lan-nav-open") !== "0";
 
   function applyNav(): void {
+    document.body.dataset.nav = nav;
     document.body.dataset.collapsed = navOpen ? "0" : "1";
     for (const pane of Array.from(document.querySelectorAll<HTMLElement>("[data-pane]"))) {
       pane.hidden = pane.dataset.pane !== nav;
@@ -428,8 +447,25 @@ function boot(host: HTMLElement): void {
       flash("Đã lưu khả năng truy cập");
     });
   });
+  must<HTMLButtonElement>("#open-skills").addEventListener("click", () => openSkills());
+  must<HTMLElement>("#skill-pop").addEventListener("click", (event) => {
+    if (event.target === event.currentTarget) closeSkills();
+  });
+  must<HTMLButtonElement>("#skill-close").addEventListener("click", () => closeSkills());
+  must<HTMLButtonElement>("#save-skills").addEventListener("click", () => {
+    void guard(async () => {
+      await window.lan.saveSettings(readSettings());
+      must<HTMLElement>("#skill-pop").hidden = true;
+      flash("Đã lưu thư mục skill");
+    });
+  });
   window.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && !must<HTMLElement>("#access-pop").hidden) closeAccess();
+    if (event.key !== "Escape") return;
+    if (!must<HTMLElement>("#skill-pop").hidden) {
+      closeSkills();
+      return;
+    }
+    if (!must<HTMLElement>("#access-pop").hidden) closeAccess();
   });
 
   must<HTMLButtonElement>("#save").addEventListener("click", () => {
@@ -667,7 +703,7 @@ function boot(host: HTMLElement): void {
   must<HTMLButtonElement>("#save-dirs").addEventListener("click", () => {
     void guard(async () => {
       await window.lan.saveSettings(readSettings());
-      flash("Đã lưu thư mục làm việc và skill");
+      flash("Đã lưu thư mục làm việc");
     });
   });
   window.setInterval(() => void refreshFiles(), 4000);
@@ -866,10 +902,10 @@ function boot(host: HTMLElement): void {
     const fullMeta = [providerLabel(next.self.provider), `${next.self.host}:${next.self.port}`, shortId(next.self.peerId), localNote].filter(Boolean).join(" · ");
     meta.textContent = `${providerLabel(next.self.provider)} · ${next.self.host}:${next.self.port}`;
     meta.dataset.tip = fullMeta;
-    const unread = next.unreadSessions.length;
-    const navUnread = must<HTMLElement>("#nav-unread");
-    navUnread.hidden = unread === 0;
-    navUnread.textContent = unread > 9 ? "9+" : unread > 0 ? String(unread) : "";
+    const sessionUnread = must<HTMLElement>("#session-unread");
+    const unread = active ? unreadFor(next, active) : 0;
+    sessionUnread.hidden = unread === 0;
+    sessionUnread.textContent = unread > 9 ? "9+" : unread > 0 ? String(unread) : "";
     const watching = active ? next.openSession[active] ?? "" : "";
     const watchKey = `${active ?? ""}\n${watching}`;
     if (watchKey !== watchedKey) {
@@ -1509,6 +1545,23 @@ function boot(host: HTMLElement): void {
     }
   }
 
+  function paintSkillFields(settings: Settings): void {
+    must<HTMLInputElement>("#set-claude-skill").value = settings.claudeSkillDir;
+    must<HTMLInputElement>("#set-cursor-skill").value = settings.cursorSkillDir;
+    must<HTMLInputElement>("#set-codex-skill").value = settings.codexSkillDir;
+    must<HTMLInputElement>("#set-gemini-skill").value = settings.geminiSkillDir;
+  }
+
+  function openSkills(): void {
+    if (state) paintSkillFields(state.settings);
+    must<HTMLElement>("#skill-pop").hidden = false;
+  }
+
+  function closeSkills(): void {
+    if (state) paintSkillFields(state.settings);
+    must<HTMLElement>("#skill-pop").hidden = true;
+  }
+
   function closeAccess(): void {
     paintAccess(state?.settings.access ?? defaultAccess());
     must<HTMLElement>("#access-pop").hidden = true;
@@ -1523,10 +1576,7 @@ function boot(host: HTMLElement): void {
     must<HTMLInputElement>("#set-codex-command").value = settings.codexCommand;
     must<HTMLInputElement>("#set-gemini-command").value = settings.geminiCommand;
     must<HTMLInputElement>("#set-cwd").value = settings.workDir;
-    must<HTMLInputElement>("#set-claude-skill").value = settings.claudeSkillDir;
-    must<HTMLInputElement>("#set-cursor-skill").value = settings.cursorSkillDir;
-    must<HTMLInputElement>("#set-codex-skill").value = settings.codexSkillDir;
-    must<HTMLInputElement>("#set-gemini-skill").value = settings.geminiSkillDir;
+    paintSkillFields(settings);
     must<HTMLInputElement>("#set-confine").checked = settings.confineWorkDir;
     must<HTMLInputElement>("#set-auto").checked = settings.autoAccept;
     paintAccess(settings.access);
@@ -1629,7 +1679,23 @@ function boot(host: HTMLElement): void {
     void guard(() => window.lan.showPreview(file));
   }
 
+  function selectedCaption(next: AppState): { title: string; meta: string } {
+    if (!active) return { title: "Chưa chọn máy", meta: "Phiên hiện ở cột này khi chọn một máy." };
+    const groupId = parseGroupKey(active);
+    if (groupId) {
+      const group = next.groups.find((item) => item.id === groupId);
+      return { title: group?.title || "Nhóm", meta: "Phiên của nhóm này" };
+    }
+    const peer = next.peers.find((item) => item.peerId === active);
+    if (!peer) return { title: "Máy", meta: "Phiên của máy này" };
+    const where = peer.viaLocalhost ? "cùng máy" : peer.host || "";
+    return { title: displayName(next, peer.peerId, peer.name), meta: where ? `Phiên của máy này · ${where}` : "Phiên của máy này" };
+  }
+
   function paintHistory(next: AppState): void {
+    const caption = selectedCaption(next);
+    must<HTMLElement>("#session-peer").textContent = caption.title;
+    must<HTMLElement>("#session-peer-meta").textContent = caption.meta;
     const box = must<HTMLElement>("#history-list");
     const query = historyQuery.trim().toLowerCase();
     const mine = active ? next.sessions.filter((session) => session.peerId === active) : next.sessions;
@@ -1647,13 +1713,13 @@ function boot(host: HTMLElement): void {
       .filter((row) => row.shown)
       .sort((a, b) => b.session.updatedAt - a.session.updatedAt);
     box.replaceChildren();
-    must<HTMLButtonElement>("#new-session").disabled = !active;
+    must<HTMLButtonElement>("#new-session").disabled = !active || Boolean(parseGroupKey(active));
     if (!active) {
-      box.textContent = "Chọn một máy để xem các phiên chat.";
+      box.replaceChildren(historyNote("Chọn một máy để xem các phiên chat."));
       return;
     }
     if (!rows.length) {
-      box.textContent = query ? "Không thấy phiên nào khớp." : "Chưa có phiên. Gửi tin hoặc bấm Phiên mới.";
+      box.replaceChildren(historyNote(query ? "Không thấy phiên nào khớp." : "Chưa có phiên. Gửi tin hoặc bấm Phiên mới."));
       return;
     }
     for (const row of rows) {
@@ -1931,6 +1997,13 @@ function boot(host: HTMLElement): void {
       if (next && typeof next === "object") paint(next as AppState);
     });
   }
+}
+
+function historyNote(text: string): HTMLElement {
+  const note = document.createElement("p");
+  note.className = "hint";
+  note.textContent = text;
+  return note;
 }
 
 function unreadFor(next: AppState, peerId: string): number {
