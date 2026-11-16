@@ -615,6 +615,16 @@ label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 12px; co
   box-shadow: none;
 }
 
+.session-col .history-title {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+}
+
+.session-col .history-title .unread-count { margin-top: 1px; }
+
 .session-col .history-open strong,
 .session-col .history-open small {
   display: block;
@@ -625,7 +635,11 @@ label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 12px; co
   line-height: 1.35;
 }
 
-.session-col .history-open strong { font-weight: 650; }
+.session-col .history-open .history-title strong {
+  flex: 1 1 auto;
+  width: auto;
+  font-weight: 650;
+}
 
 .session-col .history-open small.history-peek {
   display: -webkit-box;

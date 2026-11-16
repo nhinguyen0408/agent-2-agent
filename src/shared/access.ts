@@ -205,7 +205,8 @@ export function latestRequest(history: { role: string; text: string }[]): string
     .join("\n");
 }
 
-export function accessPrompt(enabled: readonly string[] | undefined): string {
+export function accessPrompt(enabled: readonly string[] | null | undefined): string {
+  if (enabled === null) return "";
   const allow = new Set(enabled ?? defaultAccess());
   const on = ACCESS_ROLES.filter((role) => allow.has(role.id)).map((role) => role.title);
   const off = ACCESS_ROLES.filter((role) => !allow.has(role.id)).map((role) => role.title);

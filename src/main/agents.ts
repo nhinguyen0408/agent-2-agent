@@ -29,7 +29,7 @@ export type ReplyInput = {
   skillDir?: string;
   skillDirs?: string[];
   skills?: string;
-  access?: string[];
+  access?: string[] | null;
   room?: { title: string; members: string };
   together?: string;
   resume?: boolean;
@@ -256,7 +256,7 @@ export class AgentHost {
       input.signal.addEventListener("abort", onAbort, { once: true });
       const take = (event: unknown) => {
         const blob = toolBlob(event);
-        if (blob) {
+        if (blob && input.access !== null) {
           const hits = deniedRoles(blob, input.access ?? defaultAccess(), "command");
           if (hits.length) {
             if (!blocked) {

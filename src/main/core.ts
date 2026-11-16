@@ -1465,7 +1465,8 @@ export class AppCore {
         resolveOut("");
         return;
       }
-      const blocked = deniedRoles(latestRequest(this.modelHistory(bound)), this.store.settings.access, "request");
+      const owner = this.selfMentionTurn(bound);
+      const blocked = owner ? [] : deniedRoles(latestRequest(this.modelHistory(bound)), this.store.settings.access, "request");
       if (blocked.length) {
         if (loop) {
           const brief = this.store.briefs[bound];
@@ -1549,7 +1550,7 @@ export class AppCore {
             skillDir,
             skillDirs,
             skills: skillCatalog(skillDirs),
-            access: this.store.settings.access,
+            access: owner ? null : this.store.settings.access,
             room: room
               ? {
                   title: room.title,
@@ -1574,7 +1575,7 @@ export class AppCore {
             },
           });
         };
-        let resumeEnabled = this.agents.resumes(provider);
+        let resumeEnabled = !owner && this.agents.resumes(provider);
         let result;
         try {
           result = await ask(resumeEnabled);
@@ -1778,6 +1779,21 @@ export class AppCore {
     if (!clean) return;
     this.appendLine(sessionId, this.makeLine(peerId, this.store.peerId, this.store.settings.name, "system", clean));
     this.pushNow();
+  }
+
+  private selfMentionTurn(sessionId: string): boolean {
+    const self = this.store.peerId;
+    const lines = this.store.transcripts[sessionId] ?? [];
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      const line = lines[i];
+      if (line.pending || line.kind === "system") continue;
+      if (line.fromPeerId === self && line.kind === "agent") continue;
+      if (line.fromPeerId === self && line.kind === "human") {
+        return Boolean(line.mentions?.some((item) => item.peerId === self));
+      }
+      return false;
+    }
+    return false;
   }
 
   private modelHistory(sessionId: string, afterLineId = ""): ModelTurn[] {

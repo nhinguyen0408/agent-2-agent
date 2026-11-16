@@ -1775,14 +1775,19 @@ function boot(host: HTMLElement): void {
       open.dataset.session = row.session.id;
       open.dataset.peer = row.session.peerId;
       if (row.matched) open.dataset.line = row.matched.id;
+      const fresh = next.unreadSessions.includes(row.session.id);
       const title = document.createElement("strong");
-      title.textContent = `${row.session.title}${next.unreadSessions.includes(row.session.id) ? " · mới" : ""}`;
+      title.textContent = row.session.title;
+      const heading = document.createElement("span");
+      heading.className = "history-title";
+      heading.append(title);
+      if (fresh) heading.append(unreadMark(1));
       const when = new Date(row.session.updatedAt).toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" });
       const preview = shownMentionText(row.matched?.text || row.last?.text || "").replace(/\s+/g, " ").trim().slice(0, 90);
       const client = linkedClient(next, row.session);
       const facts = document.createElement("small");
       facts.textContent = [client, `${row.lines.length} dòng`, when].filter(Boolean).join(" · ");
-      open.append(title, facts);
+      open.append(heading, facts);
       if (preview) {
         const peek = document.createElement("small");
         peek.className = "history-peek";
