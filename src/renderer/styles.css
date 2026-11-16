@@ -585,25 +585,44 @@ label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 12px; co
   padding: 14px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  align-items: flex-start;
+  gap: 8px;
   min-height: 0;
   overflow-anchor: none;
+  container-type: inline-size;
 }
 
 .line {
-  max-width: min(40rem, 82%);
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
   gap: 3px;
+  max-width: 100%;
 }
 
-.line.mine { align-self: flex-end; }
+.line.mine { align-self: flex-end; align-items: flex-end; }
+
+.line.continued { margin-top: -4px; }
+
+.line.continued .meta { display: none; }
+
+.line > p,
+.line > .agent-md {
+  width: fit-content;
+  max-width: min(40rem, 82cqw);
+}
+
+.line > .preview:not(.agent-md) {
+  width: min(22rem, 82cqw);
+  max-width: 100%;
+}
 
 .line p {
   margin: 0;
   padding: 8px 12px;
   border-radius: 16px;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   background: #f2f2f7;
 }
 
@@ -673,7 +692,7 @@ label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 12px; co
 
 .line.agent .agent-md .markdown a { color: var(--accent); }
 
-.line.system { align-self: center; max-width: 100%; }
+.line.system { align-self: center; align-items: center; max-width: 100%; }
 
 .line.system p {
   background: transparent;
@@ -1269,8 +1288,12 @@ label.coding-toggle span {
   padding: 0 8px;
   border: 1px solid rgba(0, 0, 0, 0.12);
   border-radius: 8px;
-  background: white;
+  background: #fff;
+  color: var(--text);
+  caret-color: var(--text);
 }
+
+.nick-edit::placeholder { color: var(--muted); }
 
 .group-invite select { width: 9.5rem; padding: 0.25rem 0.4rem; }
 

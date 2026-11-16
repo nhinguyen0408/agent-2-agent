@@ -52,46 +52,196 @@ export function configuredSkillDir(settings: Settings): string {
   return (dirs[settings.provider] ?? "").trim();
 }
 
+const PROJECT_SKILL_DIRS = [
+  ".claude/skills",
+  ".cursor/skills",
+  ".agents/skills",
+  ".codex/skills",
+  ".gemini/skills",
+  ".github/skills",
+  "skills",
+];
+const SKILL_SKIP = new Set(["node_modules", ".git", "dist", "release", "out", "build", "coverage", ".next", ".turbo"]);
+const SKILL_DEPTH = 6;
+const SKILL_VISITS = 400;
+const SKILL_CAP = 24;
+const CATALOG_BUDGET = 1600;
+
+export type SkillHit = { name: string; description: string; file: string };
+
+export function projectSkillRoots(workDir: string, configuredDir: string): string[] {
+  const roots: string[] = [];
+  const seen = new Set<string>();
+  const add = (dir: string) => {
+    const trimmed = dir.trim();
+    if (!trimmed) return;
+    let resolved = "";
+    try {
+      if (!fs.statSync(trimmed).isDirectory()) return;
+      resolved = fs.realpathSync(path.resolve(trimmed));
+    } catch {
+      return;
+    }
+    const key = dirKey(resolved);
+    if (seen.has(key)) return;
+    seen.add(key);
+    roots.push(resolved);
+  };
+  const work = workDir.trim();
+  if (work) {
+    for (const rel of PROJECT_SKILL_DIRS) add(path.join(work, rel));
+  }
+  add(configuredDir);
+  return roots;
+}
+
 export function skillIndex(dir: string): string {
-  const root = dir.trim();
-  if (!root) return "";
-  let entries: fs.Dirent[];
-  try {
-    if (!fs.statSync(root).isDirectory()) return "";
-    entries = fs.readdirSync(root, { withFileTypes: true });
-  } catch {
-    return "";
-  }
+  return skillCatalog(dir.trim() ? [dir] : []);
+}
+
+export function skillCatalog(roots: string[]): string {
+  const hits = collectSkills(roots);
+  if (!hits.length) return "";
   const lines: string[] = [];
-  const folders = entries.filter((entry) => entry.isDirectory()).sort((a, b) => a.name.localeCompare(b.name, "vi"));
-  for (const folder of folders) {
-    if (lines.length >= 8) break;
-    const base = path.join(root, folder.name);
-    const skill = ["SKILL.md", "skill.md", "AGENTS.md"].map((name) => path.join(base, name)).find((file) => fs.existsSync(file));
-    if (!skill) continue;
-    const note = firstTextLine(skill);
-    lines.push(note ? `- ${folder.name}: ${base} — ${note}` : `- ${folder.name}: ${base}`);
+  let used = 0;
+  for (const hit of hits) {
+    const line = `- ${hit.name}: ${hit.description} | ${hit.file}`;
+    const room = CATALOG_BUDGET - used - (lines.length ? 1 : 0);
+    if (room < 40) break;
+    const fitted = line.length <= room ? line : `${line.slice(0, room - 1)}…`;
+    lines.push(fitted);
+    used += fitted.length + 1;
+    if (fitted !== line) break;
   }
-  const docs = entries
-    .filter((entry) => entry.isFile() && /\.(md|markdown)$/i.test(entry.name))
-    .sort((a, b) => a.name.localeCompare(b.name, "vi"));
-  for (const file of docs) {
-    if (lines.length >= 8) break;
-    const full = path.join(root, file.name);
-    const note = firstTextLine(full);
-    lines.push(note ? `- ${file.name}: ${full} — ${note}` : `- ${file.name}: ${full}`);
+  const hidden = hits.length - lines.length;
+  if (hidden > 0 && CATALOG_BUDGET - used > 40) {
+    lines.push(`- … còn ${hidden} skill trong các thư mục skill. Liệt kê thư mục nếu việc cần skill chưa có ở trên.`);
   }
   return lines.join("\n");
 }
 
-function firstTextLine(file: string): string {
-  try {
-    const text = fs.readFileSync(file, "utf8").slice(0, 2000);
-    const line = text.split(/\r?\n/).map((item) => item.replace(/^#+\s*/, "").trim()).find(Boolean) ?? "";
-    return line.slice(0, 80);
-  } catch {
-    return "";
+function collectSkills(roots: string[]): SkillHit[] {
+  const hits: SkillHit[] = [];
+  const seenFiles = new Set<string>();
+  const seenDirs = new Set<string>();
+  for (const root of roots) {
+    walkSkills(root, 0, hits, seenFiles, seenDirs, { visits: 0 });
+    if (hits.length >= SKILL_CAP) break;
   }
+  hits.sort((a, b) => a.name.localeCompare(b.name, "vi") || a.file.localeCompare(b.file, "vi"));
+  return hits.slice(0, SKILL_CAP);
+}
+
+function walkSkills(
+  dir: string,
+  depth: number,
+  hits: SkillHit[],
+  seenFiles: Set<string>,
+  seenDirs: Set<string>,
+  state: { visits: number },
+): void {
+  if (depth > SKILL_DEPTH || state.visits >= SKILL_VISITS || hits.length >= SKILL_CAP) return;
+  let resolved = dir;
+  try {
+    resolved = fs.realpathSync(dir);
+  } catch {
+    return;
+  }
+  const key = dirKey(resolved);
+  if (seenDirs.has(key)) return;
+  seenDirs.add(key);
+  state.visits += 1;
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(resolved, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  const preferred = ["skill.md", "agents.md"]
+    .map((wanted) => entries.find((entry) => entry.isFile() && entry.name.toLowerCase() === wanted)?.name)
+    .find((name): name is string => Boolean(name));
+  if (preferred) {
+    const file = path.join(resolved, preferred);
+    const fileKey = dirKey(file);
+    if (!seenFiles.has(fileKey)) {
+      seenFiles.add(fileKey);
+      hits.push(readSkill(file, path.basename(resolved)));
+    }
+  }
+  if (depth === SKILL_DEPTH) return;
+  const folders = entries
+    .filter((entry) => entry.isDirectory() && !SKILL_SKIP.has(entry.name.toLowerCase()))
+    .sort((a, b) => a.name.localeCompare(b.name, "vi"));
+  for (const folder of folders) {
+    walkSkills(path.join(resolved, folder.name), depth + 1, hits, seenFiles, seenDirs, state);
+  }
+}
+
+function readSkill(file: string, folderName: string): SkillHit {
+  let text = "";
+  try {
+    text = fs.readFileSync(file, "utf8").slice(0, 8000);
+  } catch {
+    return { name: clipMeta(folderName, 48), description: "Chưa đọc được mô tả.", file };
+  }
+  const front = text.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+  const name = clipMeta(yamlField(front?.[1] ?? "", "name") || folderName, 48);
+  let description = yamlField(front?.[1] ?? "", "description");
+  if (!description) description = firstUsefulLine(front ? text.slice(front[0].length) : text);
+  if (!description) description = "Không có mô tả. Đọc file trước khi dùng.";
+  return { name, description: clipMeta(description, 110), file };
+}
+
+function yamlField(block: string, key: string): string {
+  if (!block) return "";
+  const lines = block.split(/\r?\n/);
+  const pattern = new RegExp(`^${key}:\\s*(.*)$`, "i");
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = pattern.exec(lines[index]);
+    if (!match) continue;
+    const raw = match[1].trim();
+    if (raw === ">" || raw === "|" || raw === ">-" || raw === "|-" || raw === "") {
+      const folded: string[] = [];
+      for (let next = index + 1; next < lines.length; next += 1) {
+        if (/^\s+\S/.test(lines[next])) {
+          folded.push(lines[next].trim());
+          continue;
+        }
+        if (!lines[next].trim() && folded.length) break;
+        if (!lines[next].trim()) continue;
+        break;
+      }
+      return folded.join(" ");
+    }
+    return unquote(raw);
+  }
+  return "";
+}
+
+function unquote(value: string): string {
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    return value.slice(1, -1);
+  }
+  return value;
+}
+
+function firstUsefulLine(body: string): string {
+  for (const line of body.split(/\r?\n/)) {
+    const clean = line.replace(/^#+\s*/, "").trim();
+    if (!clean || clean === "---" || /^[-|:>]+$/.test(clean)) continue;
+    return clean;
+  }
+  return "";
+}
+
+function clipMeta(value: string, max: number): string {
+  const clean = value.replace(/\s+/g, " ").trim();
+  return clean.length <= max ? clean : `${clean.slice(0, max - 1)}…`;
+}
+
+function dirKey(file: string): string {
+  const full = path.resolve(file);
+  return process.platform === "win32" ? full.toLowerCase() : full;
 }
 
 export async function listWorkFiles(dir: string): Promise<{ found: boolean; files: WorkFile[] }> {

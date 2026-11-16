@@ -68,7 +68,7 @@ import { AccessDenied, deniedRoles, denialText, latestRequest } from "../shared/
 import { AgentHost, CliResumeUnsupported, CliSessionLost, type ModelTurn } from "./agents";
 import { detectLocalClis, installedCliList, parseCliList } from "./cliDetect";
 import { Discovery, lanIPv4, normalizeIp } from "./discovery";
-import { briefFolder, configuredSkillDir, fileNameFromHeader, formatBytes, MAX_FILE_BYTES, readFileLimited, resolveInside, safeFileName, saveExact, saveReceivedFile, skillIndex } from "./files";
+import { briefFolder, configuredSkillDir, fileNameFromHeader, formatBytes, MAX_FILE_BYTES, projectSkillRoots, readFileLimited, resolveInside, safeFileName, saveExact, saveReceivedFile, skillCatalog } from "./files";
 import { allowPreview } from "./preview";
 import { discussExcerpt, discussKind, isDiscussKind } from "../shared/discuss";
 import { fileRef, type FileRef } from "../shared/preview";
@@ -1512,6 +1512,7 @@ export class AppCore {
       try {
         const provider = this.store.settings.provider;
         const skillDir = configuredSkillDir(this.store.settings);
+        const skillDirs = projectSkillRoots(this.store.settings.workDir, skillDir);
         const coding = Boolean(room && this.store.briefs[bound]?.coding);
         const selfMember = room?.members.find((member) => member.peerId === this.store.peerId);
         if (coding) {
@@ -1546,7 +1547,8 @@ export class AppCore {
             workDir: this.store.settings.workDir,
             confine: this.store.settings.confineWorkDir,
             skillDir,
-            skills: skillIndex(skillDir),
+            skillDirs,
+            skills: skillCatalog(skillDirs),
             access: this.store.settings.access,
             room: room
               ? {

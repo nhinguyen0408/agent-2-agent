@@ -125,7 +125,7 @@ function boot(host: HTMLElement): void {
           </section>
           <section class="skill-block">
             <p class="section-note">Thư mục skill</p>
-            <p class="hint">Agent trên máy này đọc skill của runtime đang chọn khi làm yêu cầu của máy khác. Được đọc skill. File ghi ra vẫn nằm trong thư mục làm việc.</p>
+            <p class="hint">Agent tự đọc skill của dự án đang mở, kể cả thư mục con trong .claude/skills, .cursor/skills, .agents/skills, .codex/skills, .gemini/skills và skills. Thư mục chọn thêm ở dưới cũng được quét nhiều tầng. Khi việc khớp mô tả trong SKILL.md, agent mở file đó rồi làm theo. File ghi ra vẫn nằm trong thư mục làm việc.</p>
             <label class="cwd">Skill Claude
               <span>
                 <input id="set-claude-skill" spellcheck="false" placeholder="Thư mục skill của Claude" aria-label="Thư mục skill Claude" />
@@ -1966,7 +1966,8 @@ function paintMessages(host: HTMLElement, lines: ChatLine[], selfId: string, sti
   }
   let changed = false;
   let previous: HTMLElement | null = null;
-  for (const line of lines) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
     let article = byId.get(line.id) ?? null;
     const text = line.text || (line.pending ? "…" : "");
     if (!article) {
@@ -1996,6 +1997,7 @@ function paintMessages(host: HTMLElement, lines: ChatLine[], selfId: string, sti
       body?.classList.toggle("pending", line.pending);
       article.classList.toggle("hit", Boolean(query.trim()) && line.text.toLowerCase().includes(query.trim().toLowerCase()));
     }
+    article.classList.toggle("continued", continuesSender(lines[index - 1], line));
     const anchor: ChildNode | null = previous ? previous.nextSibling : host.firstChild;
     if (article !== anchor) host.insertBefore(article, anchor);
     previous = article;
@@ -2005,6 +2007,13 @@ function paintMessages(host: HTMLElement, lines: ChatLine[], selfId: string, sti
     if (scroller && scroller.scrollTop !== top) scroller.scrollTop = top;
   }
   if (changed && stick) host.scrollTop = host.scrollHeight;
+}
+
+function continuesSender(previous: ChatLine | undefined, line: ChatLine): boolean {
+  if (!previous || previous.kind === "system" || line.kind === "system") return false;
+  if (previous.fromPeerId !== line.fromPeerId || previous.kind !== line.kind) return false;
+  const gap = line.createdAt - previous.createdAt;
+  return gap >= 0 && gap <= 60_000;
 }
 
 function renderLine(line: ChatLine, selfId: string): HTMLElement {

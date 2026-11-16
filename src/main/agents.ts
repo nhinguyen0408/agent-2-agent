@@ -27,6 +27,7 @@ export type ReplyInput = {
   workDir?: string;
   confine?: boolean;
   skillDir?: string;
+  skillDirs?: string[];
   skills?: string;
   access?: string[];
   room?: { title: string; members: string };
@@ -93,13 +94,13 @@ export class AgentHost {
   private claudeCli(input: ReplyInput, settings: Settings): Promise<AgentResult> {
     const prompt = oneLine(conversationPrompt(input));
     const resume = Boolean(input.resume && input.sessionId);
-    const skill = mountedSkill(input, settings.workDir);
+    const skills = mountedSkills(input, settings.workDir);
     const plain = [
       ["-p", prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-mode", "bypassPermissions"],
       ["-p", prompt, "--output-format", "text", "--permission-mode", "bypassPermissions"],
       ["-p", prompt, "--output-format", "text", "--permission-mode", "dontAsk"],
     ];
-    const attempts = skill ? [...plain.map((args) => withAddedDir(args, skill)), ...plain] : plain;
+    const attempts = skills.length ? [...plain.map((args) => withAddedDirs(args, skills)), ...plain] : plain;
     return this.runCli(input, {
       command: settings.claudeCommand || "claude",
       cwd: settings.workDir,
@@ -113,16 +114,17 @@ export class AgentHost {
   private cursorCli(input: ReplyInput, settings: Settings): Promise<AgentResult> {
     const prompt = clip(conversationPrompt(input), 12000);
     const resume = Boolean(input.resume && input.sessionId);
-    const skill = mountedSkill(input, settings.workDir);
+    const skills = mountedSkills(input, settings.workDir);
     const confine = Boolean(input.confine);
     const sandbox = confine && cursorSandboxAvailable() ? "enabled" : "disabled";
+    const added = skills.flatMap((dir) => ["--add-dir", dir]);
     const locked = (workspace: boolean, skillDir: boolean) => [
       "-p",
       "--trust",
       "--sandbox",
       sandbox,
       ...(workspace ? ["--workspace", settings.workDir] : []),
-      ...(skillDir && skill ? ["--add-dir", skill] : []),
+      ...(skillDir ? added : []),
       "--force",
       "--output-format",
       "stream-json",
@@ -134,7 +136,7 @@ export class AgentHost {
       "--trust",
       "--sandbox",
       "disabled",
-      ...(skillDir && skill ? ["--add-dir", skill] : []),
+      ...(skillDir ? added : []),
       "--force",
       ...(stream ? ["--output-format", "stream-json", "--stream-partial-output"] : []),
       prompt,
@@ -145,7 +147,7 @@ export class AgentHost {
         : [
             open(true, true),
             open(false, true),
-            ["-p", "--trust", "--force", ...(skill ? ["--add-dir", skill] : []), prompt],
+            ["-p", "--trust", "--force", ...added, prompt],
             ["-p", "--trust", "--force", prompt],
             ["-p", "--trust", prompt],
           ],
@@ -165,7 +167,8 @@ export class AgentHost {
     const cwd = settings.workDir;
     const resume = Boolean(input.resume && input.sessionId);
     const confine = Boolean(input.confine);
-    const attempts = confine
+    const skills = mountedSkills(input, settings.workDir);
+    const plain = confine
       ? [
           ["exec", "--json", "--skip-git-repo-check", "--sandbox", "workspace-write", "--cd", cwd, prompt],
           ["exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "--cd", cwd, prompt],
@@ -175,6 +178,7 @@ export class AgentHost {
           ["exec", "--json", "--skip-git-repo-check", "--sandbox", "danger-full-access", "--cd", cwd, prompt],
           ["exec", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", prompt],
         ];
+    const attempts = skills.length ? [...plain.map((args) => withCodexDirs(args, skills)), ...plain] : plain;
     return this.runCli(input, {
       command: settings.codexCommand || "codex",
       cwd,
@@ -188,14 +192,14 @@ export class AgentHost {
   private geminiCli(input: ReplyInput, settings: Settings): Promise<AgentResult> {
     const prompt = oneLine(conversationPrompt(input), 4500);
     const resume = Boolean(input.resume && input.sessionId);
-    const skill = mountedSkill(input, settings.workDir);
+    const skills = mountedSkills(input, settings.workDir);
     const attempts = uniqueAttempts([
-      geminiArgs(prompt, "stream-json", "approval", skill, true),
-      geminiArgs(prompt, "stream-json", "approval", "", true),
-      geminiArgs(prompt, "stream-json", "yolo", skill, true),
-      geminiArgs(prompt, "json", "approval", skill, true),
-      geminiArgs(prompt, "json", "yolo", "", false),
-      geminiArgs(prompt, "", "yolo", "", false),
+      geminiArgs(prompt, "stream-json", "approval", skills, true),
+      geminiArgs(prompt, "stream-json", "approval", [], true),
+      geminiArgs(prompt, "stream-json", "yolo", skills, true),
+      geminiArgs(prompt, "json", "approval", skills, true),
+      geminiArgs(prompt, "json", "yolo", [], false),
+      geminiArgs(prompt, "", "yolo", [], false),
       ["-p", prompt],
     ]);
     return this.runCli(input, {
@@ -410,7 +414,7 @@ function conversationPrompt(input: ReplyInput): string {
     "- Chỉ viết nội dung sẽ gửi cho đối phương. Không mở đầu bằng việc nhắc lại các quy tắc này.",
     input.coding
       ? "- Viết mô tả ảnh hưởng bằng Markdown, đủ ý. Không giới hạn số từ. Chỉ làm đúng vai đã giao."
-      : "- Dùng cùng ngôn ngữ với tin nhắn cuối. Giữ câu trả lời gọn, thường dưới 120 từ, trừ khi đang tóm tắt file hoặc đang viết khối KẾT QUẢ.",
+      : "- Dùng cùng ngôn ngữ với tin nhắn cuối. Giữ câu trả lời trong khoảng 500 từ, trừ khi đang tóm tắt file hoặc đang viết khối KẾT QUẢ.",
     "- Bám các lượt trước. Không bịa việc máy kia đã làm.",
     input.confine
       ? `- Nếu ${input.peerName} nhờ một việc trên máy này, chỉ làm trong thư mục làm việc đã đăng ký rồi nói kết quả. Lệnh và sửa file trong thư mục đó được tự chạy, không hỏi lại.`
@@ -426,6 +430,7 @@ function conversationPrompt(input: ReplyInput): string {
     readingBlock(input),
     "",
     briefTail(input),
+    skillBlock(input),
     `Hãy trả lời ${input.peerName}.`,
   ]
     .filter((part) => part !== "")
@@ -442,9 +447,10 @@ function continuePrompt(input: ReplyInput): string {
     formatHistory(input),
     pace,
     briefTail(input),
+    skillBlock(input),
     input.coding
       ? `Hãy trả lời ${input.peerName}. Viết mô tả ảnh hưởng bằng Markdown, không giới hạn số từ. Chỉ làm đúng vai của mình.`
-      : `Hãy trả lời ${input.peerName}. Chỉ viết nội dung sẽ gửi, cùng ngôn ngữ với tin trên.`,
+      : `Hãy trả lời ${input.peerName}. Chỉ viết nội dung sẽ gửi, cùng ngôn ngữ với tin trên, trong khoảng 500 từ.`,
   ]
     .filter((part) => part !== "")
     .join("\n");
@@ -452,7 +458,6 @@ function continuePrompt(input: ReplyInput): string {
 
 function scopeBlock(input: ReplyInput, full: boolean): string {
   const work = input.workDir?.trim() ?? "";
-  const skill = input.skillDir?.trim() ?? "";
   const lines: string[] = [];
   if (input.confine && work) {
     lines.push(
@@ -460,50 +465,62 @@ function scopeBlock(input: ReplyInput, full: boolean): string {
         ? [
             `Thư mục làm việc đã đăng ký: ${work}`,
             "- Agent máy khác chỉ được nhờ việc bằng file và lệnh trong thư mục này hoặc thư mục con.",
-            "- Không cd ra ngoài, không đọc ổ đĩa khác, không dùng đường dẫn tuyệt đối bên ngoài thư mục đã đăng ký. Nếu yêu cầu cần chỗ khác, từ chối và nói giới hạn này.",
+            "- Không cd ra ngoài và không dùng đường dẫn tuyệt đối bên ngoài thư mục đã đăng ký, trừ file skill đã liệt kê ở cuối. Việc ghi file vẫn nằm trong thư mục làm việc.",
           ].join("\n")
-        : skill
-          ? `Chỉ dùng thư mục làm việc ${work}. Được đọc skill tại ${skill}. Từ chối việc bên ngoài hai chỗ này.`
-          : `Chỉ dùng thư mục làm việc ${work}. Từ chối việc bên ngoài thư mục này.`,
+        : `Chỉ dùng thư mục làm việc ${work}. Được đọc các file skill đã liệt kê. Từ chối việc bên ngoài những chỗ này.`,
     );
-  }
-  if (!full) {
-    if (!input.confine && skill) lines.push(`Đọc skill tại ${skill} khi làm yêu cầu của máy khác.`);
-    return lines.filter(Boolean).join("\n");
-  }
-  if (skill && input.skills?.trim()) {
-    lines.push(`Thư mục skill của runtime này: ${skill}`);
-    lines.push(
-      input.confine
-        ? "- Trước khi làm yêu cầu của máy khác, đọc skill phù hợp trong thư mục skill và làm theo skill đó. Được đọc thư mục skill. Việc ghi file vẫn nằm trong thư mục làm việc."
-        : "- Trước khi làm yêu cầu của máy khác, đọc skill phù hợp trong thư mục skill và làm theo skill đó.",
-    );
-    lines.push(input.skills.trim());
-  } else if (skill) {
-    lines.push(`Thư mục skill đã cài (${skill}) nhưng chưa đọc được. Không bịa skill.`);
   }
   return lines.filter(Boolean).join("\n");
+}
+
+function skillBlock(input: ReplyInput): string {
+  const catalog = input.skills?.trim() ?? "";
+  if (catalog) {
+    return [
+      "Skill của dự án này, kể cả skill nằm trong thư mục con. Khi việc khớp mô tả, đọc đúng file rồi làm theo. Không bịa bước chưa đọc.",
+      catalog,
+    ].join("\n");
+  }
+  const chosen = input.skillDir?.trim() ?? "";
+  return chosen ? `Thư mục skill đã chọn (${chosen}) không có SKILL.md. Không bịa skill.` : "";
 }
 
 function cursorSandboxAvailable(): boolean {
   return process.platform === "darwin" || process.platform === "linux";
 }
 
-function mountedSkill(input: ReplyInput, workDir: string): string {
-  const skill = input.skillDir?.trim() ?? "";
-  if (!skill) return "";
-  try {
-    if (!fs.statSync(skill).isDirectory()) return "";
-  } catch {
-    return "";
+function mountedSkills(input: ReplyInput, workDir: string): string[] {
+  const source = input.skillDirs?.length ? input.skillDirs : input.skillDir ? [input.skillDir] : [];
+  const dirs: string[] = [];
+  const seen = new Set<string>();
+  for (const dir of source) {
+    const skill = dir.trim();
+    if (!skill) continue;
+    let resolved = "";
+    try {
+      if (!fs.statSync(skill).isDirectory()) continue;
+      resolved = path.resolve(skill);
+    } catch {
+      continue;
+    }
+    if (insideDir(workDir, resolved)) continue;
+    const key = process.platform === "win32" ? resolved.toLowerCase() : resolved;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    dirs.push(resolved);
   }
-  if (insideDir(workDir, skill)) return "";
-  return skill;
+  return dirs;
 }
 
-function withAddedDir(args: string[], skill: string): string[] {
-  if (args[0] !== "-p" || args.length < 2) return args;
-  return [args[0], args[1], "--add-dir", skill, ...args.slice(2)];
+function withAddedDirs(args: string[], dirs: string[]): string[] {
+  if (!dirs.length || args[0] !== "-p" || args.length < 2) return args;
+  return [args[0], args[1], ...dirs.flatMap((dir) => ["--add-dir", dir]), ...args.slice(2)];
+}
+
+function withCodexDirs(args: string[], dirs: string[]): string[] {
+  if (!dirs.length) return args;
+  const prompt = args[args.length - 1];
+  return [...args.slice(0, -1), ...dirs.flatMap((dir) => ["--add-dir", dir]), prompt];
 }
 
 function uniqueAttempts(rows: string[][]): string[][] {
@@ -760,7 +777,7 @@ function geminiArgs(
   prompt: string,
   format: "stream-json" | "json" | "",
   mode: "approval" | "yolo" | "none",
-  skill: string,
+  dirs: string[],
   trust: boolean,
 ): string[] {
   const args = ["-p", prompt];
@@ -768,7 +785,7 @@ function geminiArgs(
   if (mode === "approval") args.push("--approval-mode", "yolo");
   if (mode === "yolo") args.push("--yolo");
   if (trust) args.push("--skip-trust");
-  if (skill) args.push("--include-directories", skill);
+  for (const dir of dirs) args.push("--include-directories", dir);
   return args;
 }
 

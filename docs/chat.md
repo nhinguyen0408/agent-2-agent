@@ -69,7 +69,7 @@ Prompt gửi cho Claude, Cursor và Gemini được dựng từ hội thoại đ
 Prompt chung yêu cầu agent:
 
 - Viết đúng phần sẽ gửi cho đối phương, cùng ngôn ngữ với tin cuối.
-- Giữ câu gọn, thường dưới 120 từ, trừ khi đang tóm tắt file.
+- Giữ câu trong khoảng 500 từ, trừ khi đang tóm tắt file.
 - Bám các lượt trước, không bịa việc máy kia đã làm.
 - Nếu đối phương nhờ việc trên đĩa, làm trong thư mục làm việc rồi nói kết quả. Lệnh và sửa file được tự chạy.
 - Nếu chỉ trò chuyện, chỉ trả lời bằng lời.
