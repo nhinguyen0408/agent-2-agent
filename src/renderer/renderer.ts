@@ -78,6 +78,7 @@ function boot(host: HTMLElement): void {
       </nav>
       <aside class="panel" id="panel">
         <div class="panel-head">
+          <span class="level-kicker">Máy này</span>
           <strong id="self-name"></strong>
           <span id="self-meta"></span>
         </div>
@@ -147,14 +148,16 @@ function boot(host: HTMLElement): void {
         </div>
       </aside>
       <aside class="panel session-col" id="session-col">
-        <div class="panel-head">
+        <header class="session-head">
+          <div class="session-kicker">
+            <span>Máy trong LAN</span>
+            <span class="crumb-sep" aria-hidden="true">›</span>
+            <span>Phiên chat</span>
+            <span id="session-unread" class="unread-count" hidden></span>
+          </div>
           <strong id="session-peer">Chưa chọn máy</strong>
-          <span id="session-peer-meta">Phiên hiện ở cột này khi chọn một máy.</span>
-        </div>
-        <div class="pane-title-row">
-          <h2 class="pane-title">Phiên chat</h2>
-          <span id="session-unread" class="unread-count" hidden></span>
-        </div>
+          <span id="session-peer-meta">Chọn một máy ở cột bên trái.</span>
+        </header>
         <div class="panel-body">
           <div class="search">
             ${icon("search")}
@@ -172,6 +175,7 @@ function boot(host: HTMLElement): void {
         <div id="chat-panel" class="chat-panel" hidden>
           <header class="chat-head">
             <div class="chat-id">
+              <p id="chat-kicker" class="chat-kicker" hidden></p>
               <h2 id="chat-title"></h2>
               <input id="session-title" maxlength="42" spellcheck="false" placeholder="Tên phiên" data-tip="Tên phiên. Enter để lưu." aria-label="Tên phiên" />
               <p id="chat-status"></p>
@@ -461,6 +465,10 @@ function boot(host: HTMLElement): void {
   });
   window.addEventListener("keydown", (event) => {
     if (event.key !== "Escape") return;
+    if (document.querySelector(".history-menu-pop:not([hidden])")) {
+      closeHistoryMenus();
+      return;
+    }
     if (!must<HTMLElement>("#skill-pop").hidden) {
       closeSkills();
       return;
@@ -949,6 +957,9 @@ function boot(host: HTMLElement): void {
       button.className = `peer${peer.peerId === active ? " active" : ""}`;
       const dot = document.createElement("i");
       dot.className = `dot ${peer.status === "none" && peer.discovered ? "online" : peer.status}`;
+      const badge = document.createElement("span");
+      badge.className = "peer-badge";
+      badge.append(dot);
       const who = document.createElement("span");
       who.className = "who";
       const title = document.createElement("strong");
@@ -958,7 +969,7 @@ function boot(host: HTMLElement): void {
       const where = peer.viaLocalhost ? "cùng máy" : peer.host || "chưa có IP";
       meta.textContent = [shown === peer.name ? "" : peer.name, providerLabel(peer.provider), where, peerCliNote(peer.clis), activityNote(next.activity[peer.peerId]), statusText(peer)].filter(Boolean).join(" · ");
       who.append(title, meta);
-      button.append(dot, who, unreadMark(unreadFor(next, peer.peerId)));
+      button.append(badge, who, unreadMark(unreadFor(next, peer.peerId)));
       const row = document.createElement("div");
       row.className = "peer-row";
       const nick = document.createElement("button");
@@ -987,7 +998,11 @@ function boot(host: HTMLElement): void {
       const button = document.createElement("button");
       button.type = "button";
       button.dataset.group = groupKey(group.id);
-      button.className = `peer${groupKey(group.id) === active ? " active" : ""}`;
+      button.className = `peer group-card${groupKey(group.id) === active ? " active" : ""}`;
+      const mark = document.createElement("span");
+      mark.className = "group-mark";
+      mark.setAttribute("aria-hidden", "true");
+      mark.innerHTML = icon("people");
       const who = document.createElement("span");
       who.className = "who";
       const title = document.createElement("strong");
@@ -996,7 +1011,7 @@ function boot(host: HTMLElement): void {
       const turn = group.turn ? group.members.find((member) => member.peerId === group.turn?.speakerId)?.name : "";
       meta.textContent = [`${group.members.length}/${GROUP_MAX} máy`, turn ? `đến lượt ${turn}` : "chưa xếp lượt"].join(" · ");
       who.append(title, meta);
-      button.append(who, unreadMark(unreadFor(next, groupKey(group.id))));
+      button.append(mark, who, unreadMark(unreadFor(next, groupKey(group.id))));
       box.append(button);
     }
   }
@@ -1057,8 +1072,12 @@ function boot(host: HTMLElement): void {
     if (!peer || !active) return;
     const head = must<HTMLElement>(".chat-head");
     head.classList.remove("group-mode");
-    must<HTMLElement>("#chat-title").hidden = false;
-    must<HTMLElement>("#chat-title").textContent = displayName(next, peer.peerId, peer.name);
+    const machineName = displayName(next, peer.peerId, peer.name);
+    const kicker = must<HTMLElement>("#chat-kicker");
+    kicker.hidden = false;
+    kicker.textContent = `Máy · ${machineName}`;
+    must<HTMLElement>("#chat-title").hidden = true;
+    must<HTMLElement>("#chat-title").textContent = machineName;
     must<HTMLButtonElement>("#delete-group").hidden = true;
     must<HTMLButtonElement>("#link").hidden = false;
     const sessionTitle = must<HTMLInputElement>("#session-title");
@@ -1145,6 +1164,9 @@ function boot(host: HTMLElement): void {
     const head = must<HTMLElement>(".chat-head");
     head.classList.add("group-mode");
     const host = group.hostId === next.self.peerId;
+    const kicker = must<HTMLElement>("#chat-kicker");
+    kicker.hidden = false;
+    kicker.textContent = "Nhóm";
     const title = must<HTMLElement>("#chat-title");
     title.textContent = group.title;
     title.hidden = host;
@@ -1679,17 +1701,36 @@ function boot(host: HTMLElement): void {
     void guard(() => window.lan.showPreview(file));
   }
 
+  function closeHistoryMenus(): void {
+    for (const pop of Array.from(document.querySelectorAll<HTMLElement>(".history-menu-pop"))) pop.hidden = true;
+  }
+
+  function placeHistoryMenu(pop: HTMLElement, button: HTMLElement): void {
+    const rect = button.getBoundingClientRect();
+    pop.hidden = false;
+    pop.style.right = `${Math.max(8, window.innerWidth - rect.right)}px`;
+    const spaceBelow = window.innerHeight - rect.bottom;
+    pop.style.top = spaceBelow < 92 ? `${Math.max(8, rect.top - 84)}px` : `${rect.bottom + 4}px`;
+  }
+
+  document.addEventListener("click", (event) => {
+    const target = event.target;
+    if (target instanceof Element && target.closest(".history-menu")) return;
+    closeHistoryMenus();
+  });
+  must<HTMLElement>("#history-list").addEventListener("scroll", () => closeHistoryMenus());
+
   function selectedCaption(next: AppState): { title: string; meta: string } {
-    if (!active) return { title: "Chưa chọn máy", meta: "Phiên hiện ở cột này khi chọn một máy." };
+    if (!active) return { title: "Chưa chọn máy", meta: "Chọn một máy ở cột bên trái." };
     const groupId = parseGroupKey(active);
     if (groupId) {
       const group = next.groups.find((item) => item.id === groupId);
-      return { title: group?.title || "Nhóm", meta: "Phiên của nhóm này" };
+      return { title: group?.title || "Nhóm", meta: "Các phiên của nhóm này" };
     }
     const peer = next.peers.find((item) => item.peerId === active);
-    if (!peer) return { title: "Máy", meta: "Phiên của máy này" };
+    if (!peer) return { title: "Máy", meta: "Các phiên của máy này" };
     const where = peer.viaLocalhost ? "cùng máy" : peer.host || "";
-    return { title: displayName(next, peer.peerId, peer.name), meta: where ? `Phiên của máy này · ${where}` : "Phiên của máy này" };
+    return { title: displayName(next, peer.peerId, peer.name), meta: where || "Các phiên của máy này" };
   }
 
   function paintHistory(next: AppState): void {
@@ -1731,31 +1772,49 @@ function boot(host: HTMLElement): void {
       if (row.matched) open.dataset.line = row.matched.id;
       const title = document.createElement("strong");
       title.textContent = `${row.session.title}${next.unreadSessions.includes(row.session.id) ? " · mới" : ""}`;
-      const meta = document.createElement("small");
       const when = new Date(row.session.updatedAt).toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" });
-      const preview = shownMentionText(row.matched?.text || row.last?.text || "").replace(/\s+/g, " ").trim().slice(0, 72);
+      const preview = shownMentionText(row.matched?.text || row.last?.text || "").replace(/\s+/g, " ").trim().slice(0, 90);
       const client = linkedClient(next, row.session);
-      meta.textContent = `${client ? `${client} · ` : ""}${row.lines.length} dòng · ${when}${preview ? ` · ${preview}` : ""}`;
-      open.append(title, meta);
+      const facts = document.createElement("small");
+      facts.textContent = [client, `${row.lines.length} dòng`, when].filter(Boolean).join(" · ");
+      open.append(title, facts);
+      if (preview) {
+        const peek = document.createElement("small");
+        peek.className = "history-peek";
+        peek.textContent = preview;
+        open.append(peek);
+      }
+      const menu = document.createElement("div");
+      menu.className = "history-menu";
+      const toggle = document.createElement("button");
+      toggle.type = "button";
+      toggle.className = "icon-btn history-menu-btn";
+      toggle.dataset.tip = "Tùy chọn phiên";
+      toggle.setAttribute("aria-label", "Tùy chọn phiên");
+      toggle.setAttribute("aria-haspopup", "menu");
+      toggle.innerHTML = icon("more");
+      const pop = document.createElement("div");
+      pop.className = "history-menu-pop";
+      pop.hidden = true;
+      pop.setAttribute("role", "menu");
       const edit = document.createElement("button");
       edit.type = "button";
-      edit.className = "icon-btn history-rename";
       edit.dataset.editSession = row.session.id;
       edit.dataset.peer = row.session.peerId;
-      edit.dataset.tip = "Sửa tên phiên";
-      edit.setAttribute("aria-label", "Sửa tên phiên");
-      edit.innerHTML = icon("pencil");
+      edit.setAttribute("role", "menuitem");
+      edit.innerHTML = `${icon("pencil")}<span>Sửa tên</span>`;
       const remove = document.createElement("button");
       remove.type = "button";
-      remove.className = "icon-btn history-delete";
+      remove.className = "danger";
       remove.dataset.deleteSession = row.session.id;
       remove.dataset.peer = row.session.peerId;
-      remove.dataset.tip = parseGroupKey(row.session.peerId) ? "Xóa hội thoại nhóm" : "Xóa phiên hội thoại";
-      remove.setAttribute("aria-label", remove.dataset.tip);
-      remove.innerHTML = icon("trash");
+      remove.setAttribute("role", "menuitem");
+      remove.innerHTML = `${icon("trash")}<span>${parseGroupKey(row.session.peerId) ? "Xóa hội thoại" : "Xóa phiên"}</span>`;
+      pop.append(edit, remove);
+      menu.append(toggle, pop);
       const item = document.createElement("div");
       item.className = "history-row";
-      item.append(open, edit, remove);
+      item.append(open, menu);
       box.append(item);
     }
   }
@@ -1805,8 +1864,18 @@ function boot(host: HTMLElement): void {
     void guard(() => window.lan.leaveGroup(groupId));
   });
   must<HTMLElement>("#history-list").addEventListener("click", (event) => {
+    const menuBtn = (event.target as HTMLElement).closest<HTMLButtonElement>(".history-menu-btn");
+    if (menuBtn) {
+      const pop = menuBtn.parentElement?.querySelector<HTMLElement>(".history-menu-pop");
+      if (!pop) return;
+      const willOpen = pop.hidden;
+      closeHistoryMenus();
+      if (willOpen) placeHistoryMenu(pop, menuBtn);
+      return;
+    }
     const remove = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-delete-session]");
     if (remove?.dataset.deleteSession && remove.dataset.peer) {
+      closeHistoryMenus();
       const peerId = remove.dataset.peer;
       const sessionId = remove.dataset.deleteSession;
       const groupId = parseGroupKey(peerId);
@@ -1819,6 +1888,7 @@ function boot(host: HTMLElement): void {
     }
     const edit = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-edit-session]");
     if (edit?.dataset.editSession && edit.dataset.peer) {
+      closeHistoryMenus();
       const peerId = edit.dataset.peer;
       const sessionId = edit.dataset.editSession;
       active = peerId;
@@ -2502,6 +2572,7 @@ function iconSprite(): string {
     item("expand", `<path d="M9 4H4v5M15 4h5v5M20 15v5h-5M4 15v5h5"/>`),
     item("trash", `<path d="M5 7.5h14"/><path d="M9.2 7.4V5.6h5.6v1.8"/><path d="M7.4 7.5l.6 11.2h8l.6-11.2"/>`),
     item("info", `<circle cx="12" cy="12" r="8"/><path d="M12 11.2v5"/><path d="M12 8h.01"/>`),
+    item("more", `<circle cx="6" cy="12" r="1.15" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.15" fill="currentColor" stroke="none"/><circle cx="18" cy="12" r="1.15" fill="currentColor" stroke="none"/>`),
   ].join("")}</svg>`;
 }
 
