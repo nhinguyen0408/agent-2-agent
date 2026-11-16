@@ -702,7 +702,25 @@ label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 12px; co
 
 .search input { border: 0; box-shadow: none; padding: 0.42rem 0; background: transparent; }
 
-.pane-tools { display: flex; justify-content: flex-end; flex: none; }
+.pane-tools { display: flex; justify-content: flex-end; align-items: center; gap: 8px; flex: none; }
+
+.cancel-agent {
+  border: 0;
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: #9f1239;
+  color: #fff;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.cancel-agent[hidden] { display: none; }
+
+.session-col .history-row.agent-live { box-shadow: inset 3px 0 0 #9f1239; }
+
+.history-live { color: #9f1239; font-weight: 650; }
 
 .chat {
   min-width: 0;
@@ -1497,6 +1515,8 @@ body.preview-app .preview-fill > audio { width: min(100%, 36rem); margin: auto; 
   padding: 2px 14px 12px;
 }
 
+.group-bar[hidden] { display: none; }
+
 .group-members { display: flex; flex-wrap: wrap; gap: 6px; }
 
 .member-chip {
@@ -1574,6 +1594,43 @@ label.coding-toggle span {
   flex: 1 1 auto;
   text-align: left;
   line-height: 1.35;
+}
+
+.brief-roles {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.brief-roles[hidden] { display: none; }
+
+.brief-roles > strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.brief-role {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.brief-role > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.brief-role select {
+  width: 9.5rem;
+  flex: 0 0 9.5rem;
+  height: 30px;
+  padding: 0 0.45rem;
 }
 
 .nick-edit {

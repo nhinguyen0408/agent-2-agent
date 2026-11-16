@@ -66,6 +66,7 @@ import type {
 import { DEFAULT_PORT, PORT_SPAN, REPLY_WAIT_MS, providerLabel } from "../shared/types";
 import { AccessDenied, deniedRoles, denialText, latestRequest } from "../shared/access";
 import { AgentHost, CliResumeUnsupported, CliSessionLost, type ModelTurn } from "./agents";
+import { CodingWatch } from "./codingTerm";
 import { detectLocalClis, installedCliList, parseCliList } from "./cliDetect";
 import { Discovery, lanIPv4, normalizeIp } from "./discovery";
 import { briefFolder, configuredSkillDir, fileNameFromHeader, formatBytes, MAX_FILE_BYTES, projectSkillRoots, readFileLimited, resolveInside, safeFileName, saveExact, saveReceivedFile, skillCatalog } from "./files";
@@ -111,6 +112,7 @@ export class AppCore {
   private readonly tails = new Map<string, Promise<void>>();
   private readonly aborts = new Map<string, AbortController>();
   private readonly codingFileStamp = new Map<string, number>();
+  private readonly codingWatch = new CodingWatch();
   private readonly seen = new Set<string>();
   private readonly seenOrder: string[] = [];
   private readonly greeted = new Set<string>();
@@ -538,12 +540,11 @@ export class AppCore {
     if (!brief.running) {
       brief.topic = String(patch.topic ?? brief.topic).trim().slice(0, BRIEF_TOPIC_CAP);
       brief.goal = String(patch.goal ?? brief.goal).trim().slice(0, BRIEF_GOAL_CAP);
-      if (parseGroupKey(peerId)) {
-        if (typeof patch.coding === "boolean") brief.coding = patch.coding;
-      } else {
-        brief.coding = false;
+      if (typeof patch.coding === "boolean") brief.coding = patch.coding;
+      if (!brief.coding) {
+        brief.needTurns = 0;
+        brief.codingSince = 0;
       }
-      if (!brief.coding) brief.needTurns = 0;
       brief.turnLimit = clampTurnLimit(Number(patch.turnLimit ?? brief.turnLimit), brief.coding ? CODING_TURN_MAX : BRIEF_TURN_MAX);
       this.syncBrief(peerId, sessionId);
       this.scheduleSave();
@@ -625,7 +626,9 @@ export class AppCore {
     this.halt(peerId, true);
     brief.running = true;
     brief.turnsUsed = 0;
-    brief.turnLimit = clampTurnLimit(brief.turnLimit, BRIEF_TURN_MAX);
+    brief.needTurns = 0;
+    if (brief.coding) brief.codingSince = Date.now();
+    brief.turnLimit = clampTurnLimit(brief.turnLimit, brief.coding ? CODING_TURN_MAX : BRIEF_TURN_MAX);
     this.pushNow();
     try {
       await this.pushBriefFiles(peerId, sessionId, brief);
@@ -653,20 +656,22 @@ export class AppCore {
 
   async extendBrief(peerId: string, extra?: number): Promise<AppState> {
     if (parseGroupKey(peerId)) return this.extendGroup(peerId, extra);
-    const requested = Math.round(Number(extra));
-    const add = Number.isFinite(requested) && requested > 0 ? Math.min(BRIEF_TURN_MAX, requested) : BRIEF_EXTEND;
     if (!this.isLinked(peerId)) {
       this.system(peerId, "Cần nối socket trước khi gia hạn lượt.");
       return this.snapshot();
     }
     const sessionId = this.ensureSession(peerId);
     const brief = this.ensureBrief(sessionId);
+    const cap = brief.coding ? CODING_TURN_MAX : BRIEF_TURN_MAX;
+    const requested = Math.round(Number(extra));
+    const add = Number.isFinite(requested) && requested > 0 ? Math.min(cap, requested) : BRIEF_EXTEND;
     if (!brief.topic.trim()) {
       this.system(peerId, "Hãy nhập chủ đề trước khi gia hạn.");
       return this.snapshot();
     }
     const nextLimit = brief.turnsUsed >= brief.turnLimit ? brief.turnsUsed + add : brief.turnLimit + add;
-    brief.turnLimit = clampTurnLimit(nextLimit, BRIEF_TURN_MAX);
+    brief.turnLimit = clampTurnLimit(nextLimit, cap);
+    if (brief.coding) brief.needTurns = 0;
     if (brief.running) {
       this.syncBrief(peerId, sessionId);
       this.scheduleSave();
@@ -1442,7 +1447,7 @@ export class AppCore {
     };
     if (groupId) this.finishGroupSpeech(groupId, sessionId, wire, loop);
     else {
-      if (loop) this.finishBriefTurn(sessionId, wire);
+      if (loop) this.finishPairBrief(peerId, sessionId, wire);
       this.sendTo(peerId, "chat", wire);
     }
     this.pushNow();
@@ -1490,11 +1495,14 @@ export class AppCore {
       }
       const controller = new AbortController();
       this.aborts.set(peerId, controller);
+      const coding = Boolean(this.store.briefs[bound]?.coding);
       let timedOut = false;
-      const waitTimer = setTimeout(() => {
-        timedOut = true;
-        controller.abort();
-      }, REPLY_WAIT_MS);
+      const waitTimer = coding
+        ? undefined
+        : setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+          }, REPLY_WAIT_MS);
       this.replySessions.set(peerId, bound);
       const id = randomUUID();
       const createdAt = Date.now();
@@ -1514,7 +1522,6 @@ export class AppCore {
         const provider = this.store.settings.provider;
         const skillDir = configuredSkillDir(this.store.settings);
         const skillDirs = projectSkillRoots(this.store.settings.workDir, skillDir);
-        const coding = Boolean(room && this.store.briefs[bound]?.coding);
         const selfMember = room?.members.find((member) => member.peerId === this.store.peerId);
         if (coding) {
           const resultPath = path.join(briefFolder(this.store.settings.workDir, bound), CODING_RESULT_FILE);
@@ -1566,6 +1573,15 @@ export class AppCore {
             resume: Boolean(link),
             sessionId: link?.id,
             sessionTitle: this.sessionTitle(bound),
+            onTool: (info) => {
+              if (!coding || !this.store.briefs[bound]?.running || (this.epochs.get(peerId) ?? 0) !== epoch) return;
+              const task = info.sessionId || link?.id || "";
+              this.traceCoding(bound, peerId, task, info.line, info.writesCode);
+            },
+            onTask: (taskId) => {
+              if (!coding || !this.store.briefs[bound]?.running || (this.epochs.get(peerId) ?? 0) !== epoch) return;
+              this.codingWatch.noteTask(bound, taskId, provider);
+            },
             onDelta: (chunk) => {
               if ((this.epochs.get(peerId) ?? 0) !== epoch) return;
               const line = this.findLine(bound, id);
@@ -1642,15 +1658,18 @@ export class AppCore {
           "Agent lỗi",
         );
         this.lastError.set(peerId, message);
-        this.upsertLine(bound, {
-          id,
-          fromPeerId: this.store.peerId,
-          fromName: this.store.settings.name,
-          kind: "system",
-          text: message,
-          pending: false,
-          createdAt,
-        });
+        if (coding) this.pauseCoding(peerId, bound, groupId, message, id, createdAt);
+        else {
+          this.upsertLine(bound, {
+            id,
+            fromPeerId: this.store.peerId,
+            fromName: this.store.settings.name,
+            kind: "system",
+            text: message,
+            pending: false,
+            createdAt,
+          });
+        }
         this.pushNow();
         this.scheduleSave();
         resolveOut("");
@@ -2127,6 +2146,46 @@ export class AppCore {
     if (left > 0 && brief.running) wire.dialogue = { repliesLeft: left };
   }
 
+  private finishPairBrief(peerId: string, sessionId: string, wire: WireChat): void {
+    const brief = this.store.briefs[sessionId];
+    const done = Boolean(brief?.coding && resultText(wire.text || ""));
+    if (brief?.coding) {
+      const last = brief.turnsUsed + 1 >= brief.turnLimit;
+      brief.needTurns = done || !last ? 0 : codingNeed(wire.text || "");
+    }
+    this.finishBriefTurn(sessionId, wire);
+    if (!done || !brief) return;
+    brief.running = false;
+    brief.needTurns = 0;
+    wire.dialogue = undefined;
+    wire.brief = sanitizeBrief(brief);
+    void this.publishPairCodingResult(peerId, sessionId, wire.text || "");
+  }
+
+  private traceCoding(chatSessionId: string, peerId: string, taskId: string, line: string, arm: boolean): void {
+    const brief = this.store.briefs[chatSessionId];
+    const result = this.codingWatch.write({
+      chatSessionId,
+      since: brief?.codingSince || 0,
+      taskId,
+      provider: this.store.settings.provider,
+      title: this.sessionTitle(chatSessionId),
+      workDir: this.store.settings.workDir,
+      line,
+      arm,
+    });
+    if (result.opened) {
+      const taskNote = taskId ? ` Task ${taskId.slice(0, 8)}.` : "";
+      this.tell(chatSessionId, peerId, `Agent máy này bắt đầu sửa code. Đã mở terminal theo phiên của đoạn chat.${taskNote}`);
+      this.scheduleSave();
+      return;
+    }
+    if (result.error) {
+      this.tell(chatSessionId, peerId, "Agent máy này bắt đầu sửa code, nhưng không mở được terminal.");
+      this.scheduleSave();
+    }
+  }
+
   private async storeBriefFile(
     sessionId: string,
     filePath: string,
@@ -2380,6 +2439,11 @@ export class AppCore {
     if (title) session.title = title;
   }
 
+  private busyTurnNote(room: GroupRoom): string {
+    const title = (this.sessionTitle(room.sessionId) || "phiên đang chạy").replace(/\s+/g, " ").trim().slice(0, 42);
+    return `Đang có lượt ở phiên “${title}”. Bấm Hủy agent để dừng.`;
+  }
+
   private sessionTitle(sessionId: string): string {
     for (const list of Object.values(this.store.sessions)) {
       const session = list.find((item) => item.id === sessionId);
@@ -2394,6 +2458,53 @@ export class AppCore {
       if (line) return { sessionId: session.id, line };
     }
     return undefined;
+  }
+
+  private pauseCoding(peerId: string, sessionId: string, groupId: string, message: string, lineId: string, createdAt: number): void {
+    const brief = this.store.briefs[sessionId];
+    if (brief) brief.running = false;
+    const prior = this.findLine(sessionId, lineId)?.text.trim() ?? "";
+    const text = prior ? `${prior}\n${message}\nChủ đề coding tạm dừng.` : `${message}\nChủ đề coding tạm dừng.`;
+    this.upsertLine(sessionId, {
+      id: lineId,
+      fromPeerId: this.store.peerId,
+      fromName: this.store.settings.name,
+      kind: "system",
+      text,
+      pending: false,
+      createdAt,
+    });
+    const room = groupId ? this.groupById(groupId) : undefined;
+    if (!room) {
+      this.syncBrief(peerId, sessionId);
+      const wire: WireChat = {
+        id: lineId,
+        fromPeerId: this.store.peerId,
+        fromName: this.store.settings.name,
+        kind: "agent",
+        text,
+        createdAt,
+        sessionId,
+        sessionTitle: this.sessionTitle(sessionId),
+        defer: true,
+        brief: brief ? sanitizeBrief(brief) : undefined,
+      };
+      this.sendTo(peerId, "chat", wire);
+      return;
+    }
+    room.turn = null;
+    const payload = {
+      groupId: room.id,
+      sessionId,
+      lineId,
+      createdAt,
+      text,
+      fromPeerId: this.store.peerId,
+      fromName: this.store.settings.name,
+    };
+    this.syncBrief(groupKey(room.id), sessionId);
+    if (room.hostId === this.store.peerId) this.relay(room, "group-pause", payload);
+    else this.sendTo(room.hostId, "group-pause", payload);
   }
 
   private finishAborted(sessionId: string, id: string, note = "Đã dừng."): void {
@@ -2456,13 +2567,14 @@ export class AppCore {
       }, 2500);
       this.activityTimers.set(peerId, expire);
     }
-    if (startedReply) this.armReplyTimer(peerId);
+    if (startedReply) this.armReplyTimer(peerId, patch?.sessionId || next.replyingSessionId);
     else if (!next.replying) this.clearReplyTimer(peerId);
     this.push();
   }
 
-  private armReplyTimer(peerId: string): void {
+  private armReplyTimer(peerId: string, sessionId = ""): void {
     this.clearReplyTimer(peerId);
+    if (sessionId && this.store.briefs[sessionId]?.coding) return;
     const timer = setTimeout(() => {
       this.replyTimers.delete(peerId);
       const live = this.activity.get(peerId);
@@ -2947,6 +3059,10 @@ export class AppCore {
       const id = peerId();
       if (id) this.onGroupHalt(id, String(body?.groupId || ""));
     });
+    socket.on("group-pause", (body: { groupId?: string; sessionId?: string; lineId?: string; createdAt?: number; text?: string; fromPeerId?: string; fromName?: string }) => {
+      const id = peerId();
+      if (id) this.onGroupPause(id, body);
+    });
     socket.on("group-leave", (body: { groupId?: string; peerId?: string }) => {
       const id = peerId();
       if (id) this.onGroupLeave(id, body);
@@ -3113,6 +3229,49 @@ export class AppCore {
     this.pushNow();
   }
 
+  private onGroupPause(
+    socketPeer: string,
+    body: { groupId?: string; sessionId?: string; lineId?: string; createdAt?: number; text?: string; fromPeerId?: string; fromName?: string },
+  ): void {
+    const room = this.groupById(body?.groupId || "");
+    if (!room || !body?.sessionId || !body.lineId || !body.text) return;
+    const hostHere = room.hostId === this.store.peerId;
+    if (hostHere) {
+      if (socketPeer === this.store.peerId || !room.members.some((member) => member.peerId === socketPeer)) return;
+      if (room.turn && room.turn.speakerId !== socketPeer) return;
+      this.applyCodingPause(room, body);
+      this.relay(room, "group-pause", { ...body, groupId: room.id }, socketPeer);
+      return;
+    }
+    if (socketPeer !== room.hostId) return;
+    this.applyCodingPause(room, body);
+  }
+
+  private applyCodingPause(
+    room: GroupRoom,
+    body: { sessionId?: string; lineId?: string; createdAt?: number; text?: string; fromPeerId?: string; fromName?: string },
+  ): void {
+    if (!body.sessionId || !body.lineId || !body.text) return;
+    room.turn = null;
+    const brief = this.store.briefs[body.sessionId];
+    if (brief) brief.running = false;
+    const existing = this.findLine(body.sessionId, body.lineId);
+    const incoming = body.text.slice(0, 100_000);
+    const note = "Chủ đề coding tạm dừng.";
+    const text = existing && existing.text.length > incoming.length ? (existing.text.includes(note) ? existing.text : `${existing.text}\n${note}`) : incoming;
+    this.upsertLine(body.sessionId, {
+      id: body.lineId,
+      fromPeerId: body.fromPeerId || room.hostId,
+      fromName: body.fromName || this.memberName(room, body.fromPeerId || room.hostId),
+      kind: "system",
+      text,
+      pending: false,
+      createdAt: body.createdAt || Date.now(),
+    });
+    this.scheduleSave();
+    this.pushNow();
+  }
+
   private onGroupHalt(socketPeer: string, groupId: string): void {
     const room = this.groupById(groupId);
     if (!room) return;
@@ -3216,7 +3375,7 @@ export class AppCore {
     if (!room || room.hostId !== this.store.peerId || socketPeer === this.store.peerId) return;
     if (!room.members.some((member) => member.peerId === socketPeer)) return;
     if (room.turn && room.turn.left > 0) {
-      this.groupNote(room, "Đang có lượt. Bấm Dừng trước khi mở phiên mới.", true);
+      this.groupNote(room, this.busyTurnNote(room), true);
       return;
     }
     this.openFreshGroupSession(room);
@@ -3681,7 +3840,7 @@ export class AppCore {
     const room = this.groupById(groupId);
     if (!room) return this.snapshot();
     if (room.turn && room.turn.left > 0) {
-      this.groupNote(room, "Đang có lượt. Bấm Dừng trước khi mở phiên mới.", false);
+      this.groupNote(room, this.busyTurnNote(room), false);
       return this.snapshot();
     }
     if (room.hostId !== this.store.peerId) {
@@ -3790,6 +3949,40 @@ export class AppCore {
       if (line?.kind === "agent" && line.fromPeerId) return line.fromPeerId;
     }
     return "";
+  }
+
+  private async publishPairCodingResult(peerId: string, sessionId: string, text: string): Promise<void> {
+    const body = resultText(text);
+    if (!body) return;
+    try {
+      const brief = this.ensureBrief(sessionId);
+      const folder = briefFolder(this.store.settings.workDir, sessionId);
+      const full = path.join(folder, CODING_RESULT_FILE);
+      let data: Buffer | null = null;
+      if (fs.existsSync(full)) {
+        const stat = fs.statSync(full);
+        const since = this.codingFileStamp.get(sessionId) ?? brief.codingSince ?? 0;
+        if (stat.size > 0 && stat.mtimeMs > since) data = await readFileLimited(full, MAX_FILE_BYTES);
+      }
+      this.codingFileStamp.delete(sessionId);
+      if (!data) {
+        data = Buffer.from(body, "utf8");
+        await saveExact(folder, CODING_RESULT_FILE, data);
+      }
+      if (fileRef(full)) allowPreview(full);
+      const entry = { name: CODING_RESULT_FILE, kind: "markdown" as const, excerpt: discussExcerpt(CODING_RESULT_FILE, data) };
+      brief.files = brief.files.filter((file) => file.name !== CODING_RESULT_FILE);
+      if (brief.files.length >= BRIEF_FILE_MAX) brief.files.pop();
+      brief.files.push(entry);
+      const sent = this.isLinked(peerId);
+      if (sent) await this.postBriefFile(peerId, sessionId, CODING_RESULT_FILE, data);
+      this.tell(sessionId, peerId, sent ? `Đã chuyển file ${CODING_RESULT_FILE} cho máy kia.` : `Đã ghi ${CODING_RESULT_FILE} trên máy này.`);
+      this.syncBrief(peerId, sessionId);
+      this.scheduleSave();
+      this.pushNow();
+    } catch (err) {
+      this.system(peerId, this.recordError(`chuyển file kết quả cho ${this.who(peerId)}`, err, "Không chuyển được file kết quả."));
+    }
   }
 
   private async publishCodingResult(room: GroupRoom, sessionId: string, text: string): Promise<void> {

@@ -164,7 +164,10 @@ function boot(host: HTMLElement): void {
             <input id="history-query" placeholder="Tìm trong phiên của máy này" autocomplete="off" aria-label="Tìm trong phiên của máy này" />
           </div>
           <div id="history-list" class="history-list"></div>
-          <div class="pane-tools">${iconButton("new-session", "plus", "Phiên mới với máy đang chọn", "", "", "button", "icon-btn primary")}</div>
+          <div class="pane-tools">
+            <button id="cancel-agent" class="cancel-agent" type="button" hidden>Hủy agent</button>
+            ${iconButton("new-session", "plus", "Phiên mới với máy đang chọn", "", "", "button", "icon-btn primary")}
+          </div>
         </div>
       </aside>
       <section class="chat">
@@ -231,8 +234,9 @@ function boot(host: HTMLElement): void {
               <div id="brief-files" class="brief-files"></div>
               <label id="brief-coding-row" class="coding-toggle" hidden>
                 <input id="brief-coding" type="checkbox" />
-                <span>Chế độ coding. Mỗi agent chỉ làm đúng vai đã giao. Mặc định 50 lượt, dừng ngay khi có kết quả.</span>
+                <span id="brief-coding-copy">Chế độ coding. Mặc định 50 lượt, dừng khi có kết quả. Máy nào bắt đầu sửa code thì mở terminal đúng phiên của đoạn chat trên máy đó.</span>
               </label>
+              <div id="brief-roles" class="brief-roles" hidden></div>
               <div class="brief-actions">
                 ${iconButton("brief-add", "paperclip", "Thêm file context: txt, Markdown, ảnh, PDF, Word, Excel")}
                 <label class="replies" data-tip="Số lượt agent được trả lời nhau, tối đa ${BRIEF_TURN_MAX}">
@@ -842,8 +846,7 @@ function boot(host: HTMLElement): void {
     void guard(async () => {
       await flushBrief(peerId);
       const extra = Math.round(Number(must<HTMLInputElement>("#brief-extra").value));
-      const grouped = Boolean(parseGroupKey(peerId));
-      const coding = grouped && must<HTMLInputElement>("#brief-coding").checked;
+      const coding = must<HTMLInputElement>("#brief-coding").checked;
       const cap = coding ? CODING_TURN_MAX : BRIEF_TURN_MAX;
       const add = Number.isFinite(extra) ? Math.max(1, Math.min(cap, extra)) : 4;
       await window.lan.extendBrief(peerId, add);
@@ -863,9 +866,14 @@ function boot(host: HTMLElement): void {
     if (box.checked && (!Number.isFinite(current) || current <= 6)) turns.value = String(CODING_TURN_DEFAULT);
     if (!box.checked && current === CODING_TURN_DEFAULT) turns.value = "6";
     if (!active) return;
+    syncCodingRoles();
     void flushBrief(active);
   });
   must<HTMLButtonElement>("#stop").addEventListener("click", () => {
+    if (!active) return;
+    void guard(() => window.lan.stop(active as string));
+  });
+  must<HTMLButtonElement>("#cancel-agent").addEventListener("click", () => {
     if (!active) return;
     void guard(() => window.lan.stop(active as string));
   });
@@ -1019,7 +1027,7 @@ function boot(host: HTMLElement): void {
   let composerTimer = 0;
   const remoteReplyAt = new Map<string, number>();
 
-  function composerWait(lines: ChatLine[], peerIds: string[], sessionId: string, activity: Record<string, PeerActivity>): { locked: boolean; stop: boolean } {
+  function composerWait(lines: ChatLine[], peerIds: string[], sessionId: string, activity: Record<string, PeerActivity>, coding = false): { locked: boolean; stop: boolean } {
     const pending = lines.find((line) => line.kind === "agent" && line.pending);
     const remoteIds = peerIds.filter((id) => {
       const item = activity[id];
@@ -1035,14 +1043,42 @@ function boot(host: HTMLElement): void {
     const since = stamps.length ? Math.min(...stamps) : 0;
     const age = since ? Date.now() - since : 0;
     const waiting = Boolean(pending || remoteIds.length);
-    const locked = waiting && age < REPLY_WAIT_MS;
+    const locked = waiting && (coding || age < REPLY_WAIT_MS);
     window.clearTimeout(composerTimer);
-    if (locked && since) {
+    if (locked && since && !coding) {
       composerTimer = window.setTimeout(() => {
         if (state) paint(state);
       }, Math.max(0, REPLY_WAIT_MS - age) + 40);
     }
     return { locked, stop: waiting };
+  }
+
+  function agentHold(next: AppState, peerKey: string): { sessionId: string; title: string } | null {
+    if (!peerKey) return null;
+    const groupId = parseGroupKey(peerKey);
+    const group = groupId ? next.groups.find((item) => item.id === groupId) : undefined;
+    const titled = (sessionId: string, fallback = "phiên đang chạy") => {
+      const title = next.sessions.find((item) => item.id === sessionId)?.title.replace(/\s+/g, " ").trim();
+      return { sessionId, title: title || fallback };
+    };
+    if (group?.turn && group.turn.left > 0 && group.sessionId) return titled(group.sessionId);
+    const sessions = next.sessions.filter((item) => item.peerId === peerKey);
+    for (const session of sessions) {
+      const lines = next.transcripts[session.id] ?? [];
+      if (lines.some((line) => line.kind === "agent" && line.pending)) return titled(session.id, session.title);
+    }
+    for (const session of sessions) {
+      if (next.briefs[session.id]?.running) return titled(session.id, session.title);
+    }
+    const people = group ? group.members.map((member) => member.peerId) : [peerKey];
+    for (const id of people) {
+      const activity = next.activity[id];
+      const sessionId = activity?.replying ? activity.replyingSessionId : "";
+      if (!sessionId) continue;
+      const session = sessions.find((item) => item.id === sessionId);
+      if (session) return titled(session.id, session.title);
+    }
+    return null;
   }
 
   function setComposer(locked: boolean, canSend: boolean, placeholder: string, stop: boolean): void {
@@ -1116,7 +1152,7 @@ function boot(host: HTMLElement): void {
     const nameInput = must<HTMLInputElement>("#session-title");
     nameInput.disabled = !session;
     if (document.activeElement !== nameInput) nameInput.value = session?.title ?? "";
-    must<HTMLElement>("#chat-status").textContent = [providerLabel(peer.provider), where, peerCliNote(peer.clis), sessionLinkNote(next, session), statusText(peer)]
+    must<HTMLElement>("#chat-status").textContent = [providerLabel(peer.provider), where, peerCliNote(peer.clis), next.briefs[sessionId]?.coding ? "Coding" : "", sessionLinkNote(next, session), statusText(peer)]
       .filter(Boolean)
       .join(" · ");
     paintMessages(messagesEl, lines, next.self.peerId, nearBottom(messagesEl), historyQuery);
@@ -1126,8 +1162,8 @@ function boot(host: HTMLElement): void {
       hit?.scrollIntoView({ block: "center" });
     }
     const canSend = connected || Boolean(peer.token);
-    const waiting = composerWait(lines, [peer.peerId], sessionId, next.activity);
-    setComposer(waiting.locked, canSend, "Tin nhắn thường. Gõ @đối phương để gọi agent đó, @me là máy này…", waiting.stop);
+    const waiting = composerWait(lines, [peer.peerId], sessionId, next.activity, Boolean(next.briefs[sessionId]?.coding));
+    setComposer(waiting.locked, canSend, "Tin nhắn thường. Gõ @đối phương để gọi agent đó, @me là máy này…", waiting.stop || Boolean(agentHold(next, peer.peerId)));
     paintBrief(sessionId, next.briefs[sessionId], lines, connected, "");
     must<HTMLInputElement>("#brief-topic").placeholder = "Việc hai agent cần bàn";
     const snippet = peer.token
@@ -1142,6 +1178,7 @@ function boot(host: HTMLElement): void {
   }
 
   let briefTimer = 0;
+  let liveCoding = false;
   let briefFilesKey = "";
   let briefDockKey = "";
   let briefAnchor = "";
@@ -1226,8 +1263,8 @@ function boot(host: HTMLElement): void {
     }
     must<HTMLButtonElement>("#new-session").disabled = false;
     const others = group.members.filter((member) => member.peerId !== next.self.peerId).map((member) => member.peerId);
-    const waiting = composerWait(lines, others, sessionId, next.activity);
-    setComposer(waiting.locked, linked, "Nhắn trong nhóm. Gõ @ để gọi agent, @me là máy này…", waiting.stop);
+    const waiting = composerWait(lines, others, sessionId, next.activity, Boolean(next.briefs[sessionId]?.coding));
+    setComposer(waiting.locked, linked, "Nhắn trong nhóm. Gõ @ để gọi agent, @me là máy này…", waiting.stop || Boolean(group.turn && group.turn.left > 0));
     paintBrief(sessionId, next.briefs[sessionId], lines, linked, turnName);
     paintGroupBar(next, group);
     const topic = must<HTMLInputElement>("#brief-topic");
@@ -1242,7 +1279,7 @@ function boot(host: HTMLElement): void {
     if (box.querySelector("input.nick-edit, select.role-pick:focus")) return;
     box.replaceChildren();
     const openId = next.openSession[groupKey(group.id)] || group.sessionId;
-    const coding = Boolean(next.briefs[openId]?.coding);
+    const coding = liveCoding || Boolean(next.briefs[openId]?.coding);
     const codingRunning = Boolean(next.briefs[openId]?.running);
     for (const member of group.members) {
       const chip = document.createElement("span");
@@ -1324,6 +1361,78 @@ function boot(host: HTMLElement): void {
     }
   }
 
+  function syncCodingRoles(): void {
+    if (!state || !active) return;
+    const grouped = Boolean(parseGroupKey(active));
+    const codingOn = must<HTMLInputElement>("#brief-coding").checked;
+    liveCoding = codingOn;
+    const groupId = parseGroupKey(active);
+    const group = groupId ? state.groups.find((item) => item.id === groupId) : undefined;
+    const sessionId = state.openSession[active] || group?.sessionId || "";
+    paintBriefRoles(grouped, codingOn, Boolean(state.briefs[sessionId]?.running));
+    if (group) paintGroupBar(state, group);
+    if (codingOn && grouped) must<HTMLElement>("#brief-roles").scrollIntoView({ block: "nearest" });
+  }
+
+  function paintBriefRoles(grouped: boolean, codingOn: boolean, running: boolean): void {
+    const box = must<HTMLElement>("#brief-roles");
+    const groupId = active ? parseGroupKey(active) : null;
+    const group = groupId && state ? state.groups.find((item) => item.id === groupId) : undefined;
+    if (!grouped || !codingOn || !group || !state) {
+      box.hidden = true;
+      if (!box.querySelector("select:focus")) {
+        box.replaceChildren();
+        delete box.dataset.key;
+      }
+      return;
+    }
+    box.hidden = false;
+    if (box.querySelector("select:focus")) return;
+    const host = group.hostId === state.self.peerId;
+    const key = `${host ? 1 : 0}:${running ? 1 : 0}:${group.members.map((member) => `${member.peerId}:${member.role || ""}`).join("|")}`;
+    if (box.dataset.key === key) return;
+    box.dataset.key = key;
+    box.replaceChildren();
+    const title = document.createElement("strong");
+    title.textContent = "Phân vai";
+    box.append(title);
+    for (const member of group.members) {
+      const row = document.createElement("div");
+      row.className = "brief-role";
+      const name = document.createElement("span");
+      const shown = displayName(state, member.peerId, member.name);
+      name.textContent = member.peerId === state.self.peerId ? `${shown} · bạn` : shown;
+      row.append(name);
+      if (host) {
+        const select = document.createElement("select");
+        select.disabled = running;
+        select.setAttribute("aria-label", `Vai của ${shown}`);
+        const none = document.createElement("option");
+        none.value = "";
+        none.textContent = "Chọn vai";
+        select.append(none);
+        for (const role of CODING_ROLES) {
+          const option = document.createElement("option");
+          option.value = role;
+          option.textContent = codingRoleLabel(role);
+          select.append(option);
+        }
+        select.value = member.role || "";
+        select.addEventListener("change", () => {
+          box.dataset.key = "";
+          void guard(() => window.lan.setMemberRole(group.id, member.peerId, select.value));
+        });
+        row.append(select);
+      } else {
+        const badge = document.createElement("span");
+        badge.className = "role-badge";
+        badge.textContent = member.role ? codingRoleLabel(member.role) : "Chưa giao";
+        row.append(badge);
+      }
+      box.append(row);
+    }
+  }
+
   function paintBrief(sessionId: string, brief: ProjectBrief | undefined, lines: ChatLine[], connected: boolean, turnName = ""): void {
     const current: ProjectBrief = brief ?? {
       topic: "",
@@ -1340,7 +1449,9 @@ function boot(host: HTMLElement): void {
     const goal = must<HTMLTextAreaElement>("#brief-goal");
     const turns = must<HTMLInputElement>("#brief-turns");
     const grouped = Boolean(active && parseGroupKey(active));
-    const codingOn = grouped && current.coding;
+    const codingBox = must<HTMLInputElement>("#brief-coding");
+    const codingOn = document.activeElement === codingBox ? codingBox.checked : current.coding;
+    liveCoding = codingOn;
     const cap = codingOn ? CODING_TURN_MAX : BRIEF_TURN_MAX;
     setIfIdle(topic, current.topic);
     setIfIdle(goal, current.goal);
@@ -1350,10 +1461,11 @@ function boot(host: HTMLElement): void {
     goal.disabled = current.running;
     turns.disabled = current.running;
     const codingRow = must<HTMLElement>("#brief-coding-row");
-    codingRow.hidden = !grouped;
-    const codingBox = must<HTMLInputElement>("#brief-coding");
+    codingRow.hidden = false;
     if (document.activeElement !== codingBox) codingBox.checked = codingOn;
-    codingBox.disabled = current.running || !grouped;
+    codingBox.disabled = current.running;
+    must<HTMLElement>("#brief-coding-copy").textContent = codingCopy(grouped);
+    paintBriefRoles(grouped, codingOn, current.running);
     const replies = turns.closest("label");
     if (replies instanceof HTMLElement) {
       replies.dataset.tip = codingOn
@@ -1520,6 +1632,12 @@ function boot(host: HTMLElement): void {
     }
   }
 
+  function codingCopy(grouped: boolean): string {
+    return grouped
+      ? "Chế độ coding. Mỗi agent chỉ làm đúng vai đã giao. Mặc định 50 lượt, dừng ngay khi có kết quả. Máy nào bắt đầu sửa code thì mở terminal đúng phiên của đoạn chat trên máy đó."
+      : "Chế độ coding. Hai agent cùng làm. Mặc định 50 lượt, dừng khi có kết quả. Agent máy này mở terminal trên máy này; agent máy kia hiện trên máy kia.";
+  }
+
   function briefMeter(brief: ProjectBrief): string {
     const prefix = brief.coding ? "Coding " : "";
     if (brief.running) return `${prefix}đang nói ${brief.turnsUsed}/${brief.turnLimit}`;
@@ -1549,8 +1667,7 @@ function boot(host: HTMLElement): void {
   }
 
   async function flushBrief(peerId: string): Promise<void> {
-    const grouped = Boolean(parseGroupKey(peerId));
-    const coding = grouped && must<HTMLInputElement>("#brief-coding").checked;
+    const coding = must<HTMLInputElement>("#brief-coding").checked;
     const cap = coding ? CODING_TURN_MAX : BRIEF_TURN_MAX;
     const turns = Number(must<HTMLInputElement>("#brief-turns").value);
     await window.lan.saveBrief(peerId, {
@@ -1755,6 +1872,13 @@ function boot(host: HTMLElement): void {
       .filter((row) => row.shown)
       .sort((a, b) => b.session.updatedAt - a.session.updatedAt);
     box.replaceChildren();
+    const hold = active ? agentHold(next, active) : null;
+    const cancel = must<HTMLButtonElement>("#cancel-agent");
+    cancel.hidden = !hold;
+    if (hold) {
+      cancel.dataset.tip = `Dừng agent đang chạy ở phiên ${hold.title}`;
+      cancel.setAttribute("aria-label", cancel.dataset.tip);
+    }
     const newer = must<HTMLButtonElement>("#new-session");
     const groupOpen = Boolean(active && parseGroupKey(active));
     newer.disabled = !active;
@@ -1785,8 +1909,10 @@ function boot(host: HTMLElement): void {
       const when = new Date(row.session.updatedAt).toLocaleString("vi-VN", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" });
       const preview = shownMentionText(row.matched?.text || row.last?.text || "").replace(/\s+/g, " ").trim().slice(0, 90);
       const client = linkedClient(next, row.session);
+      const live = hold?.sessionId === row.session.id;
       const facts = document.createElement("small");
-      facts.textContent = [client, `${row.lines.length} dòng`, when].filter(Boolean).join(" · ");
+      facts.textContent = [live ? "Agent đang chạy" : "", client, `${row.lines.length} dòng`, when].filter(Boolean).join(" · ");
+      if (live) facts.className = "history-live";
       open.append(heading, facts);
       if (preview) {
         const peek = document.createElement("small");
@@ -1823,7 +1949,7 @@ function boot(host: HTMLElement): void {
       pop.append(edit, remove);
       menu.append(toggle, pop);
       const item = document.createElement("div");
-      item.className = "history-row";
+      item.className = `history-row${hold?.sessionId === row.session.id ? " agent-live" : ""}`;
       item.append(open, menu);
       box.append(item);
     }

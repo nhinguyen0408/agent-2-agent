@@ -7,6 +7,7 @@ import { accessPrompt, AccessDenied, defaultAccess, deniedRoles, toolBlob } from
 import { codingRoleDuty, type CodingRole } from "../shared/group";
 import type { ProviderId, Settings } from "../shared/types";
 import { findExecutable } from "./cliDetect";
+import { describeTool } from "./codingTerm";
 import { insideDir } from "./files";
 
 export type ModelTurn = { role: "user" | "assistant" | "note"; text: string; speaker?: string };
@@ -35,6 +36,8 @@ export type ReplyInput = {
   resume?: boolean;
   sessionId?: string;
   sessionTitle?: string;
+  onTool?: (info: { sessionId: string; line: string; writesCode: boolean }) => void;
+  onTask?: (sessionId: string) => void;
 };
 
 export type AgentResult = { text: string; sessionId: string };
@@ -256,6 +259,11 @@ export class AgentHost {
       input.signal.addEventListener("abort", onAbort, { once: true });
       const take = (event: unknown) => {
         const blob = toolBlob(event);
+        const found = sessionIdOf(event);
+        if (found) {
+          capturedSession = found;
+          input.onTask?.(found);
+        }
         if (blob && input.access !== null) {
           const hits = deniedRoles(blob, input.access ?? defaultAccess(), "command");
           if (hits.length) {
@@ -268,8 +276,10 @@ export class AgentHost {
             return;
           }
         }
-        const found = sessionIdOf(event);
-        if (found) capturedSession = found;
+        if (blob && input.onTool) {
+          const note = describeTool(blob);
+          if (note) input.onTool({ sessionId: capturedSession, line: note.line, writesCode: note.writesCode });
+        }
         const codex = codexAgentText(event);
         if (codex) {
           finalText = codex;
@@ -413,14 +423,18 @@ function conversationPrompt(input: ReplyInput): string {
     "- Trong trò chuyện 1-1, agent của máy gửi @me nói trước. Khi đến lượt bạn sau lời đó, hãy trả lời tiếp nội dung vừa nói.",
     "- Chỉ viết nội dung sẽ gửi cho đối phương. Không mở đầu bằng việc nhắc lại các quy tắc này.",
     input.coding
-      ? "- Viết mô tả ảnh hưởng bằng Markdown, đủ ý. Không giới hạn số từ. Chỉ làm đúng vai đã giao."
+      ? input.room
+        ? "- Viết mô tả ảnh hưởng bằng Markdown, đủ ý. Không giới hạn số từ. Chỉ làm đúng vai đã giao."
+        : "- Viết mô tả ảnh hưởng bằng Markdown, đủ ý. Không giới hạn số từ. Chỉ sửa code trên máy này."
       : "- Dùng cùng ngôn ngữ với tin nhắn cuối. Giữ câu trả lời trong khoảng 500 từ, trừ khi đang tóm tắt file hoặc đang viết khối KẾT QUẢ.",
     "- Bám các lượt trước. Không bịa việc máy kia đã làm.",
     input.confine
       ? `- Nếu ${input.peerName} nhờ một việc trên máy này, chỉ làm trong thư mục làm việc đã đăng ký rồi nói kết quả. Lệnh và sửa file trong thư mục đó được tự chạy, không hỏi lại.`
       : `- Nếu ${input.peerName} nhờ một việc trên máy này, hãy làm rồi nói kết quả. Lệnh và sửa file được tự chạy, không hỏi lại.`,
     input.coding
-      ? "- Chỉ sửa file và chạy lệnh khi việc đó thuộc đúng vai của mình. Không làm việc của vai khác. Không gửi file cho nhóm khi việc chưa xong."
+      ? input.room
+        ? "- Chỉ sửa file và chạy lệnh khi việc đó thuộc đúng vai của mình. Không làm việc của vai khác. Không gửi file cho nhóm khi việc chưa xong."
+        : "- Được sửa file và chạy lệnh trong thư mục làm việc của máy này. Không gửi file cho máy kia khi việc chưa xong."
       : "- Nếu đối phương chỉ trò chuyện, chỉ trả lời bằng lời. Không chạy lệnh và không sửa file. Riêng khi họ nhờ gửi file thì dùng đúng lệnh gửi file bên dưới.",
     "- Nếu có file trong hồ sơ hoặc file đính kèm, hãy đọc đúng file tại đường dẫn trên máy này. txt, md và csv có thể đã có đoạn trích; ảnh, pdf, docx và excel phải mở file khi đoạn trích trống hoặc chưa đủ. Không bịa phần chưa đọc được.",
     relayLine(input),
@@ -449,7 +463,9 @@ function continuePrompt(input: ReplyInput): string {
     briefTail(input),
     skillBlock(input),
     input.coding
-      ? `Hãy trả lời ${input.peerName}. Viết mô tả ảnh hưởng bằng Markdown, không giới hạn số từ. Chỉ làm đúng vai của mình.`
+      ? input.room
+        ? `Hãy trả lời ${input.peerName}. Viết mô tả ảnh hưởng bằng Markdown, không giới hạn số từ. Chỉ làm đúng vai của mình.`
+        : `Hãy trả lời ${input.peerName}. Viết mô tả ảnh hưởng bằng Markdown, không giới hạn số từ. Chỉ sửa code trên máy này.`
       : `Hãy trả lời ${input.peerName}. Chỉ viết nội dung sẽ gửi, cùng ngôn ngữ với tin trên, trong khoảng 500 từ.`,
   ]
     .filter((part) => part !== "")
@@ -624,11 +640,18 @@ function briefTail(input: ReplyInput): string {
 function codingPace(input: ReplyInput): string {
   const file = input.resultFile?.trim();
   const last = Boolean(input.brief?.last);
+  const duty = input.room
+    ? codingRoleDuty(input.codingRole)
+    : "Chế độ coding 1-1. Bạn và agent máy kia cùng làm chủ đề. Bạn chỉ sửa code trong thư mục làm việc của máy này, rồi mô tả phần đã làm và ảnh hưởng bằng Markdown.";
   return [
-    codingRoleDuty(input.codingRole),
+    duty,
     file
-      ? `Khi toàn bộ việc đã xong, ghi một file Markdown chung tại ${file}. Trước đó không tạo file chung và không gửi file cho nhóm. File code đúng vai của mình vẫn được ghi trong thư mục làm việc.`
-      : "Trước khi toàn bộ việc xong, không tạo file chung và không gửi file cho nhóm.",
+      ? input.room
+        ? `Khi toàn bộ việc đã xong, ghi một file Markdown chung tại ${file}. Trước đó không tạo file chung và không gửi file cho nhóm. File code đúng vai của mình vẫn được ghi trong thư mục làm việc.`
+        : `Khi toàn bộ việc đã xong, ghi một file Markdown chung tại ${file}. Trước đó không tạo file chung và không gửi file cho máy kia. File code của máy này vẫn được ghi trong thư mục làm việc.`
+      : input.room
+        ? "Trước khi toàn bộ việc xong, không tạo file chung và không gửi file cho nhóm."
+        : "Trước khi toàn bộ việc xong, không tạo file chung và không gửi file cho máy kia.",
     last
       ? "Đây là lượt cuối của hạn mức. Nếu việc đã xong, bắt đầu bằng dòng KẾT QUẢ rồi ghi file chung. Nếu chưa xong, không viết KẾT QUẢ và không tạo file chung. Bắt đầu bằng đúng dòng CẦN THÊM: N, N là số nguyên lượt còn cần để hoàn thành, rồi nêu phần còn thiếu."
       : "Nếu toàn bộ việc đã xong ở lượt này, bắt đầu bằng dòng KẾT QUẢ và ghi file chung. Nếu chưa xong, mô tả ảnh hưởng bằng Markdown, đủ ý, không giới hạn số từ. Không viết KẾT QUẢ và không tạo file chung.",
