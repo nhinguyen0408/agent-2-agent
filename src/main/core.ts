@@ -2170,11 +2170,7 @@ export class AppCore {
 
   createSession(peerId: string): AppState {
     const groupId = parseGroupKey(peerId);
-    if (groupId) {
-      const room = this.groupById(groupId);
-      if (room) this.groupNote(room, "Nhóm dùng một phiên chung.", false);
-      return this.snapshot();
-    }
+    if (groupId) return this.createGroupSession(groupId);
     const session = this.addSession(peerId);
     this.store.transcripts[session.id] = [];
     this.store.openSessions[peerId] = session.id;
@@ -2189,14 +2185,7 @@ export class AppCore {
 
   deleteSession(peerId: string, sessionId: string): AppState {
     const groupId = parseGroupKey(peerId);
-    if (groupId) {
-      const room = this.groupById(groupId);
-      if (room && (room.sessionId === sessionId || this.store.openSessions[peerId] === sessionId)) return this.clearGroupTalk(groupId);
-      this.dropSession(peerId, sessionId);
-      this.scheduleSave();
-      this.pushNow();
-      return this.snapshot();
-    }
+    if (groupId) return this.deleteGroupSession(groupId, sessionId);
     const list = this.store.sessions[peerId] ?? [];
     if (!list.some((session) => session.id === sessionId)) return this.snapshot();
     this.dropSession(peerId, sessionId);
@@ -2231,7 +2220,7 @@ export class AppCore {
     if (!room) return this.snapshot();
     const host = room.hostId === this.store.peerId;
     this.haltGroupLocal(room, false);
-    const sessionId = this.roomSession(room);
+    const sessionId = this.viewedGroupSession(room);
     room.turn = null;
     this.store.transcripts[sessionId] = [];
     delete this.store.briefs[sessionId];
@@ -2266,7 +2255,13 @@ export class AppCore {
     session.title = clean;
     session.pinned = true;
     session.updatedAt = Date.now();
-    this.sendTo(peerId, "session", { id: session.id, title: session.title, createdAt: session.createdAt });
+    const groupId = parseGroupKey(peerId);
+    if (groupId) {
+      const room = this.groupById(groupId);
+      if (room) this.publishGroupSession(room, session, false);
+    } else {
+      this.sendTo(peerId, "session", { id: session.id, title: session.title, createdAt: session.createdAt });
+    }
     this.scheduleSave();
     this.pushNow();
     return this.snapshot();
@@ -2711,7 +2706,7 @@ export class AppCore {
     const spoken = text.trim().slice(0, LINE_CAP) || (attachment ? `Đọc file đính kèm ${attachment.name} và trao đổi nội dung.` : "");
     if (!spoken) return;
     const mentions = mentionTargets(spoken, this.aliasList(room.members.map((member) => this.memberRecord(member))));
-    const sessionId = this.roomSession(room);
+    const sessionId = this.viewedGroupSession(room);
     this.nameSession(key, sessionId, spoken);
     const line = this.makeLine(key, this.store.peerId, this.store.settings.name, "human", spoken);
     line.mentions = mentions;
@@ -2736,7 +2731,7 @@ export class AppCore {
   private async startGroupBrief(key: string): Promise<AppState> {
     const room = this.roomFromKey(key);
     if (!room) return this.snapshot();
-    const sessionId = this.roomSession(room);
+    const sessionId = this.viewedGroupSession(room);
     const brief = this.ensureBrief(sessionId);
     if (!brief.topic.trim()) {
       this.groupNote(room, "Hãy nhập chủ đề trước khi bắt đầu.", false);
@@ -2789,7 +2784,7 @@ export class AppCore {
   private extendGroup(key: string, extra?: number): AppState {
     const room = this.roomFromKey(key);
     if (!room) return this.snapshot();
-    const brief = this.ensureBrief(this.roomSession(room));
+    const brief = this.ensureBrief(this.viewedGroupSession(room));
     const cap = brief.coding ? CODING_TURN_MAX : BRIEF_TURN_MAX;
     const requested = Math.round(Number(extra));
     const add = Number.isFinite(requested) && requested > 0 ? Math.min(cap, requested) : BRIEF_EXTEND;
@@ -2802,19 +2797,22 @@ export class AppCore {
       return this.snapshot();
     }
     if (room.hostId !== this.store.peerId) {
-      this.sendTo(room.hostId, "group-extend", { groupId: room.id, extra: add });
+      this.sendTo(room.hostId, "group-extend", { groupId: room.id, extra: add, sessionId: this.viewedGroupSession(room) });
       return this.snapshot();
     }
     return this.applyGroupExtend(room, add);
   }
 
-  private applyGroupExtend(room: GroupRoom, add: number): AppState {
-    const sessionId = this.roomSession(room);
+  private applyGroupExtend(room: GroupRoom, add: number, sessionId = this.viewedGroupSession(room)): AppState {
     const brief = this.ensureBrief(sessionId);
     const cap = brief.coding ? CODING_TURN_MAX : BRIEF_TURN_MAX;
     const nextLimit = brief.turnsUsed >= brief.turnLimit ? brief.turnsUsed + add : brief.turnLimit + add;
     brief.turnLimit = clampTurnLimit(nextLimit, cap);
     brief.needTurns = 0;
+    if (room.turn && room.turn.left > 0 && sessionId !== room.sessionId) {
+      this.groupNote(room, "Đang có lượt ở phiên khác. Bấm Dừng trước khi gia hạn phiên này.", false, sessionId);
+      return this.snapshot();
+    }
     if (room.turn && room.turn.left > 0 && room.turn.mode === "topic") {
       const last = room.turn.order[room.turn.order.length - 1] || room.turn.speakerId;
       const more = brief.coding ? codingSpeakOrder(room.members, add, last) : speakOrder(room.members, [], add, last, "topic");
@@ -2830,6 +2828,7 @@ export class AppCore {
     const after = brief.coding ? this.lastAgentId(sessionId) : this.store.peerId;
     const order = brief.coding ? codingSpeakOrder(room.members, add, after) : speakOrder(room.members, mentions, add, this.store.peerId, "topic");
     const ticket = this.skipOffline(room, ticketFrom(order, "topic"));
+    room.sessionId = sessionId;
     room.turn = ticket;
     this.syncBrief(groupKey(room.id), sessionId);
     this.relay(room, "group-turn", { groupId: room.id, sessionId, turn: ticket, go: Boolean(ticket) } satisfies WireGroupTurn);
@@ -2844,7 +2843,7 @@ export class AppCore {
   private async addGroupFiles(key: string, paths: string[]): Promise<AppState> {
     const room = this.roomFromKey(key);
     if (!room) return this.snapshot();
-    const sessionId = this.roomSession(room);
+    const sessionId = this.viewedGroupSession(room);
     const brief = this.ensureBrief(sessionId);
     if (brief.running) return this.snapshot();
     let missed = false;
@@ -2948,16 +2947,29 @@ export class AppCore {
       const id = peerId();
       if (id) void this.onGroupResult(id, body);
     });
-    socket.on("group-extend", (body: { groupId?: string; extra?: number }) => {
+    socket.on("group-session-new", (body: { groupId?: string }) => {
+      const id = peerId();
+      if (id) this.onGroupSessionNew(id, body);
+    });
+    socket.on("group-session", (body: { groupId?: string; id?: string; title?: string; createdAt?: number; open?: boolean }) => {
+      const id = peerId();
+      if (id) this.onGroupSession(id, body);
+    });
+    socket.on("group-session-drop", (body: { groupId?: string; id?: string }) => {
+      const id = peerId();
+      if (id) this.onGroupSessionDrop(id, body);
+    });
+    socket.on("group-extend", (body: { groupId?: string; extra?: number; sessionId?: string }) => {
       const id = peerId();
       if (!id || !body?.groupId) return;
       const room = this.groupById(body.groupId);
       if (!room || room.hostId !== this.store.peerId || !room.members.some((member) => member.peerId === id)) return;
-      const brief = this.ensureBrief(room.sessionId);
+      const sessionId = body.sessionId || room.sessionId;
+      const brief = this.ensureBrief(sessionId);
       const cap = brief.coding ? CODING_TURN_MAX : BRIEF_TURN_MAX;
       const requested = Math.round(Number(body.extra));
       const add = Number.isFinite(requested) && requested > 0 ? Math.min(cap, requested) : BRIEF_EXTEND;
-      this.applyGroupExtend(room, add);
+      this.applyGroupExtend(room, add, sessionId);
     });
     socket.on("group-activity", (body: ActivityPatch) => {
       const id = peerId();
@@ -2970,7 +2982,7 @@ export class AppCore {
     if (!room || !msg?.id || msg.fromPeerId === this.store.peerId) return;
     if (!this.groupSocketOk(room, socketPeer, msg.fromPeerId)) return;
     const sessionId = this.adoptSession(groupKey(room.id), msg.sessionId || room.sessionId, msg.sessionTitle);
-    room.sessionId = room.sessionId || sessionId;
+    if (!room.sessionId || (msg.turn && msg.turn.left > 0)) room.sessionId = sessionId;
     const attachment = this.localDiscuss(msg.attachment);
     this.upsertLine(sessionId, {
       id: msg.id,
@@ -3022,7 +3034,8 @@ export class AppCore {
     const room = this.groupById(delta?.groupId || "");
     if (!room || !delta?.id || delta.fromPeerId === this.store.peerId) return;
     if (!this.groupSocketOk(room, socketPeer, delta.fromPeerId)) return;
-    const sessionId = room.sessionId || delta.sessionId || "";
+    const sessionId = delta.sessionId || room.sessionId || "";
+    if (delta.sessionId) this.adoptSession(groupKey(room.id), delta.sessionId);
     if (!sessionId) return;
     if (room.hostId === this.store.peerId && delta.fromPeerId === socketPeer) {
       this.relay(room, "group-delta", delta, socketPeer);
@@ -3145,11 +3158,26 @@ export class AppCore {
       room.title = title;
       room.members = members;
     }
-    const sessionId = this.adoptSession(groupKey(room.id), body.sessionId, body.sessionTitle || title);
+    const key = groupKey(room.id);
+    const previous = this.store.openSessions[key];
+    for (const item of body.sessions ?? []) {
+      if (!item?.id || item.id.length > 80) continue;
+      this.adoptSession(key, item.id, item.title);
+      this.ingestGroupHistory(room, item.id, item.history ?? []);
+    }
+    const sessionId = this.adoptSession(key, body.sessionId, body.sessionTitle || title);
     room.sessionId = sessionId;
-    this.store.openSessions[groupKey(room.id)] = sessionId;
-    for (const line of body.history ?? []) {
-      if (!line?.id || line.fromPeerId === this.store.peerId && this.findLine(sessionId, line.id)) continue;
+    const stillOpen = previous && (this.store.sessions[key] ?? []).some((session) => session.id === previous);
+    this.store.openSessions[key] = stillOpen ? previous : sessionId;
+    this.ingestGroupHistory(room, sessionId, body.history ?? []);
+    this.scheduleSave();
+    this.pushNow();
+  }
+
+  private ingestGroupHistory(room: GroupRoom, sessionId: string, lines: WireChat[]): void {
+    void room;
+    for (const line of lines) {
+      if (!line?.id || (line.fromPeerId === this.store.peerId && this.findLine(sessionId, line.id))) continue;
       const attachment = this.localDiscuss(line.attachment);
       this.upsertLine(sessionId, {
         id: line.id,
@@ -3165,6 +3193,74 @@ export class AppCore {
       });
       this.remember(line.id);
     }
+  }
+
+  private onGroupSessionNew(socketPeer: string, body: { groupId?: string }): void {
+    const room = this.groupById(body?.groupId || "");
+    if (!room || room.hostId !== this.store.peerId || socketPeer === this.store.peerId) return;
+    if (!room.members.some((member) => member.peerId === socketPeer)) return;
+    if (room.turn && room.turn.left > 0) {
+      this.groupNote(room, "Đang có lượt. Bấm Dừng trước khi mở phiên mới.", true);
+      return;
+    }
+    this.openFreshGroupSession(room);
+  }
+
+  private onGroupSession(socketPeer: string, body: { groupId?: string; id?: string; title?: string; createdAt?: number; open?: boolean }): void {
+    const room = this.groupById(body?.groupId || "");
+    if (!room || !body?.id || body.id.length > 80) return;
+    const hostHere = room.hostId === this.store.peerId;
+    if (hostHere) {
+      if (socketPeer === this.store.peerId || !room.members.some((member) => member.peerId === socketPeer)) return;
+      this.applyGroupSession(room, body);
+      this.relay(room, "group-session", body, socketPeer);
+      this.scheduleSave();
+      this.pushNow();
+      return;
+    }
+    if (socketPeer !== room.hostId) return;
+    this.applyGroupSession(room, body);
+    this.scheduleSave();
+    this.pushNow();
+  }
+
+  private applyGroupSession(room: GroupRoom, body: { id?: string; title?: string; open?: boolean }): void {
+    if (!body.id) return;
+    const key = groupKey(room.id);
+    const previous = this.store.openSessions[key];
+    const title = body.title?.replace(/\s+/g, " ").trim().slice(0, 42);
+    this.adoptSession(key, body.id, title);
+    const session = (this.store.sessions[key] ?? []).find((item) => item.id === body.id);
+    if (session && title) {
+      session.title = title;
+      if (!body.open) session.pinned = true;
+    }
+    if (body.open) {
+      this.store.openSessions[key] = body.id;
+      room.sessionId = body.id;
+      this.watchPeer = key;
+      this.watchSession = body.id;
+      this.unread.delete(body.id);
+      return;
+    }
+    if (previous && (this.store.sessions[key] ?? []).some((item) => item.id === previous)) this.store.openSessions[key] = previous;
+    if (previous !== body.id) this.unread.add(body.id);
+  }
+
+  private onGroupSessionDrop(socketPeer: string, body: { groupId?: string; id?: string }): void {
+    const room = this.groupById(body?.groupId || "");
+    if (!room || !body?.id) return;
+    const hostHere = room.hostId === this.store.peerId;
+    if (hostHere) {
+      if (socketPeer === this.store.peerId || !room.members.some((member) => member.peerId === socketPeer)) return;
+      this.removeGroupSession(room, body.id);
+      this.relay(room, "group-session-drop", body, socketPeer);
+      this.scheduleSave();
+      this.pushNow();
+      return;
+    }
+    if (socketPeer !== room.hostId) return;
+    this.removeGroupSession(room, body.id);
     this.scheduleSave();
     this.pushNow();
   }
@@ -3182,6 +3278,18 @@ export class AppCore {
   }
 
   private planIncoming(room: GroupRoom, msg: WireChat): void {
+    const sessionId = msg.sessionId
+      ? this.adoptSession(groupKey(room.id), msg.sessionId, msg.sessionTitle)
+      : this.roomSession(room);
+    msg.sessionId = sessionId;
+    const turnLive = Boolean(room.turn && room.turn.left > 0 && room.sessionId);
+    if (turnLive && sessionId !== room.sessionId) {
+      msg.cue = false;
+      msg.queue = undefined;
+      msg.turn = room.turn;
+      return;
+    }
+    if (!turnLive) room.sessionId = sessionId;
     if (msg.kind === "agent") {
       const settled = this.skipOffline(room, sanitizeTicket(msg.turn));
       msg.turn = settled;
@@ -3196,10 +3304,10 @@ export class AppCore {
       msg.queue = undefined;
       if (busy) {
         msg.cue = false;
-        this.groupNote(room, "Đang có lượt. Đợi các agent nói xong, hoặc bấm Dừng.", true);
+        this.groupNote(room, "Đang có lượt. Đợi các agent nói xong, hoặc bấm Dừng.", true, sessionId);
         return;
       }
-      const stored = this.store.briefs[room.sessionId];
+      const stored = this.store.briefs[sessionId];
       const coding = Boolean(msg.brief?.coding ?? stored?.coding);
       const turns = msg.dialogue?.repliesLeft || stored?.turnLimit || (coding ? CODING_TURN_DEFAULT : 6);
       const order = coding
@@ -3210,9 +3318,9 @@ export class AppCore {
       msg.turn = ticket;
       msg.cue = Boolean(ticket);
       if (!ticket) {
-        const brief = this.store.briefs[room.sessionId];
+        const brief = this.store.briefs[sessionId];
         if (brief) brief.running = false;
-        this.groupNote(room, coding ? "Không có agent đã phân vai đang nối." : "Không có agent nào đang nối để xếp lượt.", true);
+        this.groupNote(room, coding ? "Không có agent đã phân vai đang nối." : "Không có agent nào đang nối để xếp lượt.", true, sessionId);
       }
       return;
     }
@@ -3225,7 +3333,7 @@ export class AppCore {
       return;
     }
     if (busy && mentions.length && room.turn) {
-      const brief = this.ensureBrief(room.sessionId);
+      const brief = this.ensureBrief(sessionId);
       if (brief.coding && room.turn.mode === "topic") {
         msg.turn = room.turn;
         msg.cue = false;
@@ -3238,7 +3346,7 @@ export class AppCore {
       msg.queue = undefined;
       if (room.turn.mode === "topic") {
         brief.turnLimit = clampTurnLimit(Math.max(brief.turnLimit, brief.turnsUsed + room.turn.left), BRIEF_TURN_MAX);
-        this.syncBrief(groupKey(room.id), room.sessionId);
+        this.syncBrief(groupKey(room.id), sessionId);
       }
     }
   }
@@ -3483,16 +3591,12 @@ export class AppCore {
   }
 
   private wireGroup(room: GroupRoom): WireGroup {
-    const history = (this.store.transcripts[room.sessionId] ?? [])
-      .filter((line) => line.kind !== "system")
-      .slice(-40)
-      .map((line) => {
-        const wire = this.toWire(line, room.sessionId);
-        const published = this.publishMentions(line.text, this.aliasList(room.members.map((member) => this.memberRecord(member))));
-        wire.text = published.text;
-        wire.mentions = published.mentions.length ? published.mentions : line.mentions;
-        return wire;
-      });
+    const sessions = (this.store.sessions[groupKey(room.id)] ?? []).map((session) => ({
+      id: session.id,
+      title: session.title,
+      createdAt: session.createdAt,
+      history: this.wireHistory(room, session.id),
+    }));
     return {
       id: room.id,
       title: room.title,
@@ -3500,13 +3604,27 @@ export class AppCore {
       members: room.members.map((member) => this.memberRecord(member)),
       sessionId: room.sessionId,
       sessionTitle: this.sessionTitle(room.sessionId),
-      history,
+      history: this.wireHistory(room, room.sessionId),
+      sessions,
     };
   }
 
-  private groupNote(room: GroupRoom, text: string, tell: boolean): ChatLine {
+  private wireHistory(room: GroupRoom, sessionId: string): WireChat[] {
+    const people = this.aliasList(room.members.map((member) => this.memberRecord(member)));
+    return (this.store.transcripts[sessionId] ?? [])
+      .filter((line) => line.kind !== "system")
+      .slice(-40)
+      .map((line) => {
+        const wire = this.toWire(line, sessionId);
+        const published = this.publishMentions(line.text, people);
+        wire.text = published.text;
+        wire.mentions = published.mentions.length ? published.mentions : line.mentions;
+        return wire;
+      });
+  }
+
+  private groupNote(room: GroupRoom, text: string, tell: boolean, sessionId = this.viewedGroupSession(room)): ChatLine {
     this.journalProblem(`nhóm ${room.title}`, text);
-    const sessionId = this.roomSession(room);
     const line = this.makeLine(groupKey(room.id), this.store.peerId, this.store.settings.name, "system", text);
     this.appendLine(sessionId, line);
     if (tell) this.relay(room, "group-note", { id: line.id, groupId: room.id, sessionId, text });
@@ -3528,13 +3646,98 @@ export class AppCore {
   private roomSession(room: GroupRoom): string {
     const key = groupKey(room.id);
     const known = room.sessionId && (this.store.sessions[key] ?? []).some((session) => session.id === room.sessionId);
-    if (known) {
-      this.store.openSessions[key] = room.sessionId;
-      return room.sessionId;
-    }
+    if (known) return room.sessionId;
     const sessionId = this.ensureSession(key);
     room.sessionId = sessionId;
     return sessionId;
+  }
+
+  private viewedGroupSession(room: GroupRoom): string {
+    const key = groupKey(room.id);
+    const open = this.store.openSessions[key];
+    if (open && (this.store.sessions[key] ?? []).some((session) => session.id === open)) return open;
+    const sessionId = this.roomSession(room);
+    this.store.openSessions[key] = sessionId;
+    return sessionId;
+  }
+
+  private createGroupSession(groupId: string): AppState {
+    const room = this.groupById(groupId);
+    if (!room) return this.snapshot();
+    if (room.turn && room.turn.left > 0) {
+      this.groupNote(room, "Đang có lượt. Bấm Dừng trước khi mở phiên mới.", false);
+      return this.snapshot();
+    }
+    if (room.hostId !== this.store.peerId) {
+      if (!this.groupReachable(room)) {
+        this.groupNote(room, "Cần nối với máy chủ nhóm trước khi mở phiên mới.", false);
+        return this.snapshot();
+      }
+      this.sendTo(room.hostId, "group-session-new", { groupId: room.id });
+      return this.snapshot();
+    }
+    return this.openFreshGroupSession(room);
+  }
+
+  private openFreshGroupSession(room: GroupRoom): AppState {
+    const key = groupKey(room.id);
+    const session = this.addSession(key);
+    this.store.transcripts[session.id] = [];
+    this.store.openSessions[key] = session.id;
+    room.sessionId = session.id;
+    this.watchPeer = key;
+    this.watchSession = session.id;
+    this.unread.delete(session.id);
+    this.publishGroupSession(room, session, true);
+    this.scheduleSave();
+    this.pushNow();
+    return this.snapshot();
+  }
+
+  private publishGroupSession(room: GroupRoom, session: ChatSession, open: boolean): void {
+    const payload = {
+      groupId: room.id,
+      id: session.id,
+      title: session.title,
+      createdAt: session.createdAt,
+      open,
+    };
+    if (room.hostId === this.store.peerId) this.relay(room, "group-session", payload);
+    else this.sendTo(room.hostId, "group-session", payload);
+  }
+
+  private deleteGroupSession(groupId: string, sessionId: string): AppState {
+    const room = this.groupById(groupId);
+    if (!room) return this.snapshot();
+    const key = groupKey(room.id);
+    const list = this.store.sessions[key] ?? [];
+    if (!list.some((session) => session.id === sessionId)) return this.snapshot();
+    if (list.length <= 1) return this.clearGroupTalk(groupId);
+    if (room.turn && room.turn.left > 0 && room.sessionId === sessionId) {
+      this.groupNote(room, "Đang có lượt. Bấm Dừng trước khi xóa phiên này.", false);
+      return this.snapshot();
+    }
+    this.removeGroupSession(room, sessionId);
+    const payload = { groupId: room.id, id: sessionId };
+    if (room.hostId === this.store.peerId) this.relay(room, "group-session-drop", payload);
+    else this.sendTo(room.hostId, "group-session-drop", payload);
+    this.scheduleSave();
+    this.pushNow();
+    return this.snapshot();
+  }
+
+  private removeGroupSession(room: GroupRoom, sessionId: string): void {
+    const key = groupKey(room.id);
+    const list = this.store.sessions[key] ?? [];
+    if (!list.some((session) => session.id === sessionId) || list.length <= 1) return;
+    this.dropSession(key, sessionId);
+    if (room.sessionId === sessionId || !this.store.openSessions[key]) {
+      const latest = [...(this.store.sessions[key] ?? [])].sort((a, b) => b.updatedAt - a.updatedAt)[0];
+      if (latest) {
+        room.sessionId = latest.id;
+        this.store.openSessions[key] = latest.id;
+      }
+    }
   }
 
   private groupById(id: string): GroupRoom | undefined {
@@ -3542,7 +3745,7 @@ export class AppCore {
   }
 
   private roomBySession(sessionId: string): GroupRoom | undefined {
-    return this.store.groups.find((room) => room.sessionId === sessionId);
+    return this.store.groups.find((room) => (this.store.sessions[groupKey(room.id)] ?? []).some((session) => session.id === sessionId));
   }
 
   private roomFromKey(key: string): GroupRoom | undefined {

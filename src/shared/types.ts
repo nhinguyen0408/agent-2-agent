@@ -207,6 +207,7 @@ export type WireGroup = {
   sessionId: string;
   sessionTitle?: string;
   history?: WireChat[];
+  sessions?: { id: string; title: string; createdAt: number; history?: WireChat[] }[];
 };
 
 export type WireGroupTurn = {

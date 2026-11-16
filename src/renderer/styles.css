@@ -688,7 +688,7 @@ label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 12px; co
 
 .search input { border: 0; box-shadow: none; padding: 0.42rem 0; background: transparent; }
 
-.pane-tools { display: flex; justify-content: flex-end; }
+.pane-tools { display: flex; justify-content: flex-end; flex: none; }
 
 .chat {
   min-width: 0;

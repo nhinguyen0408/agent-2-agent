@@ -164,7 +164,7 @@ function boot(host: HTMLElement): void {
             <input id="history-query" placeholder="Tìm trong phiên của máy này" autocomplete="off" aria-label="Tìm trong phiên của máy này" />
           </div>
           <div id="history-list" class="history-list"></div>
-          <div class="pane-tools">${iconButton("new-session", "plus", "Phiên mới với máy đang chọn")}</div>
+          <div class="pane-tools">${iconButton("new-session", "plus", "Phiên mới với máy đang chọn", "", "", "button", "icon-btn primary")}</div>
         </div>
       </aside>
       <section class="chat">
@@ -1224,7 +1224,7 @@ function boot(host: HTMLElement): void {
       focusLine = "";
       hit?.scrollIntoView({ block: "center" });
     }
-    must<HTMLButtonElement>("#new-session").disabled = true;
+    must<HTMLButtonElement>("#new-session").disabled = false;
     const others = group.members.filter((member) => member.peerId !== next.self.peerId).map((member) => member.peerId);
     const waiting = composerWait(lines, others, sessionId, next.activity);
     setComposer(waiting.locked, linked, "Nhắn trong nhóm. Gõ @ để gọi agent, @me là máy này…", waiting.stop);
@@ -1241,8 +1241,9 @@ function boot(host: HTMLElement): void {
     const box = must<HTMLElement>("#group-members");
     if (box.querySelector("input.nick-edit, select.role-pick:focus")) return;
     box.replaceChildren();
-    const coding = Boolean(next.briefs[group.sessionId]?.coding);
-    const codingRunning = Boolean(next.briefs[group.sessionId]?.running);
+    const openId = next.openSession[groupKey(group.id)] || group.sessionId;
+    const coding = Boolean(next.briefs[openId]?.coding);
+    const codingRunning = Boolean(next.briefs[openId]?.running);
     for (const member of group.members) {
       const chip = document.createElement("span");
       const online = member.peerId === next.self.peerId || next.peers.some((peer) => peer.peerId === member.peerId && peer.status === "connected");
@@ -1754,7 +1755,11 @@ function boot(host: HTMLElement): void {
       .filter((row) => row.shown)
       .sort((a, b) => b.session.updatedAt - a.session.updatedAt);
     box.replaceChildren();
-    must<HTMLButtonElement>("#new-session").disabled = !active || Boolean(parseGroupKey(active));
+    const newer = must<HTMLButtonElement>("#new-session");
+    const groupOpen = Boolean(active && parseGroupKey(active));
+    newer.disabled = !active;
+    newer.dataset.tip = groupOpen ? "Phiên mới trong nhóm này" : "Phiên mới với máy đang chọn";
+    newer.setAttribute("aria-label", newer.dataset.tip);
     if (!active) {
       box.replaceChildren(historyNote("Chọn một máy để xem các phiên chat."));
       return;
@@ -1891,6 +1896,13 @@ function boot(host: HTMLElement): void {
       closeHistoryMenus();
       const peerId = edit.dataset.peer;
       const sessionId = edit.dataset.editSession;
+      if (parseGroupKey(peerId)) {
+        const current = state?.sessions.find((item) => item.id === sessionId)?.title || "";
+        const title = window.prompt("Tên phiên", current);
+        if (title === null) return;
+        void guard(() => window.lan.renameSession(peerId, sessionId, title));
+        return;
+      }
       active = peerId;
       void guard(async () => {
         const next = await window.lan.openSession(peerId, sessionId);
@@ -2382,7 +2394,8 @@ function deletePrompt(state: AppState, peerId: string, sessionId: string, group:
   const session = state.sessions.find((item) => item.id === sessionId && item.peerId === peerId);
   const linked = Boolean(linkedClient(state, session));
   if (group) {
-    const base = host ? "Xóa hội thoại của cả nhóm?" : "Xóa hội thoại nhóm trên máy này?";
+    const count = state.sessions.filter((item) => item.peerId === peerId).length;
+    const base = count > 1 ? "Xóa phiên này cho cả nhóm?" : host ? "Xóa hội thoại của cả nhóm?" : "Xóa hội thoại nhóm trên máy này?";
     return linked ? `${base} Phiên trong client vẫn giữ để bạn mở lại.` : base;
   }
   return linked ? "Xóa phiên này trong LAN Agents? Phiên trong client vẫn giữ để bạn mở lại." : "Xóa phiên hội thoại này trên máy này?";
