@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { accessPrompt, AccessDenied, defaultAccess, deniedRoles, toolBlob } from "../shared/access";
+import { accessAnnounce, accessPrompt, AccessDenied, defaultAccess, deniedRoles, toolBlob } from "../shared/access";
 import { codingRoleDuty, type CodingRole } from "../shared/group";
 import type { ProviderId, Settings } from "../shared/types";
 import { findExecutable } from "./cliDetect";
@@ -31,6 +31,8 @@ export type ReplyInput = {
   skillDirs?: string[];
   skills?: string;
   access?: string[] | null;
+  granted?: string[] | null;
+  announceAccess?: boolean;
   room?: { title: string; members: string };
   together?: string;
   resume?: boolean;
@@ -422,10 +424,11 @@ function conversationPrompt(input: ReplyInput): string {
     "Hãy trả lời tin nhắn cuối như một người trong cuộc hội thoại này.",
     scopeBlock(input, true),
     accessPrompt(input.access),
+    accessTurn(input),
     "Quy tắc:",
     "- Nếu tin có @Tên, đó là máy được gọi. @me là agent của máy đã gửi tin đó. Hãy nói với đúng người đó.",
     "- Trong trò chuyện 1-1, agent của máy gửi @me nói trước. Khi đến lượt bạn sau lời đó, hãy trả lời tiếp nội dung vừa nói.",
-    "- Chỉ viết nội dung sẽ gửi cho đối phương. Không mở đầu bằng việc nhắc lại các quy tắc này.",
+    "- Chỉ viết nội dung sẽ gửi cho đối phương. Không mở đầu bằng việc nhắc lại các quy tắc này. Khối QUYỀN ở lượt đầu chủ đề là nội dung gửi đi.",
     input.coding
       ? input.room
         ? "- Viết mô tả ảnh hưởng bằng Markdown, đủ ý. Không giới hạn số từ. Chỉ làm đúng vai đã giao."
@@ -461,6 +464,7 @@ function continuePrompt(input: ReplyInput): string {
   return [
     scopeBlock(input, false),
     accessPrompt(input.access),
+    accessTurn(input),
     input.coding ? codingPace(input) : "",
     formatHistory(input),
     pace,
@@ -610,6 +614,22 @@ function sessionIdOf(event: unknown): string {
   if (record.type === "thread.started" && typeof record.thread_id === "string" && record.thread_id.trim()) {
     return record.thread_id.trim().slice(0, 80);
   }
+  return "";
+}
+
+function accessTurn(input: ReplyInput): string {
+  if (!input.brief?.topic) return "";
+  const granted = input.granted ?? input.access;
+  const card = accessAnnounce(input.selfName, granted);
+  if (!card) return "";
+  if (input.announceAccess) {
+    return [
+      "Lượt đầu của máy này trong chủ đề: mở đầu câu trả lời bằng đúng khối sau, rồi mới bàn việc. Giữ nguyên tiêu đề và hai dòng Được/Không. Không thêm quyền. Khối này không tính vào hạn 500 từ.",
+      card,
+      "Không yêu cầu agent khác làm việc họ đã ghi ở mục Không. Nếu họ chưa nêu khối quyền, chỉ bàn luận, chưa giao việc trên máy họ.",
+    ].join("\n");
+  }
+  if (input.brief.turn > 1) return "Quyền mỗi máy đã nêu ở đầu chủ đề. Không yêu cầu máy khác làm việc nằm trong mục Không của máy đó. Không lặp lại khối quyền của mình.";
   return "";
 }
 

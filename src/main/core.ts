@@ -1567,6 +1567,8 @@ export class AppCore {
             skillDirs,
             skills: skillCatalog(skillDirs),
             access: owner ? null : this.store.settings.access,
+            granted: this.store.settings.access,
+            announceAccess: this.shouldAnnounceAccess(bound),
             room: room
               ? {
                   title: room.title,
@@ -2130,6 +2132,19 @@ export class AppCore {
   private briefContinues(sessionId: string): boolean {
     const brief = this.store.briefs[sessionId];
     return Boolean(brief?.running && brief.turnsUsed < brief.turnLimit);
+  }
+
+  private shouldAnnounceAccess(sessionId: string): boolean {
+    const brief = this.store.briefs[sessionId];
+    if (!brief?.running || !brief.topic.trim()) return false;
+    const lines = this.store.transcripts[sessionId] ?? [];
+    let start = 0;
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      if (lines[index]?.kind !== "human") continue;
+      start = index + 1;
+      break;
+    }
+    return !lines.slice(start).some((line) => line.kind === "agent" && line.fromPeerId === this.store.peerId && !line.pending && line.text.trim());
   }
 
   private promptBrief(sessionId: string): { topic: string; goal: string; turn: number; limit: number; last: boolean } | undefined {

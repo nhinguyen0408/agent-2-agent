@@ -205,6 +205,14 @@ export function latestRequest(history: { role: string; text: string }[]): string
     .join("\n");
 }
 
+export function accessAnnounce(name: string, enabled: readonly string[] | null | undefined): string {
+  if (enabled == null) return "";
+  const allow = new Set(enabled);
+  const on = ACCESS_ROLES.filter((role) => allow.has(role.id)).map((role) => role.title);
+  const off = ACCESS_ROLES.filter((role) => !allow.has(role.id)).map((role) => role.title);
+  return [`QUYỀN CỦA ${name}`, `Được: ${on.length ? on.join(", ") : "không có"}.`, `Không: ${off.length ? off.join(", ") : "không có"}.`].join("\n");
+}
+
 export function accessPrompt(enabled: readonly string[] | null | undefined): string {
   if (enabled === null) return "";
   const allow = new Set(enabled ?? defaultAccess());
