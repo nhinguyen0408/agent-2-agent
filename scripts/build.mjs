@@ -45,8 +45,14 @@ export async function build() {
     entryPoints: [path.join(root, "src/renderer/previewWindow.ts")],
     outfile: path.join(root, "dist/preview.js"),
   });
+  await esbuild.build({
+    ...page,
+    entryPoints: [path.join(root, "src/renderer/codingWindow.ts")],
+    outfile: path.join(root, "dist/coding.js"),
+  });
   copyFileSync(path.join(root, "src/renderer/index.html"), path.join(root, "dist/index.html"));
   copyFileSync(path.join(root, "src/renderer/preview.html"), path.join(root, "dist/preview.html"));
+  copyFileSync(path.join(root, "src/renderer/coding.html"), path.join(root, "dist/coding.html"));
   copyFileSync(path.join(root, "src/renderer/styles.css"), path.join(root, "dist/styles.css"));
 }
 

@@ -66,7 +66,8 @@ import type {
 import { DEFAULT_PORT, PORT_SPAN, REPLY_WAIT_MS, providerLabel } from "../shared/types";
 import { AccessDenied, deniedRoles, denialText, latestRequest } from "../shared/access";
 import { AgentHost, CliResumeUnsupported, CliSessionLost, type ModelTurn } from "./agents";
-import { CodingWatch } from "./codingTerm";
+import { CodingWatch, type CodingTrace } from "./codingTerm";
+import { parseCodingLog, type CodingLive, type CodingStep } from "../shared/codingLive";
 import { detectLocalClis, installedCliList, parseCliList } from "./cliDetect";
 import { Discovery, lanIPv4, normalizeIp } from "./discovery";
 import { briefFolder, configuredSkillDir, fileNameFromHeader, formatBytes, MAX_FILE_BYTES, projectSkillRoots, readFileLimited, resolveInside, safeFileName, saveExact, saveReceivedFile, skillCatalog } from "./files";
@@ -113,6 +114,9 @@ export class AppCore {
   private readonly aborts = new Map<string, AbortController>();
   private readonly codingFileStamp = new Map<string, number>();
   private readonly codingWatch = new CodingWatch();
+  private readonly codingPending = new Map<string, CodingStep>();
+  private readonly codingSent = new Map<string, string>();
+  private codingFlush: NodeJS.Timeout | null = null;
   private readonly seen = new Set<string>();
   private readonly seenOrder: string[] = [];
   private readonly greeted = new Set<string>();
@@ -146,6 +150,7 @@ export class AppCore {
   private scanning = false;
   onChange: () => void = () => {};
   onNotice: (notice: { peerId: string; sessionId: string; title: string; body: string }) => void = () => {};
+  onCodingLive: (event: CodingLive) => void = () => {};
 
   constructor(profile: string, sessionAutoAccept: boolean) {
     this.profile = profile;
@@ -627,7 +632,10 @@ export class AppCore {
     brief.running = true;
     brief.turnsUsed = 0;
     brief.needTurns = 0;
-    if (brief.coding) brief.codingSince = Date.now();
+    if (brief.coding) {
+      brief.codingSince = Date.now();
+      this.resetCodingView(sessionId);
+    }
     brief.turnLimit = clampTurnLimit(brief.turnLimit, brief.coding ? CODING_TURN_MAX : BRIEF_TURN_MAX);
     this.pushNow();
     try {
@@ -1515,6 +1523,7 @@ export class AppCore {
         pending: true,
         createdAt,
       });
+      if (coding) this.attachCodingLog(bound, id);
       this.pushNow();
       this.notifyActivity(peerId, { replying: true, sessionId: bound });
       const room = groupId ? this.groupById(groupId) : undefined;
@@ -1576,7 +1585,7 @@ export class AppCore {
             onTool: (info) => {
               if (!coding || !this.store.briefs[bound]?.running || (this.epochs.get(peerId) ?? 0) !== epoch) return;
               const task = info.sessionId || link?.id || "";
-              this.traceCoding(bound, peerId, task, info.line, info.writesCode);
+              for (const step of info.steps) this.noteCoding(bound, task, step, id);
             },
             onTask: (taskId) => {
               if (!coding || !this.store.briefs[bound]?.running || (this.epochs.get(peerId) ?? 0) !== epoch) return;
@@ -2162,28 +2171,173 @@ export class AppCore {
     void this.publishPairCodingResult(peerId, sessionId, wire.text || "");
   }
 
-  private traceCoding(chatSessionId: string, peerId: string, taskId: string, line: string, arm: boolean): void {
-    const brief = this.store.briefs[chatSessionId];
-    const result = this.codingWatch.write({
-      chatSessionId,
+  private noteCoding(chatSessionId: string, taskId: string, step: CodingStep, lineId: string): void {
+    const shown = this.presentCoding(step);
+    this.queueCoding(chatSessionId, shown);
+    const counts = shown.status !== "run" && (shown.added || shown.removed) ? `  +${shown.added} −${shown.removed}` : "";
+    const block = shown.status === "run" ? "" : this.codingBlock(shown);
+    this.traceCoding(chatSessionId, taskId, `${shown.label}${counts}`, block, lineId);
+  }
+
+  private presentCoding(step: CodingStep): CodingStep {
+    if (!step.path) return step;
+    const nextPath = relativeWorkPath(this.store.settings.workDir, step.path);
+    if (!nextPath || nextPath === step.path) return step;
+    const label = step.label.includes(step.path) ? step.label.split(step.path).join(nextPath) : step.label;
+    return { ...step, path: nextPath, label };
+  }
+
+  private codingBlock(step: CodingStep): string {
+    const body = step.diff || step.code;
+    const extra = step.kind === "shell" || step.status === "error" ? step.output : "";
+    return [body, extra].filter(Boolean).join("\n\n").slice(0, 8_000);
+  }
+
+  private queueCoding(sessionId: string, step: CodingStep): void {
+    const id = `${sessionId}\0${step.key}`;
+    const signature = [step.status, step.kind, step.label, step.path, step.command, step.diff, step.code, step.output, String(step.added), String(step.removed)].join("\u0001");
+    if (this.codingSent.get(id) === signature) return;
+    this.codingSent.set(id, signature);
+    this.codingPending.set(id, step);
+    if (step.status !== "run") {
+      this.flushCoding();
+      return;
+    }
+    if (this.codingFlush) return;
+    this.codingFlush = setTimeout(() => this.flushCoding(), 70);
+  }
+
+  private flushCoding(): void {
+    if (this.codingFlush) clearTimeout(this.codingFlush);
+    this.codingFlush = null;
+    const batch = [...this.codingPending.entries()];
+    this.codingPending.clear();
+    for (const [id, step] of batch) {
+      const sessionId = id.slice(0, id.indexOf("\0"));
+      this.onCodingLive({ sessionId, step });
+    }
+  }
+
+  private resetCodingView(sessionId: string): void {
+    const prefix = `${sessionId}\0`;
+    for (const key of [...this.codingPending.keys()]) if (key.startsWith(prefix)) this.codingPending.delete(key);
+    for (const key of [...this.codingSent.keys()]) if (key.startsWith(prefix)) this.codingSent.delete(key);
+    this.onCodingLive({ sessionId, reset: true });
+  }
+
+  private attachCodingLog(sessionId: string, lineId: string): void {
+    const filePath = this.codingWatch.open(this.codingTrace(sessionId, ""));
+    this.stickCodingLog(sessionId, lineId, filePath);
+  }
+
+  private traceCoding(chatSessionId: string, taskId: string, line: string, block: string, lineId: string): void {
+    const filePath = this.codingWatch.write({ ...this.codingTrace(chatSessionId, taskId), line, block }).path;
+    this.stickCodingLog(chatSessionId, lineId, filePath);
+  }
+
+  private codingTrace(sessionId: string, taskId: string): CodingTrace {
+    const brief = this.store.briefs[sessionId];
+    return {
+      chatSessionId: sessionId,
       since: brief?.codingSince || 0,
       taskId,
       provider: this.store.settings.provider,
-      title: this.sessionTitle(chatSessionId),
+      title: this.sessionTitle(sessionId),
       workDir: this.store.settings.workDir,
-      line,
-      arm,
-    });
-    if (result.opened) {
-      const taskNote = taskId ? ` Task ${taskId.slice(0, 8)}.` : "";
-      this.tell(chatSessionId, peerId, `Agent máy này bắt đầu sửa code. Đã mở terminal theo phiên của đoạn chat.${taskNote}`);
-      this.scheduleSave();
-      return;
+    };
+  }
+
+  private stickCodingLog(sessionId: string, lineId: string, filePath: string): void {
+    if (!filePath) return;
+    allowPreview(filePath);
+    const line = this.findLine(sessionId, lineId);
+    if (!line || line.codingLog === filePath) return;
+    line.codingLog = filePath;
+    this.scheduleSave();
+    this.pushNow();
+  }
+
+  codingReplay(sessionId: string): CodingStep[] {
+    const filePath = this.newestCodingLog(sessionId);
+    if (!filePath) return [];
+    try {
+      const stat = fs.statSync(filePath);
+      if (!stat.isFile() || stat.size > 2_000_000) return [];
+      return parseCodingLog(fs.readFileSync(filePath, "utf8"));
+    } catch {
+      return [];
     }
-    if (result.error) {
-      this.tell(chatSessionId, peerId, "Agent máy này bắt đầu sửa code, nhưng không mở được terminal.");
-      this.scheduleSave();
+  }
+
+  private newestCodingLog(sessionId: string): string {
+    const found = new Map<string, number>();
+    const remember = (filePath: string) => {
+      const resolved = path.resolve(filePath);
+      if (!this.isCodingLogPath(sessionId, resolved)) return;
+      try {
+        const stat = fs.statSync(resolved);
+        if (stat.isFile()) found.set(resolved, stat.mtimeMs);
+      } catch {
+        /* file log đã bị xóa */
+      }
+    };
+    for (const line of this.store.transcripts[sessionId] ?? []) {
+      if (line.codingLog) remember(line.codingLog);
     }
+    const folder = briefFolder(this.store.settings.workDir, sessionId);
+    try {
+      for (const name of fs.readdirSync(folder)) {
+        if (/^coding-live-.+\.(md|log)$/i.test(name)) remember(path.join(folder, name));
+      }
+    } catch {
+      /* phiên chưa có thư mục brief */
+    }
+    let best = "";
+    let when = -1;
+    for (const [filePath, mtime] of found) {
+      if (mtime >= when) {
+        best = filePath;
+        when = mtime;
+      }
+    }
+    return best;
+  }
+
+  private isCodingLogPath(sessionId: string, resolved: string): boolean {
+    if (!/^coding-live-.+\.(md|log)$/i.test(path.basename(resolved))) return false;
+    const folder = path.resolve(briefFolder(this.store.settings.workDir, sessionId));
+    const rel = path.relative(folder, resolved);
+    if (rel && !rel.startsWith("..") && !path.isAbsolute(rel)) return true;
+    const root = path.resolve(this.store.settings.workDir);
+    const fromWork = path.relative(root, resolved);
+    return Boolean(fromWork) && !fromWork.startsWith("..") && !path.isAbsolute(fromWork) && fromWork.split(path.sep).includes("briefs");
+  }
+
+  deleteCodingLog(filePath: string): boolean {
+    const resolved = path.resolve(filePath);
+    if (!/^coding-live-.+\.md$/i.test(path.basename(resolved))) return false;
+    const root = path.resolve(this.store.settings.workDir);
+    const rel = path.relative(root, resolved);
+    if (!rel || rel.startsWith("..") || path.isAbsolute(rel) || !rel.split(path.sep).includes("briefs")) return false;
+    this.codingWatch.forget(resolved);
+    try {
+      fs.rmSync(resolved, { force: true });
+    } catch {
+      return false;
+    }
+    let changed = false;
+    for (const lines of Object.values(this.store.transcripts)) {
+      for (const line of lines) {
+        if (!line.codingLog || path.resolve(line.codingLog) !== resolved) continue;
+        delete line.codingLog;
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.scheduleSave();
+      this.pushNow();
+    }
+    return true;
   }
 
   private async storeBriefFile(
@@ -2463,7 +2617,8 @@ export class AppCore {
   private pauseCoding(peerId: string, sessionId: string, groupId: string, message: string, lineId: string, createdAt: number): void {
     const brief = this.store.briefs[sessionId];
     if (brief) brief.running = false;
-    const prior = this.findLine(sessionId, lineId)?.text.trim() ?? "";
+    const priorLine = this.findLine(sessionId, lineId);
+    const prior = priorLine?.text.trim() ?? "";
     const text = prior ? `${prior}\n${message}\nChủ đề coding tạm dừng.` : `${message}\nChủ đề coding tạm dừng.`;
     this.upsertLine(sessionId, {
       id: lineId,
@@ -2473,6 +2628,7 @@ export class AppCore {
       text,
       pending: false,
       createdAt,
+      codingLog: priorLine?.codingLog,
     });
     const room = groupId ? this.groupById(groupId) : undefined;
     if (!room) {
@@ -2881,7 +3037,10 @@ export class AppCore {
     brief.running = true;
     brief.turnsUsed = 0;
     brief.needTurns = 0;
-    if (brief.coding) brief.codingSince = Date.now();
+    if (brief.coding) {
+      brief.codingSince = Date.now();
+      this.resetCodingView(sessionId);
+    }
     brief.turnLimit = clampTurnLimit(brief.turnLimit, brief.coding ? CODING_TURN_MAX : BRIEF_TURN_MAX);
     this.pushNow();
     try {
@@ -4276,4 +4435,15 @@ function netCause(err: unknown): string {
   if (err instanceof Error && err.message && err.message !== "fetch failed") return err.message;
   if (err instanceof Error && "cause" in err && err.cause instanceof Error) return err.cause.message;
   return err instanceof Error ? err.message : "";
+}
+
+function relativeWorkPath(workDir: string, filePath: string): string {
+  const raw = filePath.trim();
+  const root = workDir.trim();
+  if (!raw || !root) return raw;
+  const base = path.resolve(root);
+  const full = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(base, raw);
+  const rel = path.relative(base, full);
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return raw;
+  return rel;
 }

@@ -1,3 +1,4 @@
+import type { CodingLive, CodingStep, CodingViewSnap } from "./codingLive";
 import type { ProjectBrief } from "./brief";
 import type { DiscussFile } from "./discuss";
 import type { GroupRoom, MentionRef, TurnTicket } from "./group";
@@ -54,6 +55,12 @@ export const IPC = {
   setMemberRole: "lan:set-member-role",
   setNickname: "lan:set-nickname",
   deleteSession: "lan:delete-session",
+  codingLive: "lan:coding-live",
+  codingView: "lan:coding-view",
+  codingViewClosed: "lan:coding-view-closed",
+  toggleCodingView: "lan:toggle-coding-view",
+  codingReplay: "lan:coding-replay",
+  deleteCodingLog: "lan:delete-coding-log",
 } as const;
 
 export type ActivityPatch = {
@@ -152,6 +159,7 @@ export type ChatLine = {
   pending: boolean;
   createdAt: number;
   file?: FileRef;
+  codingLog?: string;
   attachment?: DiscussFile;
   mentions?: MentionRef[];
 };
@@ -292,6 +300,9 @@ export type LanApi = {
   sendFile: (peerId: string) => Promise<string | null>;
   openPreview: () => Promise<FileRef | null>;
   showPreview: (file: FileRef) => Promise<boolean>;
+  deleteCodingLog: (filePath: string) => Promise<boolean>;
+  toggleCodingView: (snap: CodingViewSnap) => Promise<boolean>;
+  codingReplay: (sessionId: string) => Promise<CodingStep[]>;
   listWorkFiles: (dir: string, root?: string) => Promise<{ found: boolean; files: WorkFile[] }>;
   createSession: (peerId: string) => Promise<AppState>;
   openSession: (peerId: string, sessionId: string) => Promise<AppState>;
@@ -299,6 +310,9 @@ export type LanApi = {
   onState: (listener: (state: AppState) => void) => () => void;
   onNotice: (listener: (notice: ChatNotice) => void) => () => void;
   onPreviewFile: (listener: (file: FileRef) => void) => () => void;
+  onCodingLive: (listener: (event: CodingLive) => void) => () => void;
+  onCodingView: (listener: (snap: CodingViewSnap) => void) => () => void;
+  onCodingViewClosed: (listener: () => void) => () => void;
 };
 
 export function normalizeProvider(value: string): ProviderId {

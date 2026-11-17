@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
+import type { CodingLive, CodingStep, CodingViewSnap } from "../shared/codingLive";
 import { IPC, type AppState, type ChatNotice, type FileRef, type LanApi, type Settings } from "../shared/types";
 
 const api: LanApi = {
@@ -36,6 +37,9 @@ const api: LanApi = {
   sendFile: (peerId) => ipcRenderer.invoke(IPC.sendFile, peerId) as Promise<string | null>,
   openPreview: () => ipcRenderer.invoke(IPC.openPreview),
   showPreview: (file: FileRef) => ipcRenderer.invoke(IPC.showPreview, file) as Promise<boolean>,
+  deleteCodingLog: (filePath: string) => ipcRenderer.invoke(IPC.deleteCodingLog, filePath) as Promise<boolean>,
+  toggleCodingView: (snap: CodingViewSnap) => ipcRenderer.invoke(IPC.toggleCodingView, snap) as Promise<boolean>,
+  codingReplay: (sessionId: string) => ipcRenderer.invoke(IPC.codingReplay, sessionId) as Promise<CodingStep[]>,
   listWorkFiles: (dir, root) => ipcRenderer.invoke(IPC.listWorkFiles, dir, root),
   createSession: (peerId) => ipcRenderer.invoke(IPC.createSession, peerId) as Promise<AppState>,
   openSession: (peerId, sessionId) => ipcRenderer.invoke(IPC.openSession, peerId, sessionId) as Promise<AppState>,
@@ -55,6 +59,21 @@ const api: LanApi = {
     const wrapped = (_event: unknown, file: FileRef) => listener(file);
     ipcRenderer.on(IPC.previewFile, wrapped);
     return () => ipcRenderer.removeListener(IPC.previewFile, wrapped);
+  },
+  onCodingLive: (listener) => {
+    const wrapped = (_event: unknown, event: CodingLive) => listener(event);
+    ipcRenderer.on(IPC.codingLive, wrapped);
+    return () => ipcRenderer.removeListener(IPC.codingLive, wrapped);
+  },
+  onCodingView: (listener) => {
+    const wrapped = (_event: unknown, snap: CodingViewSnap) => listener(snap);
+    ipcRenderer.on(IPC.codingView, wrapped);
+    return () => ipcRenderer.removeListener(IPC.codingView, wrapped);
+  },
+  onCodingViewClosed: (listener) => {
+    const wrapped = () => listener();
+    ipcRenderer.on(IPC.codingViewClosed, wrapped);
+    return () => ipcRenderer.removeListener(IPC.codingViewClosed, wrapped);
   },
 };
 

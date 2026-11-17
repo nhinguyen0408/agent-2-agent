@@ -1,6 +1,7 @@
 import path from "node:path";
 import { app, BrowserWindow, dialog, ipcMain, Notification, screen, shell, type OpenDialogOptions } from "electron";
 import { BRIEF_EXTEND } from "../shared/brief";
+import { mergeCodingStep, type CodingLive, type CodingViewSnap } from "../shared/codingLive";
 import { IPC, type ChatNotice, type FileRef, type Settings } from "../shared/types";
 import { fileRef } from "../shared/preview";
 import { insideDir, listWorkFiles } from "./files";
@@ -54,6 +55,9 @@ if (!gotLock) {
   let mainWindow: BrowserWindow | null = null;
   let previewWindow: BrowserWindow | null = null;
   let pendingPreview: FileRef | null = null;
+  let codingWindow: BrowserWindow | null = null;
+  let pendingCoding: CodingViewSnap | null = null;
+  let codingOpenId = "";
 
   const broadcast = () => {
     if (!core || !mainWindow || mainWindow.isDestroyed()) return;
@@ -141,10 +145,107 @@ if (!gotLock) {
     void win.loadFile(path.join(__dirname, "preview.html"));
   };
 
+  const patchCodingSnap = (event: CodingLive) => {
+    const snap = pendingCoding;
+    if (!snap || event.sessionId !== snap.sessionId) return;
+    if (event.reset) {
+      snap.steps = [];
+      snap.live = true;
+    }
+    if (event.step?.key) {
+      const index = snap.steps.findIndex((step) => step.key === event.step?.key);
+      const merged = mergeCodingStep(index >= 0 ? snap.steps[index] : undefined, event.step);
+      if (index >= 0) snap.steps[index] = merged;
+      else snap.steps.push(merged);
+      while (snap.steps.length > 40) snap.steps.shift();
+      if (event.step.status === "run") snap.live = true;
+      else if (!snap.steps.some((step) => step.status === "run")) snap.live = false;
+    }
+  };
+
+  const sendCodingSnap = (win: BrowserWindow, snap: CodingViewSnap) => {
+    if (win.isDestroyed()) return;
+    win.setTitle(snap.title ? `Coding · ${snap.title}` : "Coding");
+    win.webContents.send(IPC.codingView, snap);
+  };
+
+  const openCodingWindow = (snap: CodingViewSnap) => {
+    pendingCoding = snap;
+    codingOpenId = snap.sessionId;
+    if (codingWindow && !codingWindow.isDestroyed()) {
+      if (codingWindow.isMinimized()) codingWindow.restore();
+      codingWindow.show();
+      codingWindow.focus();
+      sendCodingSnap(codingWindow, snap);
+      return;
+    }
+    const win = new BrowserWindow({
+      width: 1100,
+      height: 720,
+      minWidth: 760,
+      minHeight: 360,
+      backgroundColor: "#121214",
+      title: snap.title ? `Coding · ${snap.title}` : "Coding",
+      autoHideMenuBar: true,
+      show: false,
+      webPreferences: {
+        preload: path.join(__dirname, "preload.js"),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
+    });
+    codingWindow = win;
+    win.removeMenu();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      const bounds = mainWindow.getBounds();
+      const area = screen.getDisplayMatching(bounds).workArea;
+      let x = bounds.x + bounds.width + 12;
+      let y = bounds.y;
+      if (x + 1100 > area.x + area.width) x = Math.max(area.x, bounds.x + 36);
+      if (y + 720 > area.y + area.height) y = area.y + Math.max(0, area.height - 720);
+      win.setPosition(Math.round(x), Math.round(y));
+    }
+    win.once("ready-to-show", () => {
+      if (!win.isDestroyed()) win.show();
+    });
+    win.webContents.on("did-finish-load", () => {
+      const current = pendingCoding;
+      if (!current || win.isDestroyed()) return;
+      sendCodingSnap(win, current);
+    });
+    win.on("closed", () => {
+      if (codingWindow === win) codingWindow = null;
+      codingOpenId = "";
+      pendingCoding = null;
+      const host = mainWindow;
+      if (host && !host.isDestroyed()) host.webContents.send(IPC.codingViewClosed);
+    });
+    void win.loadFile(path.join(__dirname, "coding.html"));
+  };
+
+  const toggleCodingWindow = (snap: CodingViewSnap): boolean => {
+    const open = codingWindow && !codingWindow.isDestroyed() && codingWindow.isVisible() && codingOpenId === snap.sessionId;
+    if (open && codingWindow) {
+      codingWindow.close();
+      return false;
+    }
+    openCodingWindow(snap);
+    return true;
+  };
+
   const createWindow = async () => {
     core = new AppCore(profile, sessionAutoAccept);
     core.onChange = broadcast;
     core.onNotice = showNotice;
+    core.onCodingLive = (event) => {
+      const win = mainWindow;
+      if (win && !win.isDestroyed()) win.webContents.send(IPC.codingLive, event);
+      const board = codingWindow;
+      if (!board || board.isDestroyed()) return;
+      if (board.webContents.isLoading()) patchCodingSnap(event);
+      else board.webContents.send(IPC.codingLive, event);
+    };
     await core.start();
     const win = new BrowserWindow({
       width: 1180,
@@ -167,6 +268,7 @@ if (!gotLock) {
     win.on("closed", () => {
       if (mainWindow === win) mainWindow = null;
       if (previewWindow && !previewWindow.isDestroyed()) previewWindow.close();
+      if (codingWindow && !codingWindow.isDestroyed()) codingWindow.close();
     });
     win.on("focus", () => {
       core?.setWindowFocused(true);
@@ -330,6 +432,24 @@ if (!gotLock) {
         allowPreview(picked.path);
         openPreviewWindow(picked);
         return true;
+      });
+      expose(IPC.deleteCodingLog, (_event, filePath: string) => {
+        if (!core) return false;
+        return core.deleteCodingLog(String(filePath ?? ""));
+      });
+      expose(IPC.codingReplay, (_event, sessionId: string) => {
+        if (!core) return [];
+        return core.codingReplay(String(sessionId ?? ""));
+      });
+      expose(IPC.toggleCodingView, (_event, snap: CodingViewSnap) => {
+        if (!snap || typeof snap.sessionId !== "string" || !snap.sessionId) return false;
+        return toggleCodingWindow({
+          sessionId: snap.sessionId,
+          title: typeof snap.title === "string" ? snap.title : "",
+          steps: Array.isArray(snap.steps) ? snap.steps : [],
+          live: Boolean(snap.live),
+          workDir: typeof snap.workDir === "string" ? snap.workDir : "",
+        });
       });
       expose(IPC.openPreview, async () => {
         const picked = await choosePath({

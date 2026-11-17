@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Coding</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body class="coding-app">
+    <section id="coding-live" class="coding-live">
+      <header class="coding-live-head">
+        <span class="coding-pulse"></span>
+        <strong id="coding-live-title">Agent đang làm trong code</strong>
+        <button id="coding-copy-path" class="coding-copy" type="button" hidden aria-label="Copy relative path">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="8" y="8" width="10" height="11.5" rx="1.5"></rect>
+              <path d="M6 16H5.5A1.5 1.5 0 0 1 4 14.5v-9A1.5 1.5 0 0 1 5.5 4H14"></path>
+            </g>
+          </svg>
+        </button>
+        <span id="coding-live-stat"></span>
+      </header>
+      <div class="coding-live-body">
+        <div id="coding-live-stage" class="coding-live-stage"></div>
+        <div id="coding-live-list" class="coding-live-list"></div>
+      </div>
+    </section>
+    <script src="./coding.js"></script>
+  </body>
+</html>

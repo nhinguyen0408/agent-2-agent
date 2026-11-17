@@ -1,4 +1,5 @@
 import { BRIEF_FILE_MAX, BRIEF_TURN_MAX, CODING_TURN_DEFAULT, CODING_TURN_MAX, resultText, type BriefFile, type ProjectBrief } from "../shared/brief";
+import { mergeCodingStep, type CodingLive, type CodingStep, type CodingViewSnap } from "../shared/codingLive";
 import { CODING_ROLES, GROUP_MAX, codingRoleLabel, groupKey, mentionRanges, parseGroupKey, rewriteMentionLabels, type GroupMember, type GroupRoom, type MentionRef } from "../shared/group";
 import type { AppState, ChatLine, ChatNotice, CliReport, CliToolState, FileRef, PeerActivity, PeerView, Settings, WorkFile } from "../shared/types";
 import { REPLY_WAIT_MS, cliClientLabel, providerLabel } from "../shared/types";
@@ -44,10 +45,16 @@ declare global {
       sendFile: (peerId: string) => Promise<string | null>;
       openPreview: () => Promise<FileRef | null>;
       showPreview: (file: FileRef) => Promise<boolean>;
+      deleteCodingLog: (filePath: string) => Promise<boolean>;
+      toggleCodingView: (snap: CodingViewSnap) => Promise<boolean>;
+      codingReplay: (sessionId: string) => Promise<CodingStep[]>;
       listWorkFiles: (dir: string, root?: string) => Promise<{ found: boolean; files: WorkFile[] }>;
       onState: (listener: (state: AppState) => void) => () => void;
       onNotice: (listener: (notice: ChatNotice) => void) => () => void;
       onPreviewFile: (listener: (file: FileRef) => void) => () => void;
+      onCodingLive: (listener: (event: CodingLive) => void) => () => void;
+      onCodingView: (listener: (snap: CodingViewSnap) => void) => () => void;
+      onCodingViewClosed: (listener: () => void) => () => void;
     };
   }
 }
@@ -184,6 +191,10 @@ function boot(host: HTMLElement): void {
               <p id="chat-status"></p>
             </div>
             <div class="head-actions">
+              <button id="coding-view" class="coding-alert" type="button" hidden aria-pressed="false">
+                <span class="coding-pulse"></span>
+                <span id="coding-view-label">Xem coding</span>
+              </button>
               ${iconButton("delete-chat", "trash", "Xóa hội thoại")}
               ${iconButton("delete-group", "x", "Xóa nhóm")}
               ${iconButton("link", "link", "Kết nối")}
@@ -234,7 +245,7 @@ function boot(host: HTMLElement): void {
               <div id="brief-files" class="brief-files"></div>
               <label id="brief-coding-row" class="coding-toggle" hidden>
                 <input id="brief-coding" type="checkbox" />
-                <span id="brief-coding-copy">Chế độ coding. Mặc định 50 lượt, dừng khi có kết quả. Máy nào bắt đầu sửa code thì mở terminal đúng phiên của đoạn chat trên máy đó.</span>
+                <span id="brief-coding-copy">Chế độ coding. Mặc định 50 lượt, dừng khi có kết quả. Diff hiện trong hội thoại. Tin nhắn agent có icon để mở file log.</span>
               </label>
               <div id="brief-roles" class="brief-roles" hidden></div>
               <div class="brief-actions">
@@ -806,6 +817,9 @@ function boot(host: HTMLElement): void {
     if (hidden) setBriefOpen(false);
   });
   must<HTMLButtonElement>("#brief-toggle").addEventListener("click", () => setBriefOpen(must<HTMLElement>("#brief-pop").hidden));
+  must<HTMLButtonElement>("#coding-view").addEventListener("click", () => {
+    void toggleCodingView().catch((err: unknown) => flash(messageOf(err)));
+  });
   must<HTMLButtonElement>("#brief-summary").addEventListener("click", () => setBriefOpen(must<HTMLElement>("#brief-pop").hidden));
   must<HTMLButtonElement>("#brief-close").addEventListener("click", () => setBriefOpen(false));
   must<HTMLButtonElement>("#brief-result-open").addEventListener("click", () => openResult());
@@ -894,6 +908,25 @@ function boot(host: HTMLElement): void {
   });
 
   window.lan.onState((next) => paint(next));
+  window.lan.onCodingLive((event) => {
+    if (!event.sessionId) return;
+    if (event.reset) codingFeed.set(event.sessionId, []);
+    if (event.step?.key) {
+      const list = codingFeed.get(event.sessionId) ?? [];
+      const index = list.findIndex((item) => item.key === event.step?.key);
+      const merged = mergeCodingStep(index >= 0 ? list[index] : undefined, event.step);
+      if (index >= 0) list[index] = merged;
+      else list.push(merged);
+      while (list.length > 40) list.shift();
+      codingFeed.set(event.sessionId, list);
+    }
+    if (viewedSession() === event.sessionId) paintCodingButton(event.sessionId);
+  });
+  window.lan.onCodingViewClosed(() => {
+    codingViewSession = "";
+    const sessionId = viewedSession();
+    if (sessionId) paintCodingButton(sessionId);
+  });
   window.lan.onNotice((notice) => {
     if (notice.open) openNotice(notice);
   });
@@ -1165,6 +1198,7 @@ function boot(host: HTMLElement): void {
     const waiting = composerWait(lines, [peer.peerId], sessionId, next.activity, Boolean(next.briefs[sessionId]?.coding));
     setComposer(waiting.locked, canSend, "Tin nhắn thường. Gõ @đối phương để gọi agent đó, @me là máy này…", waiting.stop || Boolean(agentHold(next, peer.peerId)));
     paintBrief(sessionId, next.briefs[sessionId], lines, connected, "");
+    paintCodingButton(sessionId);
     must<HTMLInputElement>("#brief-topic").placeholder = "Việc hai agent cần bàn";
     const snippet = peer.token
       ? [
@@ -1179,6 +1213,8 @@ function boot(host: HTMLElement): void {
 
   let briefTimer = 0;
   let liveCoding = false;
+  const codingFeed = new Map<string, CodingStep[]>();
+  let codingViewSession = "";
   let briefFilesKey = "";
   let briefDockKey = "";
   let briefAnchor = "";
@@ -1266,6 +1302,7 @@ function boot(host: HTMLElement): void {
     const waiting = composerWait(lines, others, sessionId, next.activity, Boolean(next.briefs[sessionId]?.coding));
     setComposer(waiting.locked, linked, "Nhắn trong nhóm. Gõ @ để gọi agent, @me là máy này…", waiting.stop || Boolean(group.turn && group.turn.left > 0));
     paintBrief(sessionId, next.briefs[sessionId], lines, linked, turnName);
+    paintCodingButton(sessionId);
     paintGroupBar(next, group);
     const topic = must<HTMLInputElement>("#brief-topic");
     topic.placeholder = "Chủ đề chung. Gõ @tên hoặc @me nếu chỉ muốn vài agent nói";
@@ -1634,8 +1671,68 @@ function boot(host: HTMLElement): void {
 
   function codingCopy(grouped: boolean): string {
     return grouped
-      ? "Chế độ coding. Mỗi agent chỉ làm đúng vai đã giao. Mặc định 50 lượt, dừng ngay khi có kết quả. Máy nào bắt đầu sửa code thì mở terminal đúng phiên của đoạn chat trên máy đó."
-      : "Chế độ coding. Hai agent cùng làm. Mặc định 50 lượt, dừng khi có kết quả. Agent máy này mở terminal trên máy này; agent máy kia hiện trên máy kia.";
+      ? "Chế độ coding. Mỗi agent chỉ làm đúng vai đã giao. Mặc định 50 lượt, dừng ngay khi có kết quả. Nút Coding trên đầu hội thoại mở cửa sổ nổi, nền tối, và nhấp nháy khi agent đang sửa code. Icon trên tin nhắn agent mở file log Markdown, xem lại hoặc xóa lúc nào cũng được."
+      : "Chế độ coding. Hai agent cùng làm. Mặc định 50 lượt, dừng khi có kết quả. Nút Coding trên đầu hội thoại mở cửa sổ nổi của máy đang sửa. Icon trên tin nhắn agent mở file log Markdown của máy đó.";
+  }
+
+  function viewedSession(): string {
+    if (!state || !active) return "";
+    const group = state.groups.find((item) => groupKey(item.id) === active);
+    if (group) return state.openSession[active] || group.sessionId;
+    return state.openSession[active] ?? "";
+  }
+
+  function codingBusy(sessionId: string): boolean {
+    const brief = state?.briefs[sessionId];
+    const steps = codingFeed.get(sessionId) ?? [];
+    return Boolean(brief?.running) || steps.some((step) => step.status === "run");
+  }
+
+  function savedCoding(sessionId: string): boolean {
+    return (state?.transcripts[sessionId] ?? []).some((line) => Boolean(line.codingLog));
+  }
+
+  function paintCodingButton(sessionId: string): void {
+    const button = must<HTMLButtonElement>("#coding-view");
+    const brief = state?.briefs[sessionId];
+    const steps = codingFeed.get(sessionId) ?? [];
+    const show = Boolean(brief?.coding) || Boolean(brief?.codingSince) || steps.length > 0 || savedCoding(sessionId);
+    button.hidden = !show;
+    if (!show) return;
+    const live = codingBusy(sessionId);
+    const running = [...steps].reverse().find((step) => step.status === "run");
+    const open = codingViewSession === sessionId;
+    button.classList.toggle("live", live);
+    button.classList.toggle("open", open);
+    button.setAttribute("aria-pressed", open ? "true" : "false");
+    const text = live ? running?.label || "Agent đang coding" : "Xem coding";
+    must<HTMLElement>("#coding-view-label").textContent = text;
+    button.dataset.tip = live ? "Agent đang coding. Bấm để mở hoặc đóng cửa sổ." : "Mở bản coding đã lưu của phiên này.";
+    button.setAttribute("aria-label", button.dataset.tip);
+  }
+
+  async function stepsForCodingView(sessionId: string): Promise<CodingStep[]> {
+    const live = codingFeed.get(sessionId) ?? [];
+    if (live.length) return live;
+    if (codingFeed.has(sessionId) && codingBusy(sessionId)) return live;
+    const saved = await window.lan.codingReplay(sessionId);
+    return Array.isArray(saved) ? saved : [];
+  }
+
+  async function toggleCodingView(): Promise<void> {
+    const sessionId = viewedSession();
+    if (!sessionId || !state) return;
+    const group = active ? state.groups.find((item) => groupKey(item.id) === active) : undefined;
+    const session = state.sessions.find((item) => item.id === sessionId);
+    const open = await window.lan.toggleCodingView({
+      sessionId,
+      title: group?.title || session?.title || "Coding",
+      steps: await stepsForCodingView(sessionId),
+      live: codingBusy(sessionId),
+      workDir: state.settings.workDir,
+    });
+    codingViewSession = open ? sessionId : "";
+    paintCodingButton(sessionId);
   }
 
   function briefMeter(brief: ProjectBrief): string {
@@ -2284,6 +2381,7 @@ function paintMessages(host: HTMLElement, lines: ChatLine[], selfId: string, sti
       article.classList.toggle("hit", Boolean(query.trim()) && line.text.toLowerCase().includes(query.trim().toLowerCase()));
     }
     article.classList.toggle("continued", continuesSender(lines[index - 1], line));
+    syncCodingLog(article, line);
     const anchor: ChildNode | null = previous ? previous.nextSibling : host.firstChild;
     if (article !== anchor) host.insertBefore(article, anchor);
     previous = article;
@@ -2300,6 +2398,31 @@ function continuesSender(previous: ChatLine | undefined, line: ChatLine): boolea
   if (previous.fromPeerId !== line.fromPeerId || previous.kind !== line.kind) return false;
   const gap = line.createdAt - previous.createdAt;
   return gap >= 0 && gap <= 60_000;
+}
+
+function syncCodingLog(article: HTMLElement, line: ChatLine): void {
+  const host = article.querySelector(":scope > .meta") ?? article;
+  const current = article.querySelector<HTMLButtonElement>("button.coding-log");
+  if (!line.codingLog) {
+    current?.remove();
+    return;
+  }
+  if (current?.dataset.path === line.codingLog) return;
+  current?.remove();
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "coding-log";
+  button.dataset.path = line.codingLog;
+  button.dataset.tip = "Mở log coding";
+  button.setAttribute("aria-label", "Mở log coding");
+  button.innerHTML = icon("file");
+  const filePath = line.codingLog;
+  button.addEventListener("click", () => {
+    const ref = fileRef(filePath);
+    if (!ref) return;
+    void window.lan.showPreview(ref);
+  });
+  host.append(button);
 }
 
 function renderLine(line: ChatLine, selfId: string): HTMLElement {

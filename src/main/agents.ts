@@ -7,7 +7,7 @@ import { accessPrompt, AccessDenied, defaultAccess, deniedRoles, toolBlob } from
 import { codingRoleDuty, type CodingRole } from "../shared/group";
 import type { ProviderId, Settings } from "../shared/types";
 import { findExecutable } from "./cliDetect";
-import { describeTool } from "./codingTerm";
+import { codingSteps, type CodingStep } from "../shared/codingLive";
 import { insideDir } from "./files";
 
 export type ModelTurn = { role: "user" | "assistant" | "note"; text: string; speaker?: string };
@@ -36,7 +36,7 @@ export type ReplyInput = {
   resume?: boolean;
   sessionId?: string;
   sessionTitle?: string;
-  onTool?: (info: { sessionId: string; line: string; writesCode: boolean }) => void;
+  onTool?: (info: { sessionId: string; steps: CodingStep[] }) => void;
   onTask?: (sessionId: string) => void;
 };
 
@@ -276,9 +276,13 @@ export class AgentHost {
             return;
           }
         }
-        if (blob && input.onTool) {
-          const note = describeTool(blob);
-          if (note) input.onTool({ sessionId: capturedSession, line: note.line, writesCode: note.writesCode });
+        if (input.onTool) {
+          try {
+            const steps = codingSteps(event);
+            if (steps.length) input.onTool({ sessionId: capturedSession, steps });
+          } catch {
+            /* sự kiện tool lạ không chặn lượt chat */
+          }
         }
         const codex = codexAgentText(event);
         if (codex) {
