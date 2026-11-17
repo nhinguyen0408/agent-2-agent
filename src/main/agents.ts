@@ -6,7 +6,7 @@ import path from "node:path";
 import { accessAnnounce, accessPrompt, AccessDenied, defaultAccess, deniedRoles, toolBlob } from "../shared/access";
 import { codingRoleDuty, type CodingRole } from "../shared/group";
 import type { ProviderId, Settings } from "../shared/types";
-import { findExecutable } from "./cliDetect";
+import { cliLaunchFile, findExecutable } from "./cliDetect";
 import { codingSteps, type CodingStep } from "../shared/codingLive";
 import { insideDir } from "./files";
 
@@ -101,9 +101,9 @@ export class AgentHost {
     const resume = Boolean(input.resume && input.sessionId);
     const skills = mountedSkills(input, settings.workDir);
     const plain = [
-      ["-p", prompt, "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-mode", "bypassPermissions"],
-      ["-p", prompt, "--output-format", "text", "--permission-mode", "bypassPermissions"],
-      ["-p", prompt, "--output-format", "text", "--permission-mode", "dontAsk"],
+      ["--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-mode", "bypassPermissions", "-p"],
+      ["--output-format", "text", "--permission-mode", "bypassPermissions", "-p"],
+      ["--output-format", "text", "--permission-mode", "dontAsk", "-p"],
     ];
     const attempts = skills.length ? [...plain.map((args) => withAddedDirs(args, skills)), ...plain] : plain;
     return this.runCli(input, {
@@ -113,6 +113,7 @@ export class AgentHost {
       session: { id: resume ? input.sessionId || "" : randomUUID(), resume, kind: "claude" },
       attempts,
       confine: Boolean(input.confine),
+      stdin: prompt,
     });
   }
 
@@ -219,11 +220,11 @@ export class AgentHost {
 
   private runCli(
     input: ReplyInput,
-    spec: { command: string; cwd: string; missing: string; attempts: string[][]; session?: SessionBind; confine?: boolean },
+    spec: { command: string; cwd: string; missing: string; attempts: string[][]; session?: SessionBind; confine?: boolean; stdin?: string },
   ): Promise<AgentResult> {
     if (!fs.existsSync(spec.cwd)) throw new Error(`Thư mục làm việc không tồn tại: ${spec.cwd}`);
     const command = resolveCommand(spec.command);
-    return this.spawnAttempt(input, command, spec.cwd, spec.attempts, 0, spec.missing, spec.session, true, Boolean(spec.confine));
+    return this.spawnAttempt(input, command, spec.cwd, spec.attempts, 0, spec.missing, spec.session, true, Boolean(spec.confine), spec.stdin);
   }
 
   private spawnAttempt(
@@ -236,6 +237,7 @@ export class AgentHost {
     session: SessionBind | undefined,
     useSession: boolean,
     confine: boolean,
+    stdin?: string,
   ): Promise<AgentResult> {
     const raw = attempts[index];
     if (!raw) return Promise.reject(new Error(missing));
@@ -243,7 +245,7 @@ export class AgentHost {
     return new Promise((resolve, reject) => {
       let child: ChildProcess;
       try {
-        child = launch(command, args, cwd);
+        child = launch(command, args, cwd, stdin);
       } catch (err) {
         reject(err instanceof Error ? err : new Error(missing));
         return;
@@ -382,12 +384,12 @@ export class AgentHost {
           return;
         }
         if (badFlag && useSession && sessionFlag) {
-          this.spawnAttempt(input, command, cwd, attempts, index, missing, session, false, confine).then(resolve, reject);
+          this.spawnAttempt(input, command, cwd, attempts, index, missing, session, false, confine, stdin).then(resolve, reject);
           return;
         }
         const sandboxMissing = /sandbox mode is enabled but not available|sandbox requires macos or linux/i.test(detail);
         if ((badFlag || sandboxMissing) && index + 1 < attempts.length) {
-          this.spawnAttempt(input, command, cwd, attempts, index + 1, missing, session, useSession, confine).then(resolve, reject);
+          this.spawnAttempt(input, command, cwd, attempts, index + 1, missing, session, useSession, confine, stdin).then(resolve, reject);
           return;
         }
         if (badFlag && confine && /sandbox/i.test(detail)) {
@@ -537,8 +539,11 @@ function mountedSkills(input: ReplyInput, workDir: string): string[] {
 }
 
 function withAddedDirs(args: string[], dirs: string[]): string[] {
-  if (!dirs.length || args[0] !== "-p" || args.length < 2) return args;
-  return [args[0], args[1], ...dirs.flatMap((dir) => ["--add-dir", dir]), ...args.slice(2)];
+  if (!dirs.length) return args;
+  const extra = dirs.flatMap((dir) => ["--add-dir", dir]);
+  if (args[0] === "-p" && args.length >= 2) return [args[0], args[1], ...extra, ...args.slice(2)];
+  if (args[args.length - 1] === "-p") return [...args.slice(0, -1), ...extra, "-p"];
+  return args;
 }
 
 function withCodexDirs(args: string[], dirs: string[]): string[] {
@@ -580,14 +585,15 @@ function readingBlock(input: ReplyInput): string {
 function relayLine(input: ReplyInput): string {
   if (!input.fileRelay) return "";
   const place = input.confine ? "File phải nằm trong thư mục làm việc. " : "";
-  return `- Để gửi file cho ${input.peerName}, không copy sang ổ đĩa máy kia và không dùng đường UNC. ${place}Chạy: curl.exe -s -H "Content-Type: text/plain; charset=utf-8" --data-binary "ĐƯỜNG_DẪN_ĐẦY_ĐỦ" ${input.fileRelay.url} . Khi kết quả có ok, file đã tới thư mục làm việc của ${input.peerName}.`;
+  return `- Để gửi file cho ${input.peerName}, không copy sang ổ đĩa máy kia và không dùng đường UNC. ${place}Chạy: curl.exe --silent -H "Content-Type: text/plain; charset=utf-8" --data-binary "ĐƯỜNG_DẪN_ĐẦY_ĐỦ" ${input.fileRelay.url} . Khi kết quả có ok, file đã tới thư mục làm việc của ${input.peerName}.`;
 }
 
 function bindArgs(args: string[], session: SessionBind | undefined): string[] {
   if (!session?.id) return args;
   if (session.kind === "claude") {
-    if (args[0] !== "-p" || args.length < 2) return args;
     const flag = session.resume ? ["--resume", session.id] : ["--session-id", session.id];
+    if (args[args.length - 1] === "-p" && args[0] !== "-p") return [...args.slice(0, -1), ...flag, "-p"];
+    if (args[0] !== "-p" || args.length < 2) return args;
     return [args[0], args[1], ...flag, ...args.slice(2)];
   }
   if (!session.resume) return args;
@@ -682,37 +688,48 @@ function codingPace(input: ReplyInput): string {
   ].join("\n");
 }
 
-function launch(command: string, args: string[], cwd: string): ChildProcess {
+function launch(command: string, args: string[], cwd: string, stdinText?: string): ChildProcess {
   const env = cliEnv();
-  const runtime = cursorRuntime(command);
+  const file = cliLaunchFile(command);
+  const stdio = stdinText !== undefined ? (["pipe", "pipe", "pipe"] as const) : (["ignore", "pipe", "pipe"] as const);
+  const cursor = cursorRuntime(file);
+  if (cursor) env.CURSOR_INVOKED_AS = "agent";
+  const runtime = cursor ?? scriptRuntime(file, env);
+  let child: ChildProcess;
   if (runtime) {
-    env.CURSOR_INVOKED_AS = "agent";
-    return spawn(runtime.node, [runtime.index, ...args], {
+    child = spawn(runtime.node, [runtime.index, ...args], {
       cwd,
       env,
       windowsHide: true,
       shell: false,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [...stdio],
     });
+  } else {
+    const safeArgs = args.map((arg) => arg.replace(/\s+/g, " ").trim());
+    if (process.platform === "win32" && /\.(cmd|bat)$/i.test(file)) {
+      const comspec = process.env.ComSpec || "cmd.exe";
+      const line = [file, ...safeArgs].map(quoteCmd).join(" ");
+      child = spawn(comspec, ["/d", "/s", "/c", line], {
+        cwd,
+        env,
+        windowsHide: true,
+        stdio: [...stdio],
+      });
+    } else {
+      child = spawn(file, safeArgs, {
+        cwd,
+        env,
+        windowsHide: true,
+        shell: false,
+        stdio: [...stdio],
+      });
+    }
   }
-  const safeArgs = args.map((arg) => arg.replace(/\s+/g, " ").trim());
-  if (process.platform === "win32" && /\.(cmd|bat)$/i.test(command)) {
-    const comspec = process.env.ComSpec || "cmd.exe";
-    const line = [command, ...safeArgs].map(quoteCmd).join(" ");
-    return spawn(comspec, ["/d", "/s", "/c", line], {
-      cwd,
-      env,
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+  if (stdinText !== undefined && child.stdin) {
+    child.stdin.on("error", () => undefined);
+    child.stdin.end(stdinText, "utf8");
   }
-  return spawn(command, safeArgs, {
-    cwd,
-    env,
-    windowsHide: true,
-    shell: false,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  return child;
 }
 
 function cursorRuntime(command: string): { node: string; index: string } | null {
@@ -748,6 +765,39 @@ function cursorRuntime(command: string): { node: string; index: string } | null 
   return null;
 }
 
+function scriptRuntime(command: string, env: NodeJS.ProcessEnv): { node: string; index: string } | null {
+  if (process.platform !== "win32" || !/\.(cmd|bat)$/i.test(command) || !fs.existsSync(command)) return null;
+  let text = "";
+  try {
+    text = fs.readFileSync(command, "utf8");
+  } catch {
+    return null;
+  }
+  const dir = path.dirname(path.resolve(command));
+  const root = /[\\/]$/.test(dir) ? dir : `${dir}\\`;
+  const expand = (token: string) => token.replace(/%~dp0\\?/gi, root).replace(/%dp0%\\?/gi, root);
+  const jsMatch = text.match(/["']([^"']+\.js)["']/i);
+  if (!jsMatch) return null;
+  const index = path.normalize(expand(jsMatch[1]));
+  if (!fs.existsSync(index)) return null;
+  const bundled = [...text.matchAll(/["']([^"']*node\.exe)["']/gi)]
+    .map((match) => path.normalize(expand(match[1])))
+    .find((file) => fs.existsSync(file));
+  const node = bundled || nodeOnPath(env);
+  if (!node) return null;
+  return { node, index };
+}
+
+function nodeOnPath(env: NodeJS.ProcessEnv): string | null {
+  const listed = env.PATH || env.Path || "";
+  for (const dir of listed.split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, "node.exe");
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
 function versionRank(name: string): number {
   const match = /^(\d{4})\.(\d{1,2})\.(\d{1,2})(?:-(\d{2})-(\d{2})-(\d{2}))?/.exec(name);
   if (!match) return 0;
@@ -776,7 +826,12 @@ function cliEnv(): NodeJS.ProcessEnv {
 }
 
 function resolveCommand(name: string): string {
-  return findExecutable(name) ?? name.trim();
+  const trimmed = name.trim();
+  if (!trimmed) return trimmed;
+  if (path.isAbsolute(trimmed) || trimmed.includes(path.sep) || trimmed.includes("/")) {
+    return fs.existsSync(trimmed) ? cliLaunchFile(trimmed) : trimmed;
+  }
+  return findExecutable(trimmed) ?? trimmed;
 }
 
 function consumeLines(buffer: string, chunk: string, onEvent: (event: unknown) => void): string {

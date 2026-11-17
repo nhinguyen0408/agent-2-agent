@@ -39,7 +39,7 @@ export function findExecutable(name: string): string | null {
   if (!trimmed) return null;
   if (path.isAbsolute(trimmed) || trimmed.includes(path.sep) || trimmed.includes("/")) {
     if (!fs.existsSync(trimmed) || isCursorIde(trimmed)) return null;
-    return trimmed;
+    return cliLaunchFile(trimmed);
   }
   const home = os.homedir();
   const local = process.env.LOCALAPPDATA || "";
@@ -64,9 +64,57 @@ export function findExecutable(name: string): string | null {
     path.join(local, "gemini-cli", `${trimmed}.cmd`),
   ];
   for (const candidate of candidates) {
-    if (candidate && fs.existsSync(candidate) && !isCursorIde(candidate)) return candidate;
+    if (candidate && fs.existsSync(candidate) && !isCursorIde(candidate)) return cliLaunchFile(candidate);
   }
-  return whereExecutable(trimmed);
+  const found = whereExecutable(trimmed);
+  return found ? cliLaunchFile(found) : null;
+}
+
+export function cliLaunchFile(file: string): string {
+  const runnable = preferRunnable(file);
+  const exe = cmdTargetExe(runnable);
+  return exe ?? runnable;
+}
+
+function preferRunnable(file: string): string {
+  if (process.platform !== "win32" || /\.(exe|cmd|bat)$/i.test(file)) return file;
+  for (const ext of [".exe", ".cmd", ".bat"]) {
+    const sibling = `${file}${ext}`;
+    if (fs.existsSync(sibling) && !isCursorIde(sibling)) return sibling;
+  }
+  return file;
+}
+
+function rankRunnable(hits: string[]): string | null {
+  if (!hits.length) return null;
+  const rank = (file: string) => {
+    const lower = file.toLowerCase();
+    if (lower.endsWith(".exe")) return 0;
+    if (lower.endsWith(".cmd")) return 1;
+    if (lower.endsWith(".bat")) return 2;
+    return 3;
+  };
+  return [...hits].sort((a, b) => rank(a) - rank(b))[0] ?? null;
+}
+
+function cmdTargetExe(command: string): string | null {
+  if (process.platform !== "win32" || !/\.(cmd|bat)$/i.test(command) || !fs.existsSync(command)) return null;
+  let text = "";
+  try {
+    text = fs.readFileSync(command, "utf8");
+  } catch {
+    return null;
+  }
+  if (/["'][^"']+\.js["']/i.test(text)) return null;
+  const dir = path.dirname(path.resolve(command));
+  const root = /[\\/]$/.test(dir) ? dir : `${dir}\\`;
+  const expand = (token: string) => token.replace(/%~dp0\\?/gi, root).replace(/%dp0%\\?/gi, root);
+  for (const match of text.matchAll(/["']([^"']+\.exe)["']/gi)) {
+    const file = path.normalize(expand(match[1]));
+    if (path.basename(file).toLowerCase() === "node.exe") continue;
+    if (fs.existsSync(file)) return file;
+  }
+  return null;
 }
 
 function isCursorIde(file: string): boolean {
@@ -183,7 +231,7 @@ function whereExecutable(name: string): string | null {
       .split(/\r?\n/)
       .map((line) => line.trim())
       .filter((line) => line && !line.toLowerCase().startsWith("info:") && fs.existsSync(line) && !isCursorIde(line));
-    return hits.find((hit) => hit.toLowerCase().endsWith(".exe")) ?? hits[0] ?? null;
+    return rankRunnable(hits);
   } catch {
     return null;
   }
