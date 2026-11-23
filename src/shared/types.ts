@@ -55,6 +55,8 @@ export const IPC = {
   setMemberRole: "lan:set-member-role",
   setNickname: "lan:set-nickname",
   deleteSession: "lan:delete-session",
+  summarizeSession: "lan:summarize-session",
+  endAgentSession: "lan:end-agent-session",
   codingLive: "lan:coding-live",
   codingView: "lan:coding-view",
   codingViewClosed: "lan:coding-view-closed",
@@ -148,6 +150,7 @@ export type ChatSession = {
   updatedAt: number;
   pinned?: boolean;
   cli?: CliLinks;
+  contextAfter?: string;
 };
 
 export type ChatLine = {
@@ -162,6 +165,7 @@ export type ChatLine = {
   codingLog?: string;
   attachment?: DiscussFile;
   mentions?: MentionRef[];
+  aside?: boolean;
 };
 
 export type AppState = {
@@ -293,6 +297,8 @@ export type LanApi = {
   setMemberRole: (groupId: string, peerId: string, role: string) => Promise<AppState>;
   setNickname: (peerId: string, nickname: string) => Promise<AppState>;
   deleteSession: (peerId: string, sessionId: string) => Promise<AppState>;
+  summarizeSession: (peerId: string, sessionId: string) => Promise<void>;
+  endAgentSession: (peerId: string) => Promise<AppState>;
   stop: (peerId: string) => Promise<void>;
   pickCwd: () => Promise<string | null>;
   rescanClis: () => Promise<AppState>;

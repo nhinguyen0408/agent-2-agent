@@ -1973,6 +1973,86 @@ label.coding-toggle span {
 
 .line.mine .at { background: rgba(255, 255, 255, 0.22); color: white; }
 
+.session-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 8px;
+  max-height: 320px;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--bg);
+}
+
+.session-tools[hidden] { display: none; }
+
+.session-tools .session-id,
+.session-tools .session-label,
+.session-tools .session-empty {
+  margin: 2px 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.session-tools .session-id {
+  font-family: ui-monospace, Consolas, monospace;
+  word-break: break-all;
+}
+
+.session-tools button {
+  display: block;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.session-tools button:hover { background: rgba(0, 122, 255, 0.1); }
+
+.session-tools .session-search {
+  display: block;
+  margin: 4px 0 2px;
+}
+
+.session-tools .session-search input {
+  width: 100%;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.session-tools .pick-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.session-tools .summary-person {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.session-tools .summary-person h3 {
+  margin: 2px 8px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .composer-actions { display: flex; gap: 2px; align-items: center; margin-top: 8px; }
 
 .composer-actions .spacer { flex: 1; }

@@ -391,6 +391,14 @@ if (!gotLock) {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.deleteSession(String(peerId), String(sessionId));
       });
+      expose(IPC.summarizeSession, (_event, peerId: string, sessionId: string) => {
+        if (!core) throw new Error("App chưa sẵn sàng");
+        return core.summarizeSession(String(peerId), String(sessionId));
+      });
+      expose(IPC.endAgentSession, (_event, peerId: string) => {
+        if (!core) throw new Error("App chưa sẵn sàng");
+        return core.endAgentSession(String(peerId));
+      });
       expose(IPC.dialogue, (_event, peerId: string, topic: string, replies: number) =>
         core?.startDialogue(peerId, topic, replies),
       );

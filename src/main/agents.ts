@@ -36,6 +36,7 @@ export type ReplyInput = {
   room?: { title: string; members: string };
   together?: string;
   replyTo?: { name: string; boss: boolean; called?: string[] };
+  summary?: { title: string; sessionId: string };
   resume?: boolean;
   sessionId?: string;
   sessionTitle?: string;
@@ -417,6 +418,7 @@ function clip(value: string, max: number): string {
 }
 
 function conversationPrompt(input: ReplyInput): string {
+  if (input.summary) return summaryPrompt(input);
   if (input.resume) return continuePrompt(input);
   const title = input.sessionTitle?.replace(/\s+/g, " ").trim();
   const body = [
@@ -459,6 +461,23 @@ function conversationPrompt(input: ReplyInput): string {
     .filter((part) => part !== "")
     .join("\n");
   return title ? `Phiên: ${title}\n${body}` : body;
+}
+
+function summaryPrompt(input: ReplyInput): string {
+  const meta = input.summary;
+  return [
+    "Bạn là agent của máy này. Hãy tóm tắt phiên làm việc sau thành Markdown.",
+    meta ? `Phiên: ${meta.title}` : "",
+    meta ? `Session ID: ${meta.sessionId}` : "",
+    "Chỉ viết Markdown. Không chạy lệnh, không sửa file, không gọi tool.",
+    "Viết bằng tiếng Việt. Gồm mục tiêu, việc đã làm, quyết định và việc còn mở. Giữ tên người và agent như trong hội thoại.",
+    "Mở đầu bằng tiêu đề phiên. Ghi session ID trên một dòng riêng để người dùng chép lại.",
+    "",
+    "Hội thoại:",
+    input.history.map((turn) => turn.text).join("\n"),
+  ]
+    .filter((part) => part !== "")
+    .join("\n");
 }
 
 function continuePrompt(input: ReplyInput): string {
@@ -989,7 +1008,9 @@ function killChild(child: ChildProcess): void {
 async function echoReply(input: ReplyInput): Promise<string> {
   const incoming = input.history[input.history.length - 1]?.text ?? "";
   const from = input.replyTo?.name || input.peerName;
-  const reply = input.brief?.last
+  const reply = input.summary
+    ? echoSummary(input)
+    : input.brief?.last
     ? `KẾT QUẢ\n${input.brief.goal || input.brief.topic}`
     : input.replyTo?.boss
       ? `Thưa sếp, echo của ${input.selfName} đã nhận: ${incoming}`
@@ -1001,6 +1022,20 @@ async function echoReply(input: ReplyInput): Promise<string> {
     await delay(16);
   }
   return reply;
+}
+
+function echoSummary(input: ReplyInput): string {
+  const rows = input.history
+    .map((turn) => turn.text)
+    .join("\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(-12);
+  const bullets = rows.map((row) => `- ${row}`).join("\n");
+  const title = input.summary?.title || "Phiên";
+  const id = input.summary?.sessionId || "";
+  return `## Tóm tắt phiên ${title}\n\nSession ID: \`${id}\`\n\n${bullets}`;
 }
 
 function delay(ms: number): Promise<void> {

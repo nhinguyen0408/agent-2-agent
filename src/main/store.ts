@@ -195,6 +195,9 @@ function sanitizeSessionMap(raw: Record<string, ChatSession[]>): Record<string, 
       const next = { ...session };
       if (cli) next.cli = cli;
       else delete next.cli;
+      const contextAfter = String(session?.contextAfter ?? "").trim();
+      if (/^[a-zA-Z0-9_-]{1,80}$/.test(contextAfter)) next.contextAfter = contextAfter;
+      else delete next.contextAfter;
       return next;
     });
   }

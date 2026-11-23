@@ -63,7 +63,7 @@ import type {
   WireGroupTurn,
   WireResume,
 } from "../shared/types";
-import { DEFAULT_PORT, PORT_SPAN, providerLabel } from "../shared/types";
+import { DEFAULT_PORT, PORT_SPAN, cliClientLabel, providerLabel } from "../shared/types";
 import { AccessDenied, deniedRoles, denialText, latestRequest } from "../shared/access";
 import { AgentHost, CliResumeUnsupported, CliSessionLost, type ModelTurn } from "./agents";
 import { CodingWatch, type CodingTrace } from "./codingTerm";
@@ -686,7 +686,7 @@ export class AppCore {
     brief.running = true;
     this.syncBrief(peerId, sessionId);
     const lines = this.store.transcripts[sessionId] ?? [];
-    const lastAgent = [...lines].reverse().find((line) => line.kind === "agent" && !line.pending);
+    const lastAgent = [...lines].reverse().find((line) => line.kind === "agent" && !line.pending && !line.aside);
     if (lastAgent && lastAgent.fromPeerId !== this.store.peerId) void this.enqueueReply(peerId, sessionId, true);
     else this.sendTo(peerId, "resume", { sessionId, sessionTitle: this.sessionTitle(sessionId) } satisfies WireResume);
     this.scheduleSave();
@@ -700,13 +700,15 @@ export class AppCore {
       const room = this.groupById(groupId);
       if (!room) return;
       const running = this.aborts.has(peerId);
+      const summary = this.aborts.has(this.summaryKey(peerId));
       this.haltGroupLocal(room, true);
-      if (!running) this.groupNote(room, "Đã dừng.", false);
+      if (!running && !summary) this.groupNote(room, "Đã dừng.", false);
       return;
     }
     const running = this.aborts.has(peerId);
+    const summary = this.aborts.has(this.summaryKey(peerId));
     this.halt(peerId, true);
-    if (!running) this.system(peerId, "Đã dừng.");
+    if (!running && !summary) this.system(peerId, "Đã dừng.");
   }
 
   private async openPort(start: number): Promise<void> {
@@ -1536,6 +1538,7 @@ export class AppCore {
         }
         const ask = (resume: boolean) => {
           const link = resume ? this.cliLink(bound, provider) : undefined;
+          const after = link?.syncedLineId || (resume ? "" : this.contextAfter(bound));
           return this.agents.reply({
             peerId,
             selfName: this.store.settings.name,
@@ -1545,7 +1548,7 @@ export class AppCore {
                   .map((member) => member.name)
                   .join(", ") || "cả nhóm"
               : this.endpoints.get(peerId)?.name || this.store.trusted[peerId]?.name || "máy kia",
-            history: this.modelHistory(bound, link?.syncedLineId),
+            history: this.modelHistory(bound, after),
             signal: controller.signal,
             fileRelay: room ? undefined : { url: `http://127.0.0.1:${this.port}/relay-file/${peerId}` },
             readings: this.readings(bound),
@@ -1787,6 +1790,45 @@ export class AppCore {
     return undefined;
   }
 
+  private openChatSession(peerId: string): string {
+    const groupId = parseGroupKey(peerId);
+    if (groupId) {
+      const room = this.groupById(groupId);
+      return room ? this.viewedGroupSession(room) : "";
+    }
+    return this.ensureSession(peerId);
+  }
+
+  private contextAfter(sessionId: string): string {
+    return this.sessionRecord(sessionId)?.contextAfter || "";
+  }
+
+  private summaryKey(peerId: string): string {
+    return `sum:${peerId}`;
+  }
+
+  private abortSummary(peerId: string): void {
+    const key = this.summaryKey(peerId);
+    this.aborts.get(key)?.abort();
+    void this.agents.drop(key);
+  }
+
+  private summaryBody(sessionId: string): string {
+    const lines = this.store.transcripts[sessionId] ?? [];
+    const bits: string[] = [];
+    for (const line of lines) {
+      if (line.pending || line.aside || line.kind === "system") continue;
+      const text = line.text.replace(/\s+/g, " ").trim();
+      if (!text) continue;
+      const who = line.kind === "agent" ? `${line.fromName} · agent` : line.fromName;
+      bits.push(`${who}: ${text.slice(0, 400)}`);
+    }
+    const body = bits.join("\n");
+    const cap = 3200;
+    if (body.length <= cap) return body;
+    return `Phần đầu phiên đã rút gọn.\n${body.slice(-cap)}`;
+  }
+
   private tell(sessionId: string, peerId: string, text: string): void {
     const clean = text.trim();
     if (!clean) return;
@@ -1804,7 +1846,7 @@ export class AppCore {
     const lines = this.store.transcripts[sessionId] ?? [];
     for (let i = lines.length - 1; i >= 0; i -= 1) {
       const line = lines[i];
-      if (line.pending || line.kind === "system") continue;
+      if (line.pending || line.kind === "system" || line.aside) continue;
       if (line.fromPeerId === self && line.kind === "agent") continue;
       return line;
     }
@@ -1816,7 +1858,7 @@ export class AppCore {
     const lines = this.store.transcripts[sessionId] ?? [];
     for (let i = lines.length - 1; i >= 0; i -= 1) {
       const line = lines[i];
-      if (line.pending || line.kind === "system") continue;
+      if (line.pending || line.kind === "system" || line.aside) continue;
       if (line.fromPeerId === self && line.kind === "agent") return undefined;
       const mentions = line.mentions ?? [];
       if (!mentions.some((item) => item.peerId === self)) continue;
@@ -1857,7 +1899,7 @@ export class AppCore {
     const source = afterLineId && skipping ? lines.filter((line) => !line.pending).slice(-1) : picked;
     const items: ModelTurn[] = [];
     for (const line of source) {
-      if (line.pending || line.kind === "system") continue;
+      if (line.pending || line.kind === "system" || line.aside) continue;
       const text = this.turnText(line);
       if (!text.trim()) continue;
       if (line.kind === "human" && line.fromPeerId === this.store.peerId) {
@@ -2071,6 +2113,7 @@ export class AppCore {
   }
 
   private halt(peerId: string, tellPeer: boolean): void {
+    this.abortSummary(peerId);
     this.epochs.set(peerId, (this.epochs.get(peerId) ?? 0) + 1);
     this.aborts.get(peerId)?.abort();
     const sessionId = this.replySessions.get(peerId) || this.store.openSessions[peerId];
@@ -2160,7 +2203,7 @@ export class AppCore {
       start = index + 1;
       break;
     }
-    return !lines.slice(start).some((line) => line.kind === "agent" && line.fromPeerId === this.store.peerId && !line.pending && line.text.trim());
+    return !lines.slice(start).some((line) => line.kind === "agent" && line.fromPeerId === this.store.peerId && !line.pending && !line.aside && line.text.trim());
   }
 
   private promptBrief(sessionId: string): { topic: string; goal: string; turn: number; limit: number; last: boolean } | undefined {
@@ -2506,6 +2549,109 @@ export class AppCore {
       this.pushNow();
     }
     return this.snapshot();
+  }
+
+  endAgentSession(peerId: string): AppState {
+    const sessionId = this.openChatSession(peerId);
+    const session = sessionId ? this.sessionRecord(sessionId) : undefined;
+    if (!sessionId || !session) return this.snapshot();
+    if (this.aborts.has(peerId) || this.aborts.has(this.summaryKey(peerId))) {
+      throw new Error("Agent đang trả lời. Hãy dừng trước khi kết thúc phiên.");
+    }
+    const lines = this.store.transcripts[sessionId] ?? [];
+    const last = lines[lines.length - 1];
+    this.clearCli(sessionId);
+    if (last) session.contextAfter = last.id;
+    else delete session.contextAfter;
+    const provider = this.store.settings.provider;
+    const name = cliClientLabel(provider) || providerLabel(provider);
+    const note = provider === "echo"
+      ? "Đã chốt mốc hội thoại. Câu tiếp theo không kèm nội dung phía trên."
+      : `Đã kết thúc phiên ${name}. Câu tiếp theo mở phiên mới, không kèm hội thoại phía trên.`;
+    this.tell(sessionId, peerId, note);
+    this.scheduleSave();
+    this.pushNow();
+    return this.snapshot();
+  }
+
+  async summarizeSession(viewPeerId: string, sourceSessionId: string): Promise<void> {
+    const source = this.sessionRecord(sourceSessionId);
+    if (!source) throw new Error("Không thấy phiên cần tóm tắt.");
+    const viewId = this.openChatSession(viewPeerId);
+    if (!viewId) throw new Error("Hãy mở một phiên để nhận bản tóm tắt.");
+    if (this.aborts.has(viewPeerId) || this.aborts.has(this.summaryKey(viewPeerId))) {
+      throw new Error("Agent đang bận. Hãy đợi hoặc bấm Dừng.");
+    }
+    const body = this.summaryBody(sourceSessionId);
+    if (!body.trim()) throw new Error("Phiên này chưa có nội dung để tóm tắt.");
+    const id = randomUUID();
+    const createdAt = Date.now();
+    this.upsertLine(viewId, {
+      id,
+      fromPeerId: this.store.peerId,
+      fromName: this.store.settings.name,
+      kind: "agent",
+      text: "",
+      pending: true,
+      createdAt,
+      aside: true,
+    });
+    this.pushNow();
+    const controller = new AbortController();
+    const key = this.summaryKey(viewPeerId);
+    this.aborts.set(key, controller);
+    try {
+      const settings = this.store.settings;
+      const result = await this.agents.reply({
+        peerId: key,
+        selfName: settings.name,
+        peerName: source.title || "Phiên",
+        history: [{ role: "user", text: body, speaker: "Hội thoại" }],
+        signal: controller.signal,
+        summary: { title: source.title || "Phiên", sessionId: source.id },
+        resume: false,
+        workDir: settings.workDir,
+        confine: settings.confineWorkDir,
+        access: [],
+        onDelta: (chunk) => {
+          if (controller.signal.aborted) return;
+          const line = this.findLine(viewId, id);
+          if (!line?.pending) return;
+          line.text += chunk;
+          this.push();
+        },
+      });
+      if (controller.signal.aborted) {
+        this.finishAborted(viewId, id, "Đã dừng tóm tắt.");
+        this.pushNow();
+        return;
+      }
+      const line = this.findLine(viewId, id);
+      if (line) {
+        line.text = result.text.trim() || "Không có nội dung tóm tắt.";
+        line.pending = false;
+      }
+      this.scheduleSave();
+      this.pushNow();
+    } catch (err) {
+      if (controller.signal.aborted) {
+        this.finishAborted(viewId, id, "Đã dừng tóm tắt.");
+        this.pushNow();
+        return;
+      }
+      const line = this.findLine(viewId, id);
+      const message = err instanceof Error ? err.message : "Không tóm tắt được phiên.";
+      if (line) {
+        line.pending = false;
+        line.text = line.text.trim() ? `${line.text}\n\n${message}` : message;
+      }
+      this.scheduleSave();
+      this.pushNow();
+      throw err instanceof Error ? err : new Error(message);
+    } finally {
+      if (this.aborts.get(key) === controller) this.aborts.delete(key);
+      void this.agents.drop(key);
+    }
   }
 
   renameSession(peerId: string, sessionId: string, title: string): AppState {
@@ -3785,6 +3931,7 @@ export class AppCore {
 
   private haltGroupLocal(room: GroupRoom, tell: boolean): void {
     const key = groupKey(room.id);
+    this.abortSummary(key);
     this.epochs.set(key, (this.epochs.get(key) ?? 0) + 1);
     this.aborts.get(key)?.abort();
     room.turn = null;
@@ -3992,7 +4139,7 @@ export class AppCore {
   private wireHistory(room: GroupRoom, sessionId: string): WireChat[] {
     const people = this.aliasList(room.members.map((member) => this.memberRecord(member)));
     return (this.store.transcripts[sessionId] ?? [])
-      .filter((line) => line.kind !== "system")
+      .filter((line) => line.kind !== "system" && !line.aside)
       .slice(-40)
       .map((line) => {
         const wire = this.toWire(line, sessionId);
@@ -4151,7 +4298,7 @@ export class AppCore {
     const lines = this.store.transcripts[sessionId] ?? [];
     for (let index = lines.length - 1; index >= 0; index -= 1) {
       const line = lines[index];
-      if (line?.kind === "agent" && line.fromPeerId) return line.fromPeerId;
+      if (line?.kind === "agent" && line.fromPeerId && !line.aside) return line.fromPeerId;
     }
     return "";
   }

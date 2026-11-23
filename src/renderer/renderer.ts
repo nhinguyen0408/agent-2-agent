@@ -35,6 +35,8 @@ declare global {
       setMemberRole: (groupId: string, peerId: string, role: string) => Promise<AppState>;
       setNickname: (peerId: string, nickname: string) => Promise<AppState>;
       deleteSession: (peerId: string, sessionId: string) => Promise<AppState>;
+      summarizeSession: (peerId: string, sessionId: string) => Promise<void>;
+      endAgentSession: (peerId: string) => Promise<AppState>;
       createSession: (peerId: string) => Promise<AppState>;
       openSession: (peerId: string, sessionId: string) => Promise<AppState>;
       renameSession: (peerId: string, sessionId: string, title: string) => Promise<AppState>;
@@ -265,6 +267,14 @@ function boot(host: HTMLElement): void {
           <form id="composer" class="composer">
             <div id="mention-pop" class="mention-pop" hidden></div>
             <textarea id="draft" rows="3" placeholder="Nhắn cho agent. Gõ @ để gọi đúng máy…"></textarea>
+            <div id="session-tools-pop" class="session-tools" hidden>
+              <p class="session-id" id="session-id-label"></p>
+              <button type="button" id="summarize-current">Tóm tắt phiên này</button>
+              <label class="session-search">
+                <input id="summarize-query" type="search" placeholder="Tìm tên người hoặc tên phiên" aria-label="Tìm phiên để tóm tắt" />
+              </label>
+              <div id="summarize-list" class="pick-list"></div>
+            </div>
             <div id="attach-chip" class="attach-chip" hidden>
               ${icon("paperclip")}
               <span id="attach-name"></span>
@@ -274,6 +284,9 @@ function boot(host: HTMLElement): void {
               ${iconButton("attach", "paperclip", "Đính kèm txt, Markdown, ảnh, PDF, Word hoặc Excel")}
               ${iconButton("send-file", "file", "Gửi file sang máy kia")}
               ${iconButton("open-preview", "eye", "Mở cửa sổ xem file")}
+              ${iconButton("copy-session", "copy", "Chép session ID")}
+              ${iconButton("summarize", "layers", "Tóm tắt phiên này hoặc chọn phiên khác")}
+              ${iconButton("end-cli", "fresh", "Kết thúc phiên agent để câu sau mở phiên mới")}
               <span class="spacer"></span>
               ${iconButton("stop", "stop", "Dừng agent đang trả lời")}
               ${iconButton("send", "send", "Gửi", "", "", "submit", "icon-btn primary")}
@@ -906,6 +919,46 @@ function boot(host: HTMLElement): void {
       () => flash("Không chép được"),
     );
   });
+  must<HTMLButtonElement>("#copy-session").addEventListener("click", () => {
+    const sessionId = active && state ? state.openSession[active] || "" : "";
+    if (!sessionId) {
+      flash("Chưa có phiên");
+      return;
+    }
+    void navigator.clipboard.writeText(sessionId).then(
+      () => flash("Đã chép session ID"),
+      () => flash("Không chép được"),
+    );
+  });
+  must<HTMLButtonElement>("#summarize").addEventListener("click", () => {
+    const pop = must<HTMLElement>("#session-tools-pop");
+    pop.hidden = !pop.hidden;
+    if (!pop.hidden && state) fillSummaryList(state);
+  });
+  must<HTMLInputElement>("#summarize-query").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") event.preventDefault();
+  });
+  must<HTMLInputElement>("#summarize-query").addEventListener("input", () => {
+    if (state) fillSummaryList(state);
+  });
+  must<HTMLButtonElement>("#summarize-current").addEventListener("click", () => {
+    const peerId = active;
+    const sessionId = peerId && state ? state.openSession[peerId] || "" : "";
+    if (!peerId || !sessionId) return;
+    must<HTMLElement>("#session-tools-pop").hidden = true;
+    void guard(() => window.lan.summarizeSession(peerId, sessionId));
+  });
+  must<HTMLButtonElement>("#end-cli").addEventListener("click", () => {
+    if (!active || !state) return;
+    const name = cliClientLabel(state.self.provider) || providerLabel(state.self.provider);
+    const message = state.self.provider === "echo"
+      ? "Chốt mốc hội thoại? Câu tiếp theo không kèm nội dung phía trên."
+      : `Kết thúc phiên ${name}? Hội thoại vẫn nằm trên màn hình. Câu tiếp theo mở phiên mới, không kèm nội dung phía trên.`;
+    if (!window.confirm(message)) return;
+    const peerId = active;
+    must<HTMLElement>("#session-tools-pop").hidden = true;
+    void guard(() => window.lan.endAgentSession(peerId));
+  });
 
   window.lan.onState((next) => paint(next));
   window.lan.onCodingLive((event) => {
@@ -1125,6 +1178,105 @@ function boot(host: HTMLElement): void {
     must<HTMLFormElement>("#composer").classList.toggle("waiting", locked);
   }
 
+  function sessionHasSpeech(next: AppState, sessionId: string): boolean {
+    return (next.transcripts[sessionId] ?? []).some((line) => line.kind !== "system" && !line.aside && line.text.trim());
+  }
+
+  function summaryOwner(next: AppState, session: AppState["sessions"][number]): { key: string; name: string; kind: "person" | "group"; search: string } {
+    const groupId = parseGroupKey(session.peerId);
+    if (groupId) {
+      const group = next.groups.find((item) => item.id === groupId);
+      const members = (group?.members ?? []).map((member) => displayName(next, member.peerId, member.name));
+      const title = group?.title || "Nhóm";
+      return { key: session.peerId, name: `Nhóm · ${title}`, kind: "group", search: `${title} ${members.join(" ")}`.toLowerCase() };
+    }
+    const peer = next.peers.find((item) => item.peerId === session.peerId);
+    const name = peer ? displayName(next, peer.peerId, peer.name) : "Máy khác";
+    return { key: session.peerId, name, kind: "person", search: name.toLowerCase() };
+  }
+
+  function fillSummaryList(next: AppState): void {
+    const current = active ? next.openSession[active] || "" : "";
+    const label = must<HTMLElement>("#session-id-label");
+    label.textContent = current ? `Session ID ${current}` : "Chưa có phiên";
+    const query = must<HTMLInputElement>("#summarize-query").value.trim().toLowerCase();
+    const list = must<HTMLElement>("#summarize-list");
+    list.replaceChildren();
+    const buckets = new Map<string, { name: string; kind: "person" | "group"; search: string; sessions: AppState["sessions"] }>();
+    for (const session of next.sessions) {
+      if (!sessionHasSpeech(next, session.id)) continue;
+      const owner = summaryOwner(next, session);
+      const bucket = buckets.get(owner.key) ?? { name: owner.name, kind: owner.kind, search: owner.search, sessions: [] };
+      bucket.sessions.push(session);
+      buckets.set(owner.key, bucket);
+    }
+    const groups = [...buckets.values()]
+      .map((bucket) => {
+        const ownerHit = !query || bucket.search.includes(query);
+        const sessions = bucket.sessions
+          .filter((session) => ownerHit || session.title.toLowerCase().includes(query))
+          .sort((a, b) => b.updatedAt - a.updatedAt);
+        return { ...bucket, sessions };
+      })
+      .filter((bucket) => bucket.sessions.length > 0)
+      .sort((a, b) => {
+        if (a.kind !== b.kind) return a.kind === "person" ? -1 : 1;
+        return a.name.localeCompare(b.name, "vi");
+      });
+    if (!groups.length) {
+      const empty = document.createElement("p");
+      empty.className = "session-empty";
+      empty.textContent = query ? "Không thấy người hoặc phiên khớp." : "Chưa có phiên để tóm tắt.";
+      list.append(empty);
+      return;
+    }
+    for (const bucket of groups) {
+      const section = document.createElement("section");
+      section.className = `summary-person${bucket.kind === "group" ? " is-group" : ""}`;
+      const heading = document.createElement("h3");
+      heading.textContent = bucket.name;
+      section.append(heading);
+      for (const session of bucket.sessions) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = session.id === current ? `${session.title} · đang mở` : session.title;
+        button.addEventListener("click", () => {
+          must<HTMLElement>("#session-tools-pop").hidden = true;
+          const peerId = active;
+          if (!peerId) return;
+          void guard(() => window.lan.summarizeSession(peerId, session.id));
+        });
+        section.append(button);
+      }
+      list.append(section);
+    }
+  }
+
+  function paintSessionTools(next: AppState, sessionId: string): void {
+    const session = next.sessions.find((item) => item.id === sessionId);
+    const lines = next.transcripts[sessionId] ?? [];
+    const busy = lines.some((line) => line.kind === "agent" && line.pending);
+    const linked = Boolean(session && linkedClient(next, session));
+    const name = cliClientLabel(next.self.provider) || providerLabel(next.self.provider);
+    const copy = must<HTMLButtonElement>("#copy-session");
+    const summary = must<HTMLButtonElement>("#summarize");
+    const end = must<HTMLButtonElement>("#end-cli");
+    copy.disabled = !sessionId;
+    copy.dataset.tip = sessionId ? `Chép session ID ${sessionId}` : "Chưa có phiên";
+    copy.setAttribute("aria-label", copy.dataset.tip);
+    summary.disabled = !sessionId || busy;
+    summary.dataset.tip = "Tóm tắt phiên này hoặc chọn phiên khác";
+    summary.setAttribute("aria-label", summary.dataset.tip);
+    summary.setAttribute("aria-expanded", must<HTMLElement>("#session-tools-pop").hidden ? "false" : "true");
+    const canEnd = Boolean(sessionId) && !busy && (linked || lines.some((line) => line.kind !== "system"));
+    end.disabled = !canEnd;
+    end.dataset.tip = linked
+      ? `Kết thúc phiên ${name}. Câu sau mở phiên mới, không kèm hội thoại phía trên.`
+      : "Chốt mốc hội thoại. Câu sau không kèm nội dung phía trên.";
+    end.setAttribute("aria-label", end.dataset.tip);
+    if (!sessionId || busy) must<HTMLElement>("#session-tools-pop").hidden = true;
+  }
+
   function paintChat(next: AppState): void {
     const group = active ? next.groups.find((item) => groupKey(item.id) === active) ?? null : null;
     if (group && active) {
@@ -1138,7 +1290,10 @@ function boot(host: HTMLElement): void {
     const panel = must<HTMLElement>("#chat-panel");
     empty.hidden = Boolean(peer);
     panel.hidden = !peer;
-    if (!peer || !active) return;
+    if (!peer || !active) {
+      paintSessionTools(next, "");
+      return;
+    }
     const head = must<HTMLElement>(".chat-head");
     head.classList.remove("group-mode");
     const machineName = displayName(next, peer.peerId, peer.name);
@@ -1209,6 +1364,7 @@ function boot(host: HTMLElement): void {
         ].join("\n")
       : "Nối máy trước. Token ghép nối xuất hiện sau khi hai bên chấp nhận.";
     must<HTMLPreElement>("#http-snippet").textContent = snippet;
+    paintSessionTools(next, sessionId);
   }
 
   let briefTimer = 0;
@@ -1306,6 +1462,7 @@ function boot(host: HTMLElement): void {
     paintGroupBar(next, group);
     const topic = must<HTMLInputElement>("#brief-topic");
     topic.placeholder = "Chủ đề chung. Gõ @tên hoặc @me nếu chỉ muốn vài agent nói";
+    paintSessionTools(next, sessionId);
   }
 
   function paintGroupBar(next: AppState, group: GroupRoom): void {
@@ -1900,6 +2057,7 @@ function boot(host: HTMLElement): void {
     attached = "";
     paintAttach();
     must<HTMLElement>("#mention-pop").hidden = true;
+    must<HTMLElement>("#session-tools-pop").hidden = true;
     noteTyping(false);
     await guard(() => window.lan.send(peerId, text, file || undefined));
   }
@@ -1932,6 +2090,8 @@ function boot(host: HTMLElement): void {
     const target = event.target;
     if (target instanceof Element && target.closest(".history-menu")) return;
     closeHistoryMenus();
+    if (target instanceof Element && (target.closest("#session-tools-pop") || target.closest("#summarize"))) return;
+    must<HTMLElement>("#session-tools-pop").hidden = true;
   });
   must<HTMLElement>("#history-list").addEventListener("scroll", () => closeHistoryMenus());
 
@@ -2834,6 +2994,8 @@ function iconSprite(): string {
     item("pencil", `<path d="M13.2 6.4l4.4 4.4L8 20.4H3.6V16z"/><path d="M11.6 8l4.4 4.4"/>`),
     item("refresh", `<path d="M19 12a7 7 0 1 1-2.1-4.9"/><path d="M19 4.6V9h-4.4"/>`),
     item("copy", `<rect x="8" y="8" width="10" height="11.5" rx="1.5"/><path d="M6 16H5.5A1.5 1.5 0 0 1 4 14.5v-9A1.5 1.5 0 0 1 5.5 4H14"/>`),
+    item("layers", `<path d="M12 4.5l8 3.5-8 3.5-8-3.5z"/><path d="M4 12l8 3.5L20 12"/><path d="M4 16l8 3.5L20 16"/>`),
+    item("fresh", `<path d="M5 6.5h14v4H5z"/><path d="M5 14.5h14v4H5z"/><path d="M12 10.5v3"/>`),
     item("hash", `<path d="M9 4.5L7.5 19.5M16.5 4.5L15 19.5M5 9h14M4.5 15h14"/>`),
     item("terminal", `<path d="M5 8l4 4-4 4M12 16h7"/>`),
     item("expand", `<path d="M9 4H4v5M15 4h5v5M20 15v5h-5M4 15v5h5"/>`),
