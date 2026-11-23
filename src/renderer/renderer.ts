@@ -1250,6 +1250,23 @@ function boot(host: HTMLElement): void {
       }
       list.append(section);
     }
+    placeSessionTools();
+  }
+
+  function placeSessionTools(): void {
+    const pop = must<HTMLElement>("#session-tools-pop");
+    if (pop.hidden) return;
+    const button = must<HTMLButtonElement>("#summarize");
+    const rect = button.getBoundingClientRect();
+    const width = Math.min(340, window.innerWidth - 16);
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
+    const available = Math.max(140, rect.top - 16);
+    const limit = Math.min(320, available);
+    pop.style.width = `${width}px`;
+    pop.style.maxHeight = `${limit}px`;
+    pop.style.left = `${left}px`;
+    const used = Math.min(pop.scrollHeight, limit);
+    pop.style.top = `${Math.max(8, rect.top - 8 - used)}px`;
   }
 
   function paintSessionTools(next: AppState, sessionId: string): void {
@@ -2093,6 +2110,7 @@ function boot(host: HTMLElement): void {
     if (target instanceof Element && (target.closest("#session-tools-pop") || target.closest("#summarize"))) return;
     must<HTMLElement>("#session-tools-pop").hidden = true;
   });
+  window.addEventListener("resize", () => placeSessionTools());
   must<HTMLElement>("#history-list").addEventListener("scroll", () => closeHistoryMenus());
 
   function selectedCaption(next: AppState): { title: string; meta: string } {

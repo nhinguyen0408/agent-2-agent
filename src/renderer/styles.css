@@ -1974,16 +1974,19 @@ label.coding-toggle span {
 .line.mine .at { background: rgba(255, 255, 255, 0.22); color: white; }
 
 .session-tools {
+  position: fixed;
+  z-index: 40;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  margin-top: 8px;
+  width: min(340px, calc(100vw - 16px));
   max-height: 320px;
   overflow: auto;
   padding: 6px;
   border: 1px solid var(--line);
   border-radius: 12px;
-  background: var(--bg);
+  background: #fff;
+  box-shadow: var(--shadow);
 }
 
 .session-tools[hidden] { display: none; }
