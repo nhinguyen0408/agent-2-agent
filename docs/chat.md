@@ -56,15 +56,25 @@ Nếu socket không mở nhưng vẫn còn token và câu không kèm file, app 
 
 ## Ai trả lời, và agent thấy gì
 
-Người gõ trên máy A. Agent chạy trên **máy B**. Agent máy A chỉ lên tiếng khi tới lượt nó trong [hội thoại hai agent](#cho-hai-agent-nói) hoặc khi máy A nhận một câu người từ máy B.
+Một đoạn chat hai người gồm hai cặp: mỗi người dùng nói với agent của chính máy mình. Nhóm cũng vậy, mỗi máy một cặp.
+
+Agent chỉ trả lời người vừa gọi mình:
+
+- Người dùng tag một agent thì agent đó trả lời người dùng ấy.
+- Agent của một máy tag agent khác thì agent được tag trả lời đúng agent vừa gọi, không trả lời người dùng của agent đó.
+- `@me` gọi agent của chính máy đang gõ. Agent đó trả lời người dùng máy này và mở đầu bằng “Thưa sếp”.
+
+Trong nhóm 3, 4 hoặc 5 người, số người được tag là số agent sẽ trả lời câu đó. Tag 1 người thì chỉ agent đó trả lời. Tag 2 hoặc 3 người thì đúng 2 hoặc 3 agent đó trả lời người đã tag. Agent không được tag không nhận câu đó, kể cả khi chủ đề vẫn còn lượt của cả nhóm.
+
+Agent máy A cũng lên tiếng khi tới lượt trong [hội thoại hai agent](#cho-hai-agent-nói), hoặc khi một tin người hay tin agent tag đúng máy A.
 
 Mỗi peer có một hàng đợi. Lượt trả lời sau đợi lượt trước của cùng peer kết thúc. Đổi runtime, thư mục làm việc, hoặc lệnh CLI thì app dừng các tiến trình agent đang chạy.
 
 Prompt gửi cho Claude, Cursor và Gemini được dựng từ hội thoại đã lưu của peer đó. Dòng hệ thống và dòng đang `pending` không đưa vào prompt. Cách xếp vai:
 
-- Tin của máy kia (người hoặc agent) thành lượt `user`, ghi tên máy kia.
-- Câu agent của chính máy này thành lượt `assistant`.
-- Câu người do chính máy này gõ **không** đưa vào prompt, trừ khi câu đó có file đính kèm. Khi có file, nó thành ghi chú “đã gửi”, để agent máy gửi vẫn biết đường dẫn file trên đĩa của mình khi tới lượt nói.
+- Tin của máy kia giữ đúng vai: người dùng ghi tên người, agent ghi `Tên · agent`. Cả hai thành lượt `user` vì không phải lời của agent máy này.
+- Câu agent của chính máy này thành lượt `assistant`, ghi `Tên · agent`.
+- Câu người do chính máy này gõ chỉ vào prompt khi có `@me` hoặc có file đính kèm. `@me` là lời sếp nói với agent của mình. Câu không `@me` và không có file thì bỏ qua trong chat 1-1.
 
 Prompt chung yêu cầu agent:
 
@@ -81,7 +91,9 @@ Claude và Gemini nhận cả prompt trên **một dòng**, cắt còn 4000 ký 
 
 Echo không gọi CLI. Nó trả về:
 
-`Echo của <tên máy này> đã nhận từ <tên máy kia>: <tin cuối trong hội thoại>`
+`Echo của <tên máy này> đã nhận từ <người vừa gọi>: <tin cuối trong hội thoại>`
+
+Nếu người gọi là sếp qua `@me`, echo mở đầu bằng `Thưa sếp`.
 
 Chữ được đẩy ra từng khúc 12 ký tự, cách nhau 16 ms, để khung chat thấy dòng đang hiện dần.
 
@@ -128,6 +140,8 @@ Máy kia chỉ nhận `delta` khi dòng còn `pending`. Khi sự kiện `chat` c
 Gõ vào ô soạn thì app báo `typing: true` cho máy kia. Ngừng gõ khoảng 900 ms thì báo `typing: false`. Máy nhận tự tắt **đang nhập** sau 2,5 giây nếu không có báo mới, để trạng thái không kẹt khi mạng đứt.
 
 **đang trả lời** do máy đang chạy agent bật lúc bắt đầu lượt và tắt trong `finally`, kể cả khi lỗi hoặc bị dừng. Mất socket thì cả hai cờ bị xóa.
+
+Ô soạn khóa trong 3 phút đầu của lượt đang chạy, rồi mở lại để người dùng nhắn tiếp. Agent không bị dừng vì hết giờ đó. Bấm **Dừng** vẫn hủy lượt đang chạy.
 
 ## Cho hai agent nói
 
@@ -225,7 +239,7 @@ curl -X POST http://IP:CONG/trigger ^
 - Hợp lệ: máy nhận ghi một dòng `human` như thể máy kia vừa nói, báo máy kia bằng sự kiện `aside` dạng `Lệnh HTTP: …` (cắt 500 ký tự), chạy một lượt agent, rồi trả `{ "ok": true, "reply": "..." }`.
 - Agent không ra chữ: 500.
 
-Lượt này không mở hội thoại hai agent. Phía gọi từ chính app chờ tối đa 180 giây.
+Lượt này không mở hội thoại hai agent. Phía gọi từ chính app chờ đến khi agent trả lời xong.
 
 `GET /identity` và `GET /peers` không cần token. Chúng phục vụ dò máy, không ghi vào chat.
 
@@ -272,7 +286,8 @@ Chỉ socket đã qua `hello` và đang nối mới được xử lý `chat`. Bu
 | Prompt Claude | 4000 ký tự, một dòng |
 | Prompt Cursor | 12000 ký tự |
 | Prompt Gemini | 4500 ký tự, một dòng |
-| Chờ `/trigger` từ app | 180 giây |
+| Chờ `/trigger` từ app | Đến khi agent trả lời xong |
+| Ô soạn khóa khi agent đang trả lời | 3 phút, rồi mở lại; agent vẫn chạy |
 | Chờ gửi file | 120 giây |
 | Nhịp gửi `delta` | 80 ms |
 | Tắt “đang nhập” khi im | 900 ms ở máy gõ, 2,5 giây ở máy nhận |

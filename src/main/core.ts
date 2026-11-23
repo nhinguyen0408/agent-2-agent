@@ -63,7 +63,7 @@ import type {
   WireGroupTurn,
   WireResume,
 } from "../shared/types";
-import { DEFAULT_PORT, PORT_SPAN, REPLY_WAIT_MS, providerLabel } from "../shared/types";
+import { DEFAULT_PORT, PORT_SPAN, providerLabel } from "../shared/types";
 import { AccessDenied, deniedRoles, denialText, latestRequest } from "../shared/access";
 import { AgentHost, CliResumeUnsupported, CliSessionLost, type ModelTurn } from "./agents";
 import { CodingWatch, type CodingTrace } from "./codingTerm";
@@ -135,7 +135,6 @@ export class AppCore {
   private readonly remoteClis = new Map<string, string>();
   private readonly activity = new Map<string, PeerActivity>();
   private readonly activityTimers = new Map<string, NodeJS.Timeout>();
-  private readonly replyTimers = new Map<string, NodeJS.Timeout>();
   private readonly replySessions = new Map<string, string>();
   private readonly unread = new Set<string>();
   private readonly noticeAt = new Map<string, number>();
@@ -219,8 +218,6 @@ export class AppCore {
     if (this.cliTimer) clearInterval(this.cliTimer);
     for (const timer of this.activityTimers.values()) clearTimeout(timer);
     this.activityTimers.clear();
-    for (const timer of this.replyTimers.values()) clearTimeout(timer);
-    this.replyTimers.clear();
     for (const timer of this.deltaTimers.values()) clearTimeout(timer);
     this.deltaTimers.clear();
     this.discovery?.stop();
@@ -718,6 +715,8 @@ export class AppCore {
       const server = http.createServer((req, res) => {
         void this.onHttp(req, res);
       });
+      // Node mặc định đóng request sau 5 phút. Agent vẫn đang chạy thì không cắt.
+      server.requestTimeout = 0;
       const io = new Server(server, {
         cors: { origin: true },
         maxHttpBufferSize: 1_000_000,
@@ -1412,7 +1411,7 @@ export class AppCore {
     const dialogue = msg.dialogue;
     const incomingMentions = Array.isArray(msg.mentions) ? msg.mentions : [];
     const called = incomingMentions.some((item) => item?.peerId === this.store.peerId);
-    const shouldReply = !msg.defer && (dialogue ? dialogue.repliesLeft > 0 : msg.kind === "human" && called);
+    const shouldReply = !msg.defer && (dialogue ? dialogue.repliesLeft > 0 : called);
     this.pushNow();
     if (!shouldReply) return;
     await this.enqueueReply(peerId, sessionId, Boolean(dialogue && dialogue.repliesLeft > 0));
@@ -1504,13 +1503,6 @@ export class AppCore {
       const controller = new AbortController();
       this.aborts.set(peerId, controller);
       const coding = Boolean(this.store.briefs[bound]?.coding);
-      let timedOut = false;
-      const waitTimer = coding
-        ? undefined
-        : setTimeout(() => {
-            timedOut = true;
-            controller.abort();
-          }, REPLY_WAIT_MS);
       this.replySessions.set(peerId, bound);
       const id = randomUUID();
       const createdAt = Date.now();
@@ -1581,6 +1573,7 @@ export class AppCore {
                 }
               : undefined,
             together: room ? "cả nhóm" : undefined,
+            replyTo: this.tagCall(bound),
             resume: Boolean(link),
             sessionId: link?.id,
             sessionTitle: this.sessionTitle(bound),
@@ -1622,9 +1615,8 @@ export class AppCore {
           result = await ask(false);
         }
         const text = result.text;
-        clearTimeout(waitTimer);
         if ((this.epochs.get(peerId) ?? 0) !== epoch || controller.signal.aborted) {
-          this.finishAborted(bound, id, timedOut ? "Agent trả lời quá lâu, đã dừng. Bạn có thể nhắn tiếp." : "Đã dừng.");
+          this.finishAborted(bound, id);
           resolveOut("");
           return;
         }
@@ -1638,7 +1630,6 @@ export class AppCore {
         this.lastError.delete(peerId);
         resolveOut(text);
       } catch (err) {
-        clearTimeout(waitTimer);
         if (err instanceof AccessDenied && (this.epochs.get(peerId) ?? 0) === epoch) {
           const text = err.message;
           this.recordError(`từ chối quyền ${providerLabel(this.store.settings.provider)} trong ${this.who(peerId)}`, err, text);
@@ -1653,13 +1644,7 @@ export class AppCore {
           return;
         }
         if (isAbort(err) || (this.epochs.get(peerId) ?? 0) !== epoch) {
-          if (timedOut) {
-            this.log(
-              `Lỗi · ${providerLabel(this.store.settings.provider)} quá hạn trong ${this.who(peerId)} · không trả lời trong ${Math.round(REPLY_WAIT_MS / 1000)} giây`,
-            );
-            this.push();
-          }
-          this.finishAborted(bound, id, timedOut ? "Agent trả lời quá lâu, đã dừng. Bạn có thể nhắn tiếp." : "Đã dừng.");
+          this.finishAborted(bound, id);
           resolveOut("");
           return;
         }
@@ -1685,7 +1670,6 @@ export class AppCore {
         this.scheduleSave();
         resolveOut("");
       } finally {
-        clearTimeout(waitTimer);
         if (this.replySessions.get(peerId) === bound) this.replySessions.delete(peerId);
         this.notifyActivity(peerId, { replying: false, sessionId: bound });
         if (this.aborts.get(peerId) === controller) this.aborts.delete(peerId);
@@ -1756,7 +1740,6 @@ export class AppCore {
           authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({ text }),
-        signal: AbortSignal.timeout(180_000),
       });
       const body = (await res.json()) as { ok?: boolean; reply?: string; error?: string };
       if (!res.ok || !body.ok || !body.reply) throw new Error(body.error || `HTTP ${res.status}`);
@@ -1812,18 +1795,52 @@ export class AppCore {
   }
 
   private selfMentionTurn(sessionId: string): boolean {
+    const line = this.latestCaller(sessionId);
+    return Boolean(line && line.fromPeerId === this.store.peerId && line.kind === "human" && line.mentions?.some((item) => item.peerId === this.store.peerId));
+  }
+
+  private latestCaller(sessionId: string): ChatLine | undefined {
     const self = this.store.peerId;
     const lines = this.store.transcripts[sessionId] ?? [];
     for (let i = lines.length - 1; i >= 0; i -= 1) {
       const line = lines[i];
       if (line.pending || line.kind === "system") continue;
       if (line.fromPeerId === self && line.kind === "agent") continue;
-      if (line.fromPeerId === self && line.kind === "human") {
-        return Boolean(line.mentions?.some((item) => item.peerId === self));
-      }
-      return false;
+      return line;
     }
-    return false;
+    return undefined;
+  }
+
+  private tagCall(sessionId: string): { name: string; boss: boolean; called: string[] } | undefined {
+    const self = this.store.peerId;
+    const lines = this.store.transcripts[sessionId] ?? [];
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      const line = lines[i];
+      if (line.pending || line.kind === "system") continue;
+      if (line.fromPeerId === self && line.kind === "agent") return undefined;
+      const mentions = line.mentions ?? [];
+      if (!mentions.some((item) => item.peerId === self)) continue;
+      const boss = line.fromPeerId === self && line.kind === "human";
+      return { name: voiceName(line.fromName, line.kind === "agent"), boss, called: this.calledAgents(mentions) };
+    }
+    return undefined;
+  }
+
+  private calledAgents(mentions: MentionRef[]): string[] {
+    const seen = new Set<string>();
+    const names: string[] = [];
+    for (const item of mentions) {
+      if (!item.peerId || seen.has(item.peerId)) continue;
+      seen.add(item.peerId);
+      names.push(this.agentVoice(item.peerId, item.name));
+    }
+    return names;
+  }
+
+  private agentVoice(peerId: string, fallback: string): string {
+    const known = peerId === this.store.peerId ? this.store.settings.name : this.realName(peerId);
+    const base = known.trim() && known.trim().toLowerCase() !== "me" ? known : fallback.trim().toLowerCase() === "me" ? known || "Máy" : fallback;
+    return voiceName(base, true);
   }
 
   private modelHistory(sessionId: string, afterLineId = ""): ModelTurn[] {
@@ -1846,17 +1863,17 @@ export class AppCore {
       if (line.kind === "human" && line.fromPeerId === this.store.peerId) {
         const callsSelf = line.mentions?.some((item) => item.peerId === this.store.peerId);
         if (callsSelf) {
-          items.push({ role: "user", text, speaker: line.fromName });
+          items.push({ role: "user", text, speaker: voiceName(line.fromName, false) });
           continue;
         }
         if (!line.attachment && !this.roomBySession(sessionId)) continue;
-        items.push({ role: "note", text: `${line.fromName}: ${text}` });
+        items.push({ role: "note", text: `${voiceName(line.fromName, false)}: ${text}` });
         continue;
       }
       if (line.kind === "agent" && line.fromPeerId === this.store.peerId) {
-        items.push({ role: "assistant", text: line.text, speaker: line.fromName });
+        items.push({ role: "assistant", text: line.text, speaker: voiceName(line.fromName, true) });
       } else if (line.fromPeerId !== this.store.peerId) {
-        items.push({ role: "user", text, speaker: line.fromName });
+        items.push({ role: "user", text, speaker: voiceName(line.fromName, line.kind === "agent") });
       }
     }
     return items;
@@ -2048,7 +2065,6 @@ export class AppCore {
       const timer = this.activityTimers.get(peerId);
       if (timer) clearTimeout(timer);
       this.activityTimers.delete(peerId);
-      this.clearReplyTimer(peerId);
       this.advanceIfSpeakerLeft(peerId);
     }
     this.push();
@@ -2710,7 +2726,6 @@ export class AppCore {
 
   private noteActivity(peerId: string, patch: ActivityPatch | undefined): void {
     const current = this.activity.get(peerId) ?? { typing: false, replying: false, typingSessionId: "", replyingSessionId: "" };
-    const startedReply = patch?.replying === true && !current.replying;
     const next: PeerActivity = {
       typing: typeof patch?.typing === "boolean" ? patch.typing : current.typing,
       replying: typeof patch?.replying === "boolean" ? patch.replying : current.replying,
@@ -2738,31 +2753,7 @@ export class AppCore {
       }, 2500);
       this.activityTimers.set(peerId, expire);
     }
-    if (startedReply) this.armReplyTimer(peerId, patch?.sessionId || next.replyingSessionId);
-    else if (!next.replying) this.clearReplyTimer(peerId);
     this.push();
-  }
-
-  private armReplyTimer(peerId: string, sessionId = ""): void {
-    this.clearReplyTimer(peerId);
-    if (sessionId && this.store.briefs[sessionId]?.coding) return;
-    const timer = setTimeout(() => {
-      this.replyTimers.delete(peerId);
-      const live = this.activity.get(peerId);
-      if (!live?.replying) return;
-      live.replying = false;
-      live.replyingSessionId = "";
-      if (!live.typing) this.activity.delete(peerId);
-      this.push();
-    }, REPLY_WAIT_MS);
-    this.replyTimers.set(peerId, timer);
-  }
-
-  private clearReplyTimer(peerId: string): void {
-    const timer = this.replyTimers.get(peerId);
-    if (!timer) return;
-    clearTimeout(timer);
-    this.replyTimers.delete(peerId);
   }
 
   private sendTo(peerId: string, event: string, payload: unknown): boolean {
@@ -3683,13 +3674,15 @@ export class AppCore {
     }
     if (busy && mentions.length && room.turn) {
       const brief = this.ensureBrief(sessionId);
-      if (brief.coding && room.turn.mode === "topic") {
-        msg.turn = room.turn;
+      const live = room.turn;
+      if (brief.coding && live.mode === "topic") {
+        msg.turn = live;
         msg.cue = false;
         msg.queue = undefined;
         return;
       }
-      room.turn = injectSpeakers(room.turn, mentions.map((item) => item.peerId));
+      const extra = mentions.map((item) => item.peerId).filter((id) => id && !this.queuedFrom(live, id, live.index + 1));
+      if (extra.length) room.turn = injectSpeakers(live, extra);
       msg.turn = room.turn;
       msg.cue = false;
       msg.queue = undefined;
@@ -3739,6 +3732,7 @@ export class AppCore {
       if (done) void this.publishCodingResult(room, sessionId, text);
     }
     if (!speaking) upcoming = room.turn;
+    if (speaking) upcoming = this.callsAfterSpeech(room, sessionId, wire.mentions, upcoming, live);
     if (speaking && room.hostId === this.store.peerId) upcoming = this.skipOffline(room, upcoming);
     if (speaking) room.turn = upcoming;
     wire.groupId = room.id;
@@ -3750,6 +3744,43 @@ export class AppCore {
       void this.enqueueReply(groupKey(room.id), sessionId, upcoming.mode === "topic", room.id);
     }
     this.pushNow();
+  }
+
+  private callsAfterSpeech(
+    room: GroupRoom,
+    sessionId: string,
+    mentions: MentionRef[] | undefined,
+    upcoming: TurnTicket | null,
+    live: TurnTicket | null,
+  ): TurnTicket | null {
+    const codingTopic = Boolean(this.store.briefs[sessionId]?.coding && live?.mode === "topic");
+    if (codingTopic) return upcoming;
+    const seen = new Set<string>();
+    const refs = (mentions ?? []).filter((item) => {
+      if (!item.peerId || item.peerId === this.store.peerId || seen.has(item.peerId)) return false;
+      if (this.queuedFrom(upcoming, item.peerId, upcoming?.index ?? 0)) return false;
+      seen.add(item.peerId);
+      return true;
+    });
+    if (!refs.length) return upcoming;
+    if (upcoming) {
+      const next = injectSpeakers(upcoming, refs.map((item) => item.peerId));
+      const brief = this.store.briefs[sessionId];
+      if (brief?.running && next.mode === "topic") {
+        const cap = brief.coding ? CODING_TURN_MAX : BRIEF_TURN_MAX;
+        brief.turnLimit = clampTurnLimit(Math.max(brief.turnLimit, brief.turnsUsed + next.left), cap);
+      }
+      return next;
+    }
+    return ticketFrom(speakOrder(room.members, refs, refs.length, this.store.peerId, "ping"), "ping");
+  }
+
+  private queuedFrom(ticket: TurnTicket | null, id: string, fromIndex: number): boolean {
+    if (!ticket || !id) return false;
+    for (let index = Math.max(0, fromIndex); index < ticket.order.length; index += 1) {
+      if (ticket.order[index] === id) return true;
+    }
+    return false;
   }
 
   private haltGroupLocal(room: GroupRoom, tell: boolean): void {
@@ -4347,6 +4378,11 @@ export class AppCore {
     if (this.logs.length > 200) this.logs.splice(0, this.logs.length - 200);
     console.log(`[lan] ${line}`);
   }
+}
+
+function voiceName(name: string, agent: boolean): string {
+  const clean = name.replace(/\s+/g, " ").trim() || "Máy";
+  return agent ? `${clean} · agent` : clean;
 }
 
 function clipLog(text: string, max: number): string {

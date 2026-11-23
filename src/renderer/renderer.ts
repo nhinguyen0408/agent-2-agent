@@ -1060,7 +1060,7 @@ function boot(host: HTMLElement): void {
   let composerTimer = 0;
   const remoteReplyAt = new Map<string, number>();
 
-  function composerWait(lines: ChatLine[], peerIds: string[], sessionId: string, activity: Record<string, PeerActivity>, coding = false): { locked: boolean; stop: boolean } {
+  function composerWait(lines: ChatLine[], peerIds: string[], sessionId: string, activity: Record<string, PeerActivity>): { locked: boolean; stop: boolean } {
     const pending = lines.find((line) => line.kind === "agent" && line.pending);
     const remoteIds = peerIds.filter((id) => {
       const item = activity[id];
@@ -1076,9 +1076,9 @@ function boot(host: HTMLElement): void {
     const since = stamps.length ? Math.min(...stamps) : 0;
     const age = since ? Date.now() - since : 0;
     const waiting = Boolean(pending || remoteIds.length);
-    const locked = waiting && (coding || age < REPLY_WAIT_MS);
+    const locked = waiting && age < REPLY_WAIT_MS;
     window.clearTimeout(composerTimer);
-    if (locked && since && !coding) {
+    if (locked && since) {
       composerTimer = window.setTimeout(() => {
         if (state) paint(state);
       }, Math.max(0, REPLY_WAIT_MS - age) + 40);
@@ -1195,7 +1195,7 @@ function boot(host: HTMLElement): void {
       hit?.scrollIntoView({ block: "center" });
     }
     const canSend = connected || Boolean(peer.token);
-    const waiting = composerWait(lines, [peer.peerId], sessionId, next.activity, Boolean(next.briefs[sessionId]?.coding));
+    const waiting = composerWait(lines, [peer.peerId], sessionId, next.activity);
     setComposer(waiting.locked, canSend, "Tin nhắn thường. Gõ @đối phương để gọi agent đó, @me là máy này…", waiting.stop || Boolean(agentHold(next, peer.peerId)));
     paintBrief(sessionId, next.briefs[sessionId], lines, connected, "");
     paintCodingButton(sessionId);
@@ -1299,7 +1299,7 @@ function boot(host: HTMLElement): void {
     }
     must<HTMLButtonElement>("#new-session").disabled = false;
     const others = group.members.filter((member) => member.peerId !== next.self.peerId).map((member) => member.peerId);
-    const waiting = composerWait(lines, others, sessionId, next.activity, Boolean(next.briefs[sessionId]?.coding));
+    const waiting = composerWait(lines, others, sessionId, next.activity);
     setComposer(waiting.locked, linked, "Nhắn trong nhóm. Gõ @ để gọi agent, @me là máy này…", waiting.stop || Boolean(group.turn && group.turn.left > 0));
     paintBrief(sessionId, next.briefs[sessionId], lines, linked, turnName);
     paintCodingButton(sessionId);

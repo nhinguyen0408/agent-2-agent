@@ -35,6 +35,7 @@ export type ReplyInput = {
   announceAccess?: boolean;
   room?: { title: string; members: string };
   together?: string;
+  replyTo?: { name: string; boss: boolean; called?: string[] };
   resume?: boolean;
   sessionId?: string;
   sessionTitle?: string;
@@ -420,17 +421,16 @@ function conversationPrompt(input: ReplyInput): string {
   const title = input.sessionTitle?.replace(/\s+/g, " ").trim();
   const body = [
     briefLead(input),
-    input.room
-      ? `Bạn là ${input.selfName}. Bạn đang trong nhóm "${input.room.title}" với ${input.room.members}. Đến lượt bạn. Các agent khác có lượt riêng, đừng nói hộ họ.`
-      : `Bạn là ${input.selfName}. Bạn đang nói chuyện trực tiếp với ${input.peerName} qua LAN Agents.`,
-    "Hãy trả lời tin nhắn cuối như một người trong cuộc hội thoại này.",
+    castLine(input),
     scopeBlock(input, true),
     accessPrompt(input.access),
     accessTurn(input),
     "Quy tắc:",
-    "- Nếu tin có @Tên, đó là máy được gọi. @me là agent của máy đã gửi tin đó. Hãy nói với đúng người đó.",
-    "- Trong trò chuyện 1-1, agent của máy gửi @me nói trước. Khi đến lượt bạn sau lời đó, hãy trả lời tiếp nội dung vừa nói.",
-    "- Chỉ viết nội dung sẽ gửi cho đối phương. Không mở đầu bằng việc nhắc lại các quy tắc này. Khối QUYỀN ở lượt đầu chủ đề là nội dung gửi đi.",
+    "- Mỗi máy có một người dùng và một agent riêng. Bạn chỉ là agent của máy mình, không phải người dùng đó và không phải một người chung của cả đoạn chat.",
+    "- @Tên gọi agent của máy mang tên đó. @me gọi agent của chính máy đã gửi tin.",
+    "- Chỉ gửi câu trả lời cho người vừa gọi mình. Hội thoại phía dưới vẫn là cả chủ đề, gồm lời của mọi agent. Hãy đọc và bám phần đó, không bỏ người không được tag.",
+    "- Không gắn @ vào câu trả lời chỉ để đáp lại. Chỉ @ khi cần gọi thêm một agent khác.",
+    "- Không mở đầu bằng việc nhắc lại các quy tắc này. Khối QUYỀN ở lượt đầu chủ đề là nội dung gửi đi.",
     input.coding
       ? input.room
         ? "- Viết mô tả ảnh hưởng bằng Markdown, đủ ý. Không giới hạn số từ. Chỉ làm đúng vai đã giao."
@@ -438,8 +438,8 @@ function conversationPrompt(input: ReplyInput): string {
       : "- Dùng cùng ngôn ngữ với tin nhắn cuối. Giữ câu trả lời trong khoảng 500 từ, trừ khi đang tóm tắt file hoặc đang viết khối KẾT QUẢ.",
     "- Bám các lượt trước. Không bịa việc máy kia đã làm.",
     input.confine
-      ? `- Nếu ${input.peerName} nhờ một việc trên máy này, chỉ làm trong thư mục làm việc đã đăng ký rồi nói kết quả. Lệnh và sửa file trong thư mục đó được tự chạy, không hỏi lại.`
-      : `- Nếu ${input.peerName} nhờ một việc trên máy này, hãy làm rồi nói kết quả. Lệnh và sửa file được tự chạy, không hỏi lại.`,
+      ? `- Nếu ${askerName(input)} nhờ một việc trên máy này, chỉ làm trong thư mục làm việc đã đăng ký rồi nói kết quả. Lệnh và sửa file trong thư mục đó được tự chạy, không hỏi lại.`
+      : `- Nếu ${askerName(input)} nhờ một việc trên máy này, hãy làm rồi nói kết quả. Lệnh và sửa file được tự chạy, không hỏi lại.`,
     input.coding
       ? input.room
         ? "- Chỉ sửa file và chạy lệnh khi việc đó thuộc đúng vai của mình. Không làm việc của vai khác. Không gửi file cho nhóm khi việc chưa xong."
@@ -454,7 +454,7 @@ function conversationPrompt(input: ReplyInput): string {
     "",
     briefTail(input),
     skillBlock(input),
-    `Hãy trả lời ${input.peerName}.`,
+    replyCue(input),
   ]
     .filter((part) => part !== "")
     .join("\n");
@@ -474,9 +474,9 @@ function continuePrompt(input: ReplyInput): string {
     skillBlock(input),
     input.coding
       ? input.room
-        ? `Hãy trả lời ${input.peerName}. Viết mô tả ảnh hưởng bằng Markdown, không giới hạn số từ. Chỉ làm đúng vai của mình.`
-        : `Hãy trả lời ${input.peerName}. Viết mô tả ảnh hưởng bằng Markdown, không giới hạn số từ. Chỉ sửa code trên máy này.`
-      : `Hãy trả lời ${input.peerName}. Chỉ viết nội dung sẽ gửi, cùng ngôn ngữ với tin trên, trong khoảng 500 từ.`,
+        ? `${replyCue(input)} Viết mô tả ảnh hưởng bằng Markdown, không giới hạn số từ. Chỉ làm đúng vai của mình.`
+        : `${replyCue(input)} Viết mô tả ảnh hưởng bằng Markdown, không giới hạn số từ. Chỉ sửa code trên máy này.`
+      : `${replyCue(input)} Chỉ viết nội dung sẽ gửi, cùng ngôn ngữ với tin trên, trong khoảng 500 từ.`,
   ]
     .filter((part) => part !== "")
     .join("\n");
@@ -560,6 +560,34 @@ function uniqueAttempts(rows: string[][]): string[][] {
     seen.add(key);
     return true;
   });
+}
+
+function castLine(input: ReplyInput): string {
+  const self = `${input.selfName} · agent`;
+  if (input.room) {
+    return `Bạn là ${self}, agent của ${input.selfName}. Nhóm "${input.room.title}" gồm các cặp người dùng và agent của họ: ${input.room.members}. Mỗi người chỉ nói với agent của mình hoặc với agent mà họ gọi. Bạn không phải ${input.selfName} và không phải người chung của cả nhóm.`;
+  }
+  return `Bạn là ${self}, agent của ${input.selfName}. Đoạn chat này có hai cặp: ${input.selfName} với ${self}, và ${input.peerName} với ${input.peerName} · agent. Bạn không phải ${input.selfName} và không phải người chung của cả đoạn chat.`;
+}
+
+function askerName(input: ReplyInput): string {
+  return input.replyTo?.name || input.peerName;
+}
+
+function replyCue(input: ReplyInput): string {
+  const target = input.replyTo?.name || input.peerName;
+  const called = input.replyTo?.called ?? [];
+  const scope = called.length
+    ? called.length === 1
+      ? "Câu này chỉ tag 1 agent, là bạn. Chỉ bạn gửi câu trả lời, không gửi cho những người khác. Vẫn dùng cả chủ đề và lời của mọi agent làm ngữ cảnh."
+      : `Câu này tag đúng ${called.length} agent: ${called.join(", ")}. Chỉ ${called.length} agent này trả lời. Bạn là một trong số đó. Đừng nói hộ agent khác. Vẫn dùng cả chủ đề và lời của mọi agent làm ngữ cảnh.`
+    : "";
+  const cue = input.replyTo?.boss && !input.brief?.last
+    ? `Hãy trả lời ${input.selfName}. Mở đầu bằng "Thưa sếp".`
+    : input.replyTo?.name.endsWith(" · agent")
+      ? `Hãy trả lời ${target}. Đây là một agent, không phải người dùng của agent đó.`
+      : `Hãy trả lời ${target}.`;
+  return scope ? `${scope} ${cue}` : cue;
 }
 
 function formatHistory(input: ReplyInput): string {
@@ -960,9 +988,12 @@ function killChild(child: ChildProcess): void {
 
 async function echoReply(input: ReplyInput): Promise<string> {
   const incoming = input.history[input.history.length - 1]?.text ?? "";
+  const from = input.replyTo?.name || input.peerName;
   const reply = input.brief?.last
     ? `KẾT QUẢ\n${input.brief.goal || input.brief.topic}`
-    : `Echo của ${input.selfName} đã nhận từ ${input.peerName}: ${incoming}`;
+    : input.replyTo?.boss
+      ? `Thưa sếp, echo của ${input.selfName} đã nhận: ${incoming}`
+      : `Echo của ${input.selfName} đã nhận từ ${from}: ${incoming}`;
   const size = 12;
   for (let i = 0; i < reply.length; i += size) {
     if (input.signal.aborted) throw abortError();
