@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import zlib from "node:zlib";
 import { accessAnnounce, accessPrompt, AccessDenied, defaultAccess, deniedRoles, toolBlob } from "../shared/access";
 import { DECISION_END, DECISION_HEADING, DECISION_MARK } from "../shared/brief";
 import { codingRoleDuty, type CodingRole } from "../shared/group";
@@ -63,11 +64,20 @@ export class CliResumeUnsupported extends Error {
   }
 }
 
+export const PROMPT_CACHE_DIR = "prompt-cache";
+
+export function promptCacheDir(dataDir: string): string {
+  return path.join(dataDir, PROMPT_CACHE_DIR);
+}
+
 export class AgentHost {
   private readonly running = new Map<string, ChildProcess>();
   private readonly resumeOff = new Set<string>();
 
-  constructor(private readonly settings: () => Settings) {}
+  constructor(
+    private readonly settings: () => Settings,
+    private readonly dataDir: string,
+  ) {}
 
   resumes(provider: ProviderId): boolean {
     return provider !== "echo" && !this.resumeOff.has(provider);
@@ -100,7 +110,7 @@ export class AgentHost {
   }
 
   private claudeCli(input: ReplyInput, settings: Settings): Promise<AgentResult> {
-    const prompt = oneLine(conversationPrompt(input));
+    const prompt = this.promptText(input);
     const resume = Boolean(input.resume && input.sessionId);
     const skills = mountedSkills(input, settings.workDir);
     const plain = [
@@ -121,7 +131,7 @@ export class AgentHost {
   }
 
   private cursorCli(input: ReplyInput, settings: Settings): Promise<AgentResult> {
-    const prompt = clip(conversationPrompt(input), 12000);
+    const prompt = this.promptText(input);
     const resume = Boolean(input.resume && input.sessionId);
     const skills = mountedSkills(input, settings.workDir);
     const confine = Boolean(input.confine);
@@ -138,7 +148,6 @@ export class AgentHost {
       "--output-format",
       "stream-json",
       "--stream-partial-output",
-      prompt,
     ];
     const open = (skillDir: boolean, stream: boolean) => [
       "-p",
@@ -148,7 +157,6 @@ export class AgentHost {
       ...(skillDir ? added : []),
       "--force",
       ...(stream ? ["--output-format", "stream-json", "--stream-partial-output"] : []),
-      prompt,
     ];
     const attempts = uniqueAttempts(
       confine
@@ -156,9 +164,9 @@ export class AgentHost {
         : [
             open(true, true),
             open(false, true),
-            ["-p", "--trust", "--force", ...added, prompt],
-            ["-p", "--trust", "--force", prompt],
-            ["-p", "--trust", prompt],
+            ["-p", "--trust", "--force", ...added],
+            ["-p", "--trust", "--force"],
+            ["-p", "--trust"],
           ],
     );
     return this.runCli(input, {
@@ -168,24 +176,25 @@ export class AgentHost {
       session: { id: input.sessionId || "", resume, kind: "cursor" },
       attempts,
       confine,
+      stdin: prompt,
     });
   }
 
   private codexCli(input: ReplyInput, settings: Settings): Promise<AgentResult> {
-    const prompt = oneLine(conversationPrompt(input), 4500);
+    const prompt = this.promptText(input);
     const cwd = settings.workDir;
     const resume = Boolean(input.resume && input.sessionId);
     const confine = Boolean(input.confine);
     const skills = mountedSkills(input, settings.workDir);
     const plain = confine
       ? [
-          ["exec", "--json", "--skip-git-repo-check", "--sandbox", "workspace-write", "--cd", cwd, prompt],
-          ["exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "--cd", cwd, prompt],
+          ["exec", "--json", "--skip-git-repo-check", "--sandbox", "workspace-write", "--cd", cwd],
+          ["exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "--cd", cwd],
         ]
       : [
-          ["exec", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "--cd", cwd, prompt],
-          ["exec", "--json", "--skip-git-repo-check", "--sandbox", "danger-full-access", "--cd", cwd, prompt],
-          ["exec", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", prompt],
+          ["exec", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "--cd", cwd],
+          ["exec", "--json", "--skip-git-repo-check", "--sandbox", "danger-full-access", "--cd", cwd],
+          ["exec", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox"],
         ];
     const attempts = skills.length ? [...plain.map((args) => withCodexDirs(args, skills)), ...plain] : plain;
     return this.runCli(input, {
@@ -195,21 +204,22 @@ export class AgentHost {
       session: { id: input.sessionId || "", resume, kind: "codex" },
       attempts,
       confine,
+      stdin: prompt,
     });
   }
 
   private geminiCli(input: ReplyInput, settings: Settings): Promise<AgentResult> {
-    const prompt = oneLine(conversationPrompt(input), 4500);
+    const prompt = this.promptText(input);
     const resume = Boolean(input.resume && input.sessionId);
     const skills = mountedSkills(input, settings.workDir);
     const attempts = uniqueAttempts([
-      geminiArgs(prompt, "stream-json", "approval", skills, true),
-      geminiArgs(prompt, "stream-json", "approval", [], true),
-      geminiArgs(prompt, "stream-json", "yolo", skills, true),
-      geminiArgs(prompt, "json", "approval", skills, true),
-      geminiArgs(prompt, "json", "yolo", [], false),
-      geminiArgs(prompt, "", "yolo", [], false),
-      ["-p", prompt],
+      geminiArgs("stream-json", "approval", skills, true),
+      geminiArgs("stream-json", "approval", [], true),
+      geminiArgs("stream-json", "yolo", skills, true),
+      geminiArgs("json", "approval", skills, true),
+      geminiArgs("json", "yolo", [], false),
+      geminiArgs("", "yolo", [], false),
+      [],
     ]);
     return this.runCli(input, {
       command: settings.geminiCommand || "gemini",
@@ -218,7 +228,16 @@ export class AgentHost {
       session: { id: input.sessionId || "", resume, kind: "gemini" },
       attempts,
       confine: Boolean(input.confine),
+      stdin: prompt,
     });
+  }
+
+  private promptText(input: ReplyInput): string {
+    const dir = promptCacheDir(this.dataDir);
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${Date.now()}-${randomUUID()}.gz`);
+    fs.writeFileSync(file, zlib.gzipSync(Buffer.from(conversationPrompt(input), "utf8"), { level: 9 }));
+    return zlib.gunzipSync(fs.readFileSync(file)).toString("utf8");
   }
 
   private runCli(
@@ -408,16 +427,6 @@ export class AgentHost {
   }
 }
 
-function oneLine(value: string, max = 4000): string {
-  return clip(value.replace(/\s+/g, " ").trim(), max);
-}
-
-function clip(value: string, max: number): string {
-  if (value.length <= max) return value;
-  const head = Math.floor(max * 0.45);
-  return `${value.slice(0, head)}\n...\n${value.slice(-(max - head - 5))}`;
-}
-
 function conversationPrompt(input: ReplyInput): string {
   if (input.summary) return summaryPrompt(input);
   if (input.resume) return continuePrompt(input);
@@ -568,8 +577,7 @@ function withAddedDirs(args: string[], dirs: string[]): string[] {
 
 function withCodexDirs(args: string[], dirs: string[]): string[] {
   if (!dirs.length) return args;
-  const prompt = args[args.length - 1];
-  return [...args.slice(0, -1), ...dirs.flatMap((dir) => ["--add-dir", dir]), prompt];
+  return [...args, ...dirs.flatMap((dir) => ["--add-dir", dir])];
 }
 
 function uniqueAttempts(rows: string[][]): string[][] {
@@ -645,13 +653,9 @@ function bindArgs(args: string[], session: SessionBind | undefined): string[] {
     return [args[0], args[1], ...flag, ...args.slice(2)];
   }
   if (!session.resume) return args;
-  const prompt = args[args.length - 1];
-  const head = args.slice(0, -1);
-  if (session.kind === "cursor") return [...head, `--resume=${session.id}`, prompt];
-  if (session.kind === "codex" && head[0] === "exec") return ["exec", "resume", ...head.slice(1), session.id, prompt];
-  if (session.kind === "gemini" && args[0] === "-p" && args.length >= 2) {
-    return [args[0], args[1], "--resume", session.id, ...args.slice(2)];
-  }
+  if (session.kind === "cursor") return [...args, `--resume=${session.id}`];
+  if (session.kind === "codex" && args[0] === "exec") return ["exec", "resume", ...args.slice(1), session.id];
+  if (session.kind === "gemini") return ["--resume", session.id, ...args];
   return args;
 }
 
@@ -926,13 +930,12 @@ function resultText(event: unknown): string {
 }
 
 function geminiArgs(
-  prompt: string,
   format: "stream-json" | "json" | "",
   mode: "approval" | "yolo" | "none",
   dirs: string[],
   trust: boolean,
 ): string[] {
-  const args = ["-p", prompt];
+  const args: string[] = [];
   if (format) args.push("--output-format", format);
   if (mode === "approval") args.push("--approval-mode", "yolo");
   if (mode === "yolo") args.push("--yolo");

@@ -177,7 +177,7 @@ export class AppCore {
     this.profile = profile;
     this.sessionAutoAccept = sessionAutoAccept;
     this.store = new Store(profile);
-    this.agents = new AgentHost(() => this.store.settings);
+    this.agents = new AgentHost(() => this.store.settings, path.dirname(this.store.file));
     this.noteClis(detectLocalClis(this.store.settings), false);
     for (const [peerId, trusted] of Object.entries(this.store.trusted)) {
       if (!trusted.host || !trusted.port) continue;
