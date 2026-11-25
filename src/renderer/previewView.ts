@@ -1,5 +1,8 @@
+import MarkdownIt from "markdown-it";
 import type { FileRef } from "../shared/types";
 import { previewKind } from "../shared/preview";
+
+const TEXT_LIMIT = 200_000;
 
 export function renderPreview(file: FileRef): HTMLElement {
   const box = document.createElement("div");
@@ -29,15 +32,26 @@ export function renderPreview(file: FileRef): HTMLElement {
     frame.title = file.name;
     frame.src = src;
     box.append(frame);
+  } else if (file.preview === "text") {
+    const pre = document.createElement("pre");
+    pre.className = "text-preview";
+    pre.textContent = "Đang mở…";
+    box.append(pre);
+    void fetchText(src)
+      .then((text) => {
+        pre.textContent = text.length > TEXT_LIMIT ? `${text.slice(0, TEXT_LIMIT)}\n…(đã cắt, file dài hơn ${TEXT_LIMIT} ký tự)` : text;
+      })
+      .catch(() => {
+        pre.textContent = "Không xem được nội dung.";
+      });
   } else {
     const article = document.createElement("article");
     article.className = "markdown";
     article.textContent = "Đang mở…";
     box.append(article);
-    void fetch(src)
-      .then((res) => (res.ok ? res.text() : Promise.reject(new Error("no"))))
+    void fetchText(src)
       .then((text) => {
-        article.innerHTML = renderMarkdown(text.slice(0, 200_000), file.path);
+        article.innerHTML = renderMarkdown(text.slice(0, TEXT_LIMIT), file.path);
       })
       .catch(() => {
         article.textContent = "Không xem được nội dung.";
@@ -54,57 +68,60 @@ export function previewSrc(filePath: string): string {
   return `lan-file://work/?p=${encodeURIComponent(filePath)}`;
 }
 
+async function fetchText(src: string): Promise<string> {
+  const res = await fetch(src);
+  if (!res.ok) throw new Error("no");
+  return (await res.text()).replace(/^﻿/, "");
+}
+
+// html: false — HTML thô trong Markdown (câu trả lời agent, file máy khác gửi) được hiện thành chữ, không chạy.
+// breaks: true — agent thường xuống dòng bằng một Enter, giữ nguyên như khi đọc.
+const md = new MarkdownIt({ html: false, linkify: true, breaks: true, typographer: false });
+
+let baseFile = "";
+
+md.renderer.rules.image = (tokens, index) => {
+  const token = tokens[index];
+  const alt = md.utils.escapeHtml(token.content || "");
+  const local = resolveRelative(baseFile, token.attrGet("src") ?? "");
+  if (!local || previewKind(local) !== "image") return alt;
+  return `<img alt="${alt}" src="${md.utils.escapeHtml(previewSrc(local))}">`;
+};
+
+md.renderer.rules.link_open = (tokens, index, options, _env, self) => {
+  const token = tokens[index];
+  const href = token.attrGet("href") ?? "";
+  if (/^https?:\/\//i.test(href)) {
+    token.attrSet("target", "_blank");
+    token.attrSet("rel", "noopener noreferrer");
+  } else {
+    // Link tương đối hoặc scheme lạ: giữ chữ, bỏ href để không điều hướng cửa sổ app.
+    token.attrs = (token.attrs ?? []).filter(([name]) => name !== "href");
+    token.attrSet("class", "md-dead-link");
+    token.attrSet("title", href);
+  }
+  return self.renderToken(tokens, index, options);
+};
+
 function renderMarkdown(source: string, filePath: string): string {
-  const fences: string[] = [];
-  const text = escapeHtml(source).replace(/```([\s\S]*?)```/g, (_match, code: string) => {
-    const html = `<pre><code>${code}</code></pre>`;
-    fences.push(html);
-    return `\u0000${fences.length - 1}\u0000`;
-  });
-  return text
-    .split(/\n{2,}/)
-    .map((block) => {
-      const trimmed = block.trim();
-      if (!trimmed) return "";
-      const fence = /^\u0000(\d+)\u0000$/.exec(trimmed);
-      if (fence) return fences[Number(fence[1])] ?? "";
-      const heading = /^(#{1,3})\s+(.+)$/.exec(trimmed);
-      if (heading) {
-        const level = heading[1].length;
-        return `<h${level}>${inlineMarkdown(heading[2], filePath)}</h${level}>`;
-      }
-      if (/^(?:[-*] |\d+\. )/m.test(trimmed)) {
-        const items = trimmed
-          .split("\n")
-          .map((item) => `<li>${inlineMarkdown(item.replace(/^(?:[-*] |\d+\. )/, ""), filePath)}</li>`)
-          .join("");
-        return `<ul>${items}</ul>`;
-      }
-      if (/^&gt; /m.test(trimmed)) {
-        return `<blockquote>${inlineMarkdown(trimmed.replace(/^&gt; /gm, ""), filePath)}</blockquote>`;
-      }
-      return `<p>${inlineMarkdown(trimmed, filePath).replace(/\n/g, "<br>")}</p>`;
-    })
-    .join("");
+  baseFile = filePath;
+  try {
+    return md.render(source);
+  } finally {
+    baseFile = "";
+  }
 }
 
-function inlineMarkdown(value: string, filePath: string): string {
-  return value
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_match, alt: string, src: string) => {
-      const local = resolveRelative(filePath, src);
-      if (!local || previewKind(local) !== "image") return alt;
-      return `<img alt="${alt}" src="${previewSrc(local)}">`;
-    })
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/\*([^*]+)\*/g, "<em>$1</em>");
-}
-
-function resolveRelative(baseFile: string, rel: string): string | null {
-  if (!baseFile.trim() || /^[a-z]+:/i.test(rel) || rel.startsWith("\\\\") || rel.startsWith("/")) return null;
-  const parts = baseFile.replace(/[/\\][^/\\]*$/, "").split(/[/\\]/);
-  for (const bit of rel.split(/[/\\]/)) {
+function resolveRelative(base: string, rel: string): string | null {
+  if (!base.trim() || /^[a-z]+:/i.test(rel) || rel.startsWith("\\\\") || rel.startsWith("/")) return null;
+  const parts = base.replace(/[/\\][^/\\]*$/, "").split(/[/\\]/);
+  let decoded = rel;
+  try {
+    decoded = decodeURI(rel);
+  } catch {
+    return null;
+  }
+  for (const bit of decoded.split(/[/\\]/)) {
     if (!bit || bit === ".") continue;
     if (bit === "..") {
       if (parts.length <= 1) return null;
@@ -114,8 +131,4 @@ function resolveRelative(baseFile: string, rel: string): string | null {
     parts.push(bit);
   }
   return parts.join("\\");
-}
-
-function escapeHtml(value: string): string {
-  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }

@@ -15,10 +15,20 @@ import {
   CODING_TURN_MAX,
   clampTurnLimit,
   codingNeed,
+  decisionBlocks,
+  decisionSection,
   emptyBrief,
+  hasDecisionSection,
+  reportFileName,
+  reportNumber,
   resultText,
+  runReportMarkdown,
+  runStatusText,
   sanitizeBrief,
+  TOPIC_QUEUE_MAX,
+  type DecisionEntry,
   type ProjectBrief,
+  type RunStatus,
 } from "../shared/brief";
 import {
   GROUP_MAX,
@@ -77,6 +87,17 @@ import { fileRef, type FileRef } from "../shared/preview";
 import { bearer, listen, readBody, readJson, remoteIp, sendJson } from "./httpUtil";
 import { Store, sanitizeSettings } from "./store";
 
+type BriefRun = {
+  sessionId: string;
+  startedAt: number;
+  before: Set<string>;
+  topic: string;
+  goal: string;
+  coding: boolean;
+  baseLimit: number;
+};
+
+const RUN_SETTLE_MS = 1500;
 const MAX_LINES = 200;
 const SEEN_LIMIT = 500;
 const DIALOGUE_CAP = 8;
@@ -113,6 +134,7 @@ export class AppCore {
   private readonly tails = new Map<string, Promise<void>>();
   private readonly aborts = new Map<string, AbortController>();
   private readonly codingFileStamp = new Map<string, number>();
+  private readonly runs = new Map<string, BriefRun>();
   private readonly codingWatch = new CodingWatch();
   private readonly codingPending = new Map<string, CodingStep>();
   private readonly codingSent = new Map<string, string>();
@@ -290,6 +312,7 @@ export class AppCore {
       unreadSessions: [...this.unread],
       transcripts: this.store.transcripts,
       briefs: this.viewBriefs(),
+      queues: Object.fromEntries(Object.entries(this.store.topicQueues).map(([sessionId, queue]) => [sessionId, queue.items])),
       groups: this.store.groups.map((room) => ({
         ...room,
         members: room.members.map((member) => this.memberRecord(member)),
@@ -613,10 +636,12 @@ export class AppCore {
     return this.snapshot();
   }
 
-  async startBrief(peerId: string): Promise<AppState> {
-    if (parseGroupKey(peerId)) return this.startGroupBrief(peerId);
-    const sessionId = this.ensureSession(peerId);
+  async startBrief(peerId: string, wanted = ""): Promise<AppState> {
+    if (parseGroupKey(peerId)) return this.startGroupBrief(peerId, wanted);
+    const known = Boolean(wanted && (this.store.sessions[peerId] ?? []).some((session) => session.id === wanted));
+    const sessionId = known ? wanted : this.ensureSession(peerId);
     const brief = this.ensureBrief(sessionId);
+    if (!brief.running && !brief.topic.trim()) this.takeQueued(peerId, sessionId);
     if (!brief.topic.trim()) {
       this.system(peerId, "Hãy nhập chủ đề trước khi bắt đầu.");
       return this.snapshot();
@@ -2527,6 +2552,7 @@ export class AppCore {
     room.turn = null;
     this.store.transcripts[sessionId] = [];
     delete this.store.briefs[sessionId];
+    this.forgetRun(sessionId);
     this.clearCli(sessionId);
     if (host) {
       this.relay(room, "group-clear", { groupId: room.id, sessionId });
@@ -3164,11 +3190,13 @@ export class AppCore {
     this.dispatchGroup(room, wire);
   }
 
-  private async startGroupBrief(key: string): Promise<AppState> {
+  private async startGroupBrief(key: string, wanted = ""): Promise<AppState> {
     const room = this.roomFromKey(key);
     if (!room) return this.snapshot();
-    const sessionId = this.viewedGroupSession(room);
+    const known = Boolean(wanted && (this.store.sessions[key] ?? []).some((session) => session.id === wanted));
+    const sessionId = known ? wanted : this.viewedGroupSession(room);
     const brief = this.ensureBrief(sessionId);
+    if (!brief.running && !brief.topic.trim()) this.takeQueued(key, sessionId);
     if (!brief.topic.trim()) {
       this.groupNote(room, "Hãy nhập chủ đề trước khi bắt đầu.", false);
       return this.snapshot();
@@ -3607,6 +3635,7 @@ export class AppCore {
     if (room.sessionId) {
       this.store.transcripts[room.sessionId] = [];
       delete this.store.briefs[room.sessionId];
+      this.forgetRun(room.sessionId);
       this.clearCli(room.sessionId);
     }
     this.groupNote(room, "Máy tạo nhóm đã xóa hội thoại.", false);
@@ -3980,6 +4009,7 @@ export class AppCore {
     this.store.sessions[peerId] = (this.store.sessions[peerId] ?? []).filter((session) => session.id !== sessionId);
     delete this.store.transcripts[sessionId];
     delete this.store.briefs[sessionId];
+    this.forgetRun(sessionId);
     this.unread.delete(sessionId);
     if (this.store.openSessions[peerId] === sessionId) delete this.store.openSessions[peerId];
   }
@@ -4303,6 +4333,238 @@ export class AppCore {
     return "";
   }
 
+  queueTopic(peerKey: string, topic: string, goal: string): AppState {
+    const sessionId = this.queueSession(peerKey);
+    const clean = topic.trim().slice(0, BRIEF_TOPIC_CAP);
+    if (!sessionId || !clean) return this.snapshot();
+    const queue = this.store.topicQueues[sessionId] ?? { peerKey, items: [] };
+    if (queue.items.length >= TOPIC_QUEUE_MAX) {
+      this.runNote(peerKey, sessionId, `Hàng đợi chỉ giữ ${TOPIC_QUEUE_MAX} chủ đề.`);
+      return this.snapshot();
+    }
+    queue.peerKey = peerKey;
+    queue.items.push({ id: randomUUID(), topic: clean, goal: goal.trim().slice(0, BRIEF_GOAL_CAP) });
+    this.store.topicQueues[sessionId] = queue;
+    this.scheduleSave();
+    this.pushNow();
+    return this.snapshot();
+  }
+
+  dropTopic(peerKey: string, id: string): AppState {
+    const sessionId = this.queueSession(peerKey);
+    const queue = sessionId ? this.store.topicQueues[sessionId] : undefined;
+    if (!queue) return this.snapshot();
+    queue.items = queue.items.filter((item) => item.id !== id);
+    if (!queue.items.length) delete this.store.topicQueues[sessionId];
+    this.scheduleSave();
+    this.pushNow();
+    return this.snapshot();
+  }
+
+  private queueSession(peerKey: string): string {
+    if (parseGroupKey(peerKey)) {
+      const room = this.roomFromKey(peerKey);
+      return room ? this.viewedGroupSession(room) : "";
+    }
+    return this.ensureSession(peerKey);
+  }
+
+  private takeQueued(peerKey: string, sessionId: string): boolean {
+    const queue = this.store.topicQueues[sessionId];
+    const next = queue?.items.shift();
+    if (!queue || !next) return false;
+    if (!queue.items.length) delete this.store.topicQueues[sessionId];
+    const brief = this.ensureBrief(sessionId);
+    brief.topic = next.topic;
+    brief.goal = next.goal;
+    this.runNote(peerKey, sessionId, `Lấy chủ đề kế tiếp trong hàng đợi: ${next.topic}`);
+    this.scheduleSave();
+    return true;
+  }
+
+  private forgetRun(sessionId: string): void {
+    this.runs.delete(sessionId);
+    delete this.store.topicQueues[sessionId];
+  }
+
+  // Theo dõi mọi chủ đề đang chạy. Khi một chủ đề dừng (xong, hết lượt hoặc bị dừng),
+  // chờ một nhịp cho dòng cuối và ket-qua.md về tới máy, rồi ghi báo cáo lần chạy.
+  private watchRuns(): void {
+    for (const [sessionId, brief] of Object.entries(this.store.briefs)) {
+      const run = this.runs.get(sessionId);
+      if (brief.running && brief.topic.trim()) {
+        if (!run) {
+          this.runs.set(sessionId, {
+            sessionId,
+            startedAt: Date.now(),
+            before: new Set((this.store.transcripts[sessionId] ?? []).map((line) => line.id)),
+            topic: brief.topic,
+            goal: brief.goal,
+            coding: brief.coding,
+            baseLimit: brief.turnLimit,
+          });
+        }
+        continue;
+      }
+      if (!run) continue;
+      this.runs.delete(sessionId);
+      setTimeout(() => {
+        this.closeRun(run).catch((err: unknown) => this.noteError("ghi báo cáo lần chạy chủ đề", err));
+      }, RUN_SETTLE_MS);
+    }
+    for (const sessionId of this.runs.keys()) {
+      if (!this.store.briefs[sessionId]) this.runs.delete(sessionId);
+    }
+  }
+
+  private async closeRun(run: BriefRun): Promise<void> {
+    const brief = this.store.briefs[run.sessionId];
+    if (!brief) return;
+    if (brief.running) {
+      if (!this.runs.has(run.sessionId)) this.runs.set(run.sessionId, run);
+      return;
+    }
+    const peerKey = this.sessionOwner(run.sessionId);
+    const lines = (this.store.transcripts[run.sessionId] ?? []).filter((line) => !run.before.has(line.id));
+    const replies = lines.filter((line) => line.kind === "agent" && !line.pending && line.text.trim());
+    if (!peerKey || !replies.length) return;
+    const final = [...replies].reverse().find((line) => resultText(line.text));
+    const status: RunStatus = final ? "done" : brief.turnsUsed >= brief.turnLimit ? "limit" : "stopped";
+    const room = this.roomFromKey(peerKey);
+    const roleOf = (peerId: string) => {
+      const role = codingRole(room?.members.find((member) => member.peerId === peerId)?.role);
+      return role ? codingRoleLabel(role) : "";
+    };
+    const folder = briefFolder(this.store.settings.workDir, run.sessionId);
+    const result = final ? await this.runResult(folder, run, final.text) : "";
+    const decisions = run.coding && !hasDecisionSection(result) ? decisionSection(this.collectDecisions(replies, roleOf)) : "";
+    const agents = [...new Set(replies.map((line) => {
+      const role = roleOf(line.fromPeerId);
+      return role ? `${line.fromName} (${role})` : line.fromName;
+    }))].join(", ");
+    const waiting = this.store.topicQueues[run.sessionId]?.items ?? [];
+    const next = !waiting.length
+      ? ""
+      : status === "done"
+        ? `tự chạy tiếp chủ đề "${waiting[0].topic}", còn ${waiting.length} chủ đề chờ`
+        : `tạm dừng, còn ${waiting.length} chủ đề chờ`;
+    await fs.promises.mkdir(folder, { recursive: true });
+    const number = Math.max(0, ...fs.readdirSync(folder).map(reportNumber)) + 1;
+    const name = reportFileName(number);
+    const endedAt = Date.now() - RUN_SETTLE_MS;
+    const markdown = runReportMarkdown({
+      number,
+      topic: run.topic,
+      goal: run.goal,
+      coding: run.coding,
+      status,
+      needTurns: brief.needTurns,
+      turnsUsed: brief.turnsUsed,
+      turnLimit: brief.turnLimit,
+      startedAt: new Date(run.startedAt).toLocaleString("vi-VN"),
+      endedAt: new Date(endedAt).toLocaleString("vi-VN"),
+      minutes: Math.round((endedAt - run.startedAt) / 60_000),
+      agents,
+      result,
+      lastReply: final ? "" : clipLog(replies[replies.length - 1]?.text ?? "", 6000),
+      decisions,
+      next,
+    });
+    const full = await saveExact(folder, name, Buffer.from(markdown, "utf8"));
+    const preview = fileRef(full);
+    if (preview) allowPreview(full);
+    this.runNote(peerKey, run.sessionId, `Đã ghi báo cáo lần chạy ${String(number).padStart(2, "0")} (${runStatusText(status, brief.needTurns)}): ${name}`, preview);
+    if (!waiting.length) return;
+    if (status !== "done") {
+      this.runNote(peerKey, run.sessionId, `Hàng đợi tạm dừng vì chủ đề này chưa có KẾT QUẢ. Bấm Gia hạn để làm tiếp, hoặc bấm Chạy chủ đề kế tiếp để bỏ qua.`);
+      return;
+    }
+    setTimeout(() => {
+      this.advanceQueue(peerKey, run).catch((err: unknown) => this.noteError("chạy chủ đề kế tiếp", err));
+    }, 1000);
+  }
+
+  private async runResult(folder: string, run: BriefRun, finalText: string): Promise<string> {
+    const full = path.join(folder, CODING_RESULT_FILE);
+    try {
+      const stat = await fs.promises.stat(full);
+      if (stat.size > 0 && stat.mtimeMs >= run.startedAt - 1000) {
+        return (await readFileLimited(full, 200_000)).toString("utf8");
+      }
+    } catch {
+      // Chưa có ket-qua.md trên máy này: dùng khối KẾT QUẢ trong hội thoại.
+    }
+    return resultText(finalText);
+  }
+
+  private async advanceQueue(peerKey: string, run: BriefRun): Promise<void> {
+    const brief = this.store.briefs[run.sessionId];
+    if (!brief || brief.running || !this.store.topicQueues[run.sessionId]?.items.length) return;
+    brief.turnLimit = run.baseLimit;
+    brief.coding = run.coding;
+    this.takeQueued(peerKey, run.sessionId);
+    await this.startBrief(peerKey, run.sessionId);
+    if (!this.store.briefs[run.sessionId]?.running) {
+      this.runNote(peerKey, run.sessionId, "Chưa tự chạy được chủ đề kế tiếp. Kiểm tra kết nối rồi bấm Bắt đầu.");
+    }
+  }
+
+  private sessionOwner(sessionId: string): string {
+    for (const [key, list] of Object.entries(this.store.sessions)) {
+      if (list.some((session) => session.id === sessionId)) return key;
+    }
+    return this.store.topicQueues[sessionId]?.peerKey ?? "";
+  }
+
+  private runNote(peerKey: string, sessionId: string, text: string, file?: ChatLine["file"] | null): void {
+    const room = this.roomFromKey(peerKey);
+    if (room) {
+      const line = this.groupNote(room, text, false, sessionId);
+      if (file) line.file = file;
+    } else {
+      const line = this.makeLine(peerKey, this.store.peerId, this.store.settings.name, "system", text);
+      if (file) line.file = file;
+      this.appendLine(sessionId, line);
+    }
+    this.pushNow();
+  }
+
+  private collectDecisions(lines: ChatLine[], roleOf?: (peerId: string) => string, extra?: { who: string; text: string }): DecisionEntry[] {
+    const seen = new Set<string>();
+    const entries: DecisionEntry[] = [];
+    const label = (peerId: string, name: string) => {
+      const role = roleOf?.(peerId) ?? "";
+      return role ? `${name} · ${role}` : name;
+    };
+    const collect = (who: string, text: string) => {
+      for (const block of decisionBlocks(text)) {
+        const key = block.replace(/\s+/g, " ").toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        entries.push({ who, text: block });
+      }
+    };
+    for (const line of lines) {
+      if (line.kind !== "agent" || line.pending) continue;
+      collect(label(line.fromPeerId, line.fromName || "Agent"), line.text);
+    }
+    if (extra) collect(label(this.store.peerId, extra.who), extra.text);
+    return entries;
+  }
+
+  private withDecisions(sessionId: string, data: Buffer, finalText: string, roleOf?: (peerId: string) => string): Buffer {
+    const markdown = data.toString("utf8");
+    if (hasDecisionSection(markdown)) return data;
+    const section = decisionSection(this.decisionEntries(sessionId, finalText, roleOf));
+    return Buffer.from(`${markdown.trimEnd()}\n\n${section}\n`, "utf8");
+  }
+
+  private decisionEntries(sessionId: string, finalText: string, roleOf?: (peerId: string) => string): DecisionEntry[] {
+    const since = this.store.briefs[sessionId]?.codingSince || 0;
+    const lines = (this.store.transcripts[sessionId] ?? []).filter((line) => line.createdAt >= since);
+    return this.collectDecisions(lines, roleOf, { who: this.store.settings.name, text: finalText });
+  }
+
   private async publishPairCodingResult(peerId: string, sessionId: string, text: string): Promise<void> {
     const body = resultText(text);
     if (!body) return;
@@ -4317,10 +4579,8 @@ export class AppCore {
         if (stat.size > 0 && stat.mtimeMs > since) data = await readFileLimited(full, MAX_FILE_BYTES);
       }
       this.codingFileStamp.delete(sessionId);
-      if (!data) {
-        data = Buffer.from(body, "utf8");
-        await saveExact(folder, CODING_RESULT_FILE, data);
-      }
+      data = this.withDecisions(sessionId, data ?? Buffer.from(body, "utf8"), text);
+      await saveExact(folder, CODING_RESULT_FILE, data);
       if (fileRef(full)) allowPreview(full);
       const entry = { name: CODING_RESULT_FILE, kind: "markdown" as const, excerpt: discussExcerpt(CODING_RESULT_FILE, data) };
       brief.files = brief.files.filter((file) => file.name !== CODING_RESULT_FILE);
@@ -4351,10 +4611,11 @@ export class AppCore {
         if (stat.size > 0 && stat.mtimeMs > since) data = await readFileLimited(full, MAX_FILE_BYTES);
       }
       this.codingFileStamp.delete(sessionId);
-      if (!data) {
-        data = Buffer.from(body, "utf8");
-        await saveExact(folder, CODING_RESULT_FILE, data);
-      }
+      data = this.withDecisions(sessionId, data ?? Buffer.from(body, "utf8"), text, (peerId) => {
+        const role = codingRole(room.members.find((member) => member.peerId === peerId)?.role);
+        return role ? codingRoleLabel(role) : "";
+      });
+      await saveExact(folder, CODING_RESULT_FILE, data);
       if (fileRef(full)) allowPreview(full);
       const entry = { name: CODING_RESULT_FILE, kind: "markdown" as const, excerpt: discussExcerpt(CODING_RESULT_FILE, data) };
       brief.files = brief.files.filter((file) => file.name !== CODING_RESULT_FILE);
@@ -4370,7 +4631,7 @@ export class AppCore {
         this.sendTo(room.hostId, "group-result", {
           groupId: room.id,
           sessionId,
-          text: body.slice(0, 200_000),
+          text: data.toString("utf8").slice(0, 200_000),
         });
       }
       const others = room.members.some((member) => member.peerId !== this.store.peerId);
@@ -4465,6 +4726,7 @@ export class AppCore {
     if (this.pushTimer) return;
     this.pushTimer = setTimeout(() => {
       this.pushTimer = null;
+      this.watchRuns();
       this.onChange();
     }, 50);
   }
@@ -4474,6 +4736,7 @@ export class AppCore {
       clearTimeout(this.pushTimer);
       this.pushTimer = null;
     }
+    this.watchRuns();
     this.onChange();
   }
 

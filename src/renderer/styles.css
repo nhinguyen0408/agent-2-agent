@@ -1382,6 +1382,48 @@ body.preview-app .preview-fill > audio { width: min(100%, 36rem); margin: auto; 
   border-radius: 8px;
 }
 
+.preview .text-preview {
+  margin: 0;
+  padding: 0.7rem 0.85rem;
+  font: 12px/1.5 Consolas, "Cascadia Mono", monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  tab-size: 4;
+}
+
+.line .preview:not(.agent-md) .text-preview {
+  max-height: 220px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.markdown table {
+  border-collapse: collapse;
+  margin: 0.5rem 0;
+  font-size: 0.95em;
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.markdown th,
+.markdown td {
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  padding: 4px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown th { background: rgba(0, 0, 0, 0.04); }
+
+.markdown :is(h4, h5, h6) { font-size: 1em; margin: 0.6rem 0 0.3rem; }
+
+.markdown hr { border: 0; border-top: 1px solid rgba(0, 0, 0, 0.15); margin: 0.6rem 0; }
+
+.markdown ul ul, .markdown ol ol, .markdown ul ol, .markdown ol ul { margin: 0.2rem 0; }
+
+.markdown .md-dead-link { text-decoration: underline dotted; cursor: help; }
+
 .line .preview { margin-top: 4px; }
 
 .attach-chip, .attach-note {
@@ -1530,6 +1572,58 @@ body.preview-app .preview-fill > audio { width: min(100%, 36rem); margin: auto; 
 }
 
 .brief-files { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.brief-queue {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.brief-queue-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.brief-queue-hint {
+  margin: 0;
+  font-size: 11px;
+  opacity: 0.75;
+}
+
+.queue-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 20px;
+  font-size: 12px;
+}
+
+.queue-list:empty { display: none; }
+
+.queue-item > span {
+  display: inline-block;
+  max-width: calc(100% - 44px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.queue-item > button {
+  margin-left: 6px;
+  font-size: 11px;
+}
+
+.queue-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
 
 .brief-file {
   display: flex;

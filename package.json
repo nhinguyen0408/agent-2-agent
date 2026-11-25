@@ -22,10 +22,12 @@
     "socket.io-client": "^4.8.1"
   },
   "devDependencies": {
+    "@types/markdown-it": "^14.2.0",
     "@types/node": "^22.19.0",
     "electron": "^33.4.11",
     "electron-builder": "^25.1.8",
     "esbuild": "^0.25.11",
+    "markdown-it": "^14.3.3",
     "typescript": "^5.9.3",
     "ws": "^8.18.3"
   },

@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quy trình làm việc nhóm với LAN Agents</title>
+<style>
+  :root {
+    --bg: #f7f7f5;
+    --card: #ffffff;
+    --text: #1d1d1b;
+    --muted: #65655f;
+    --line: #e3e2dc;
+    --human: #b4541a;
+    --human-bg: #fbeee4;
+    --agent: #2457a6;
+    --agent-bg: #e7eefa;
+    --gate: #8a6d00;
+    --gate-bg: #fff4c7;
+    --ok: #237a45;
+    --ok-bg: #e3f3e8;
+    --no: #a12b2b;
+    --no-bg: #f9e5e5;
+    --part: #6b5a00;
+    --part-bg: #f6efc9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #171716;
+      --card: #222220;
+      --text: #ecebe6;
+      --muted: #a3a29b;
+      --line: #383834;
+      --human: #f0a070;
+      --human-bg: #3a2618;
+      --agent: #8fb4f0;
+      --agent-bg: #1b2a42;
+      --gate: #f0d060;
+      --gate-bg: #3a3214;
+      --ok: #7fd49c;
+      --ok-bg: #173323;
+      --no: #f08f8f;
+      --no-bg: #3d1c1c;
+      --part: #e8d27a;
+      --part-bg: #35301a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.6 "Segoe UI", system-ui, -apple-system, sans-serif;
+  }
+  main { max-width: 1040px; margin: 0 auto; padding: 40px 20px 80px; }
+  h1 { font-size: 2rem; line-height: 1.25; margin: 0 0 8px; }
+  h2 { font-size: 1.35rem; margin: 56px 0 16px; padding-top: 8px; border-top: 1px solid var(--line); }
+  h3 { font-size: 1.05rem; margin: 0 0 6px; }
+  p { margin: 0 0 12px; }
+  .lead { color: var(--muted); font-size: 1.05rem; max-width: 760px; }
+  .notice {
+    margin: 20px 0 0;
+    padding: 12px 16px;
+    border-left: 4px solid var(--gate);
+    background: var(--gate-bg);
+    border-radius: 6px;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 16px 18px;
+  }
+  .grid { display: grid; gap: 14px; }
+  .grid-2 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .grid-4 { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+  .tag {
+    display: inline-block;
+    font-size: 0.78rem;
+    font-weight: 600;
+    padding: 1px 8px;
+    border-radius: 99px;
+    white-space: nowrap;
+  }
+  .tag.human { color: var(--human); background: var(--human-bg); }
+  .tag.agent { color: var(--agent); background: var(--agent-bg); }
+  .tag.gate { color: var(--gate); background: var(--gate-bg); }
+  .tag.ok { color: var(--ok); background: var(--ok-bg); }
+  .tag.no { color: var(--no); background: var(--no-bg); }
+  .tag.part { color: var(--part); background: var(--part-bg); }
+  .muted { color: var(--muted); }
+  code {
+    font-family: Consolas, "Cascadia Mono", monospace;
+    font-size: 0.9em;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 0 4px;
+  }
+  pre {
+    font-family: Consolas, "Cascadia Mono", monospace;
+    font-size: 0.88rem;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    margin: 10px 0 0;
+  }
+
+  /* Nguyên tắc */
+  .principle { display: flex; gap: 14px; align-items: stretch; flex-wrap: wrap; margin-top: 24px; }
+  .principle .card { flex: 1 1 260px; }
+  .principle .big { font-size: 1.25rem; font-weight: 600; margin-bottom: 4px; }
+  .principle .human .big { color: var(--human); }
+  .principle .agent .big { color: var(--agent); }
+
+  /* Máy trong nhóm */
+  .machine .who { font-weight: 600; }
+  .machine .cli { color: var(--muted); font-size: 0.9rem; }
+  .machine ul { margin: 8px 0 0; padding-left: 18px; font-size: 0.92rem; }
+
+  /* Dòng thời gian */
+  .legend { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 18px; font-size: 0.9rem; }
+  .timeline { position: relative; padding-left: 52px; }
+  .timeline::before {
+    content: "";
+    position: absolute;
+    left: 19px;
+    top: 8px;
+    bottom: 8px;
+    width: 2px;
+    background: var(--line);
+  }
+  .step { position: relative; margin-bottom: 14px; }
+  .step .dot {
+    position: absolute;
+    left: -52px;
+    top: 12px;
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    font-weight: 700;
+    background: var(--card);
+    border: 2px solid var(--agent);
+    color: var(--agent);
+  }
+  .step.gate .dot { border-color: var(--gate); color: var(--gate); background: var(--gate-bg); }
+  .step.gate > details { border-color: var(--gate); box-shadow: 0 0 0 1px var(--gate) inset; }
+  details.card { padding: 0; }
+  details > summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 14px 18px;
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    flex-wrap: wrap;
+  }
+  details > summary::-webkit-details-marker { display: none; }
+  details > summary::after { content: "＋"; margin-left: auto; color: var(--muted); }
+  details[open] > summary::after { content: "－"; }
+  details > summary .title { font-weight: 600; font-size: 1.05rem; }
+  details > summary .short { flex-basis: 100%; color: var(--muted); font-size: 0.93rem; }
+  .step-body { padding: 0 18px 16px; border-top: 1px solid var(--line); padding-top: 12px; }
+  .step-body ul, .step-body ol { margin: 0 0 8px; padding-left: 20px; }
+  .tip {
+    margin-top: 10px;
+    padding: 8px 12px;
+    border-radius: 6px;
+    background: var(--gate-bg);
+    font-size: 0.93rem;
+  }
+
+  /* Sơ đồ phụ thuộc task */
+  .deps { display: grid; grid-template-columns: 1fr 1.2fr 1fr; gap: 18px; align-items: center; }
+  .deps .col { display: grid; gap: 10px; }
+  .deps .col-title { font-size: 0.82rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .task { border-radius: 8px; padding: 8px 12px; border: 1px solid var(--line); background: var(--card); font-size: 0.92rem; }
+  .task b { margin-right: 6px; }
+  .task.sa { border-left: 4px solid #8a5cc2; }
+  .task.be { border-left: 4px solid #2f8f6a; }
+  .task.fe { border-left: 4px solid #d07a1c; }
+  .task.te { border-left: 4px solid #c23f6f; }
+  .arrow { text-align: center; color: var(--muted); font-size: 1.6rem; }
+  @media (max-width: 720px) {
+    .deps { grid-template-columns: 1fr; }
+    .arrow { transform: rotate(90deg); }
+  }
+
+  /* Làn song song */
+  .lanes { display: grid; gap: 10px; }
+  .lane { display: grid; grid-template-columns: 120px 1fr; gap: 10px; align-items: center; }
+  .lane .who { font-weight: 600; font-size: 0.92rem; }
+  .bars { display: grid; grid-template-columns: repeat(12, 1fr); gap: 4px; }
+  .bar { border-radius: 6px; padding: 6px 8px; font-size: 0.82rem; color: #fff; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .bar.sa { background: #8a5cc2; }
+  .bar.be { background: #2f8f6a; }
+  .bar.fe { background: #d07a1c; }
+  .bar.te { background: #c23f6f; }
+  .bar.gate { background: var(--gate-bg); color: var(--gate); border: 1px dashed var(--gate); }
+  .bar.ghost { background: transparent; }
+  @media (max-width: 720px) {
+    .lane { grid-template-columns: 1fr; }
+  }
+
+  /* Bảng */
+  table { width: 100%; border-collapse: collapse; font-size: 0.94rem; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 0.82rem; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
+  .table-wrap { overflow-x: auto; }
+
+  /* Nên / không nên */
+  .dos h3 { color: var(--ok); }
+  .donts h3 { color: var(--no); }
+  .dos ul, .donts ul { margin: 0; padding-left: 0; list-style: none; }
+  .dos li, .donts li { padding: 7px 0 7px 28px; position: relative; border-bottom: 1px solid var(--line); }
+  .dos li:last-child, .donts li:last-child { border-bottom: 0; }
+  .dos li::before { content: "✓"; position: absolute; left: 4px; color: var(--ok); font-weight: 700; }
+  .donts li::before { content: "✕"; position: absolute; left: 4px; color: var(--no); font-weight: 700; }
+
+  /* Đo hiệu quả */
+  .metric { display: flex; gap: 12px; align-items: flex-start; }
+  .metric .n {
+    flex: none;
+    width: 30px; height: 30px;
+    border-radius: 50%;
+    display: grid; place-items: center;
+    background: var(--agent-bg); color: var(--agent); font-weight: 700; font-size: 0.9rem;
+  }
+
+  footer { margin-top: 56px; color: var(--muted); font-size: 0.88rem; }
+</style>
+</head>
+<body>
+<main>
+
+  <header>
+    <h1>Quy trình làm việc nhóm với LAN Agents</h1>
+    <p class="lead">Đi từ tài liệu BA tới code đã merge: nhiều agent trên nhiều máy làm việc, còn người chỉ duyệt ở ba điểm.</p>
+    <div class="notice">
+      <strong>Đây là quy trình đích.</strong> Quy trình cần 5 tính năng chưa có trong mã hiện tại. Xem <a href="#tinh-nang">Tính năng cần có</a> để biết phần nào đã có nền. Bản chữ đầy đủ nằm ở <code>docs/workflow.md</code>.
+    </div>
+  </header>
+
+  <section class="principle">
+    <div class="card human">
+      <div class="big">Người quyết định</div>
+      <p class="muted">Duyệt phạm vi, hợp đồng API và PR. Trả lời câu hỏi khi agent thiếu thông tin. Chỉ người được merge.</p>
+    </div>
+    <div class="card agent">
+      <div class="big">Agent thực thi</div>
+      <p class="muted">Đọc tài liệu, tách task, viết code, chạy test, review chéo, viết báo cáo. Agent của ai chạy trên máy người đó.</p>
+    </div>
+  </section>
+
+  <h2>Nhóm ví dụ: bốn người, bốn máy</h2>
+  <div class="grid grid-4">
+    <div class="card machine">
+      <div class="who">Tech lead · Máy 1</div>
+      <div class="cli">Claude · vai PM và SA</div>
+      <ul><li>Duyệt phạm vi</li><li>Duyệt kiến trúc</li><li>Duyệt hợp đồng API</li></ul>
+    </div>
+    <div class="card machine">
+      <div class="who">Dev BE · Máy 2</div>
+      <div class="cli">Claude · vai BE</div>
+      <ul><li>Duyệt hợp đồng API</li><li>Duyệt PR backend</li></ul>
+    </div>
+    <div class="card machine">
+      <div class="who">Dev FE · Máy 3</div>
+      <div class="cli">Cursor · vai FE</div>
+      <ul><li>Duyệt hợp đồng API</li><li>Duyệt PR frontend</li></ul>
+    </div>
+    <div class="card machine">
+      <div class="who">QA · Máy 4</div>
+      <div class="cli">Gemini · vai Tester và review chéo</div>
+      <ul><li>Duyệt kết quả kiểm thử</li></ul>
+    </div>
+  </div>
+  <p class="muted" style="margin-top:12px">Trước khi bắt đầu: repo có <code>CLAUDE.md</code> chung, mỗi máy trỏ thư mục làm việc vào repo và bật giới hạn trong thư mục làm việc, mỗi máy chỉ cấp quyền cần cho vai của mình, và có kênh Slack đã nối bot.</p>
+
+  <h2>Bảy bước, ví dụ tính năng “Quản lý đơn hàng”</h2>
+  <div class="legend">
+    <span class="tag human">Người</span>
+    <span class="tag agent">Agent</span>
+    <span class="tag gate">Điểm duyệt</span>
+    <span class="muted">Bấm vào từng bước để xem chi tiết.</span>
+  </div>
+
+  <div class="timeline">
+
+    <div class="step">
+      <div class="dot">1</div>
+      <details class="card">
+        <summary>
+          <span class="title">Khởi tạo</span>
+          <span class="tag human">Tech lead</span>
+          <span class="short">Tạo chủ đề từ Slack, gắn tài liệu BA, chọn mẫu quy trình.</span>
+        </summary>
+        <div class="step-body">
+          <pre>/lan new "Quản lý đơn hàng" --template feature --doc BA-don-hang.docx --team BE,FE,Tester</pre>
+          <p style="margin-top:10px">Bot tạo chủ đề theo mẫu <strong>Tính năng mới</strong>, mời các máy vào nhóm và gắn tài liệu BA.</p>
+        </div>
+      </details>
+    </div>
+
+    <div class="step">
+      <div class="dot">2</div>
+      <details class="card">
+        <summary>
+          <span class="title">Đọc tài liệu và hỏi lại</span>
+          <span class="tag agent">Agent PM</span>
+          <span class="tag human">BA / PO trả lời</span>
+          <span class="short">Agent liệt kê chỗ mơ hồ trong tài liệu BA. Người trả lời trên Slack.</span>
+        </summary>
+        <div class="step-body">
+          <p>Ví dụ câu hỏi: <em>Đơn bị hủy sau khi đã thanh toán thì hoàn tiền tự động hay thủ công?</em></p>
+          <p>Câu trả lời được ghi vào chủ đề để mọi agent cùng đọc.</p>
+          <div class="tip">Không bỏ bước này. Tài liệu BA mơ hồ là nguyên nhân phổ biến nhất khiến agent làm sai.</div>
+        </div>
+      </details>
+    </div>
+
+    <div class="step gate">
+      <div class="dot">3</div>
+      <details class="card">
+        <summary>
+          <span class="title">Tách task</span>
+          <span class="tag agent">Agent PM</span>
+          <span class="tag gate">Điểm duyệt 1 · Tech lead</span>
+          <span class="short">Agent tạo bảng task có phụ thuộc. Chưa duyệt thì không ai được code.</span>
+        </summary>
+        <div class="step-body">
+          <p>Tech lead kiểm tra phạm vi đã đúng chưa và task nào quá lớn, sửa rồi bấm <strong>Duyệt</strong>. Sơ đồ task nằm ở mục <a href="#task">Bảng task</a> bên dưới.</p>
+        </div>
+      </details>
+    </div>
+
+    <div class="step gate">
+      <div class="dot">4</div>
+      <details class="card">
+        <summary>
+          <span class="title">Hợp đồng API</span>
+          <span class="tag agent">Agent SA</span>
+          <span class="tag gate">Điểm duyệt 2 · Dev BE + Dev FE</span>
+          <span class="short">Agent viết <code>openapi.yaml</code> và schema. Duyệt xong thì hợp đồng bị khóa.</span>
+        </summary>
+        <div class="step-body">
+          <p>Muốn đổi hợp đồng sau khi khóa thì phải tạo yêu cầu thay đổi, và cả hai bên duyệt lại.</p>
+          <div class="tip">Đây là điểm duyệt quan trọng nhất: hợp đồng sai thì cả BE và FE cùng làm lại.</div>
+        </div>
+      </details>
+    </div>
+
+    <div class="step">
+      <div class="dot">5</div>
+      <details class="card">
+        <summary>
+          <span class="title">Làm song song</span>
+          <span class="tag agent">Agent BE</span>
+          <span class="tag agent">Agent FE</span>
+          <span class="short">Mỗi agent một nhánh, trên máy của mình. Người không cần ngồi xem.</span>
+        </summary>
+        <div class="step-body">
+          <ul>
+            <li>Agent BE trên máy 2, nhánh <code>feat/don-hang-be</code>: task #2 rồi #3, mỗi task một commit, chạy unit test trên máy thật.</li>
+            <li>Agent FE trên máy 3, nhánh <code>feat/don-hang-fe</code>: dựng mock từ hợp đồng, làm #4 và #5 cùng lúc với BE.</li>
+            <li>Nếu BE cần đổi API: agent BE gửi yêu cầu đổi hợp đồng, agent FE được báo, người duyệt như bước 4.</li>
+          </ul>
+          <p>Slack chỉ báo khi task xong, khi agent bị chặn, hoặc khi cần người duyệt. Xem <a href="#song-song">sơ đồ làm song song</a>.</p>
+        </div>
+      </details>
+    </div>
+
+    <div class="step gate">
+      <div class="dot">6</div>
+      <details class="card">
+        <summary>
+          <span class="title">PR và review</span>
+          <span class="tag agent">Agent review khác hãng</span>
+          <span class="tag gate">Điểm duyệt 3 · Dev BE / Dev FE</span>
+          <span class="short">Agent mở PR, model khác hãng review, CI chạy test, người duyệt và merge.</span>
+        </summary>
+        <div class="step-body">
+          <ol>
+            <li>Một agent khác hãng review, ví dụ Gemini review code Claude viết. Agent tác giả sửa theo comment.</li>
+            <li>CI chạy test. Test hỏng thì agent tự sửa, không chuyển cho người.</li>
+            <li>Người duyệt PR cuối cùng, comment trên diff, agent sửa theo.</li>
+            <li><strong>Chỉ người được merge.</strong></li>
+          </ol>
+        </div>
+      </details>
+    </div>
+
+    <div class="step">
+      <div class="dot">7</div>
+      <details class="card">
+        <summary>
+          <span class="title">Kiểm thử và chốt</span>
+          <span class="tag agent">Agent Tester</span>
+          <span class="tag agent">Agent PM</span>
+          <span class="short">Test theo từng tiêu chí chấp nhận, rồi viết báo cáo <code>KẾT QUẢ</code>.</span>
+        </summary>
+        <div class="step-body">
+          <p>Agent Tester viết test theo đúng từng tiêu chí chấp nhận trong tài liệu BA và chạy kiểm thử tích hợp trên máy 4. Khi mọi test đạt, agent PM viết báo cáo gồm:</p>
+          <ul>
+            <li>việc đã làm và các PR liên quan;</li>
+            <li>tiêu chí chấp nhận nào đã đạt;</li>
+            <li>quyết định đã chốt, lưu vào bộ nhớ dự án;</li>
+            <li>việc còn tồn.</li>
+          </ul>
+          <p>Báo cáo được gửi vào Slack và cập nhật ticket Jira.</p>
+        </div>
+      </details>
+    </div>
+
+  </div>
+
+  <h2 id="task">Bảng task sau bước 3</h2>
+  <div class="card">
+    <div class="deps">
+      <div class="col">
+        <div class="col-title">Làm trước</div>
+        <div class="task sa"><b>#1</b>SA · Schema và hợp đồng API</div>
+      </div>
+      <div class="col">
+        <div class="col-title">Song song, cần #1</div>
+        <div class="task be"><b>#2</b>BE · API tạo, sửa, hủy đơn</div>
+        <div class="task be"><b>#3</b>BE · Thanh toán và hoàn tiền</div>
+        <div class="task fe"><b>#4</b>FE · Danh sách và chi tiết đơn (mock)</div>
+        <div class="task fe"><b>#5</b>FE · Luồng hủy đơn (mock)</div>
+      </div>
+      <div class="col">
+        <div class="col-title">Cần #2 đến #5</div>
+        <div class="task te"><b>#6</b>Tester · Test theo tiêu chí chấp nhận</div>
+      </div>
+    </div>
+  </div>
+
+  <h2 id="song-song">Làm song song nhờ hợp đồng API</h2>
+  <p class="muted">Có hợp đồng đã khóa thì FE không phải đợi BE: FE dựng mock từ hợp đồng và làm cùng lúc. Sơ đồ chỉ minh họa thứ tự, không theo tỷ lệ thời gian thật.</p>
+  <div class="card lanes">
+    <div class="lane">
+      <div class="who">Agent SA</div>
+      <div class="bars">
+        <div class="bar sa" style="grid-column: 1 / span 2">#1 Hợp đồng</div>
+        <div class="bar gate" style="grid-column: 3 / span 1">Duyệt</div>
+      </div>
+    </div>
+    <div class="lane">
+      <div class="who">Agent BE</div>
+      <div class="bars">
+        <div class="bar be" style="grid-column: 4 / span 3">#2 API đơn</div>
+        <div class="bar be" style="grid-column: 7 / span 3">#3 Thanh toán</div>
+      </div>
+    </div>
+    <div class="lane">
+      <div class="who">Agent FE</div>
+      <div class="bars">
+        <div class="bar fe" style="grid-column: 4 / span 3">#4 Màn đơn</div>
+        <div class="bar fe" style="grid-column: 7 / span 2">#5 Hủy đơn</div>
+      </div>
+    </div>
+    <div class="lane">
+      <div class="who">Agent Tester</div>
+      <div class="bars">
+        <div class="bar te" style="grid-column: 10 / span 3">#6 Kiểm thử</div>
+      </div>
+    </div>
+  </div>
+
+  <h2>Thời gian của người</h2>
+  <p class="muted">Ước lượng cho một tính năng cỡ vừa. Chưa có số liệu đo thực tế. Thời gian của người dành cho quyết định và review, không phải để gõ code.</p>
+  <div class="card table-wrap">
+    <table>
+      <thead><tr><th>Bước</th><th>Người làm</th><th>Thời gian</th></tr></thead>
+      <tbody>
+        <tr><td>1. Khởi tạo</td><td>Tech lead</td><td>5 phút</td></tr>
+        <tr><td>2. Trả lời câu hỏi</td><td>BA hoặc PO</td><td>15–30 phút</td></tr>
+        <tr><td>3. Duyệt task <span class="tag gate">Duyệt 1</span></td><td>Tech lead</td><td>10–15 phút</td></tr>
+        <tr><td>4. Duyệt hợp đồng <span class="tag gate">Duyệt 2</span></td><td>Dev BE và dev FE</td><td>20–30 phút</td></tr>
+        <tr><td>6. Duyệt PR <span class="tag gate">Duyệt 3</span></td><td>Dev BE, dev FE</td><td>15–30 phút mỗi PR</td></tr>
+        <tr><td>7. Đọc báo cáo</td><td>Cả nhóm</td><td>10 phút</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Nên và không nên</h2>
+  <div class="grid grid-2">
+    <div class="card dos">
+      <h3>Nên</h3>
+      <ul>
+        <li>Tài liệu BA có tiêu chí chấp nhận đánh số, ví dụ <em>AC-1: Đơn chưa thanh toán được hủy không mất phí</em>.</li>
+        <li>Làm hợp đồng trước, code sau.</li>
+        <li>Chia task nhỏ: khoảng một PR, dưới 400 dòng thay đổi.</li>
+        <li>Để model khác hãng review nhau.</li>
+        <li>Đặt giới hạn lượt cho mỗi task để agent bế tắc thì dừng và hỏi.</li>
+        <li>Lưu quyết định vào bộ nhớ dự án sau mỗi chủ đề.</li>
+      </ul>
+    </div>
+    <div class="card donts">
+      <h3>Không nên</h3>
+      <ul>
+        <li>Đưa tài liệu BA sơ sài rồi để agent tự đoán.</li>
+        <li>Cho agent tự merge, hoặc bỏ điểm duyệt để chạy cho nhanh.</li>
+        <li>Để một chủ đề ôm cả một module lớn.</li>
+        <li>Ngồi xem từng lượt agent nói.</li>
+        <li>Cho hai agent sửa cùng một nhánh hoặc cùng một file.</li>
+      </ul>
+    </div>
+  </div>
+
+  <h2 id="tinh-nang">Tính năng cần có</h2>
+  <div class="card table-wrap">
+    <table>
+      <thead><tr><th>Tính năng</th><th>Bước</th><th>Trạng thái</th><th>Nền đã có trong mã</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Bảng task và agent điều phối</td><td>2, 3, 5</td><td><span class="tag part">Có nền</span></td>
+          <td>Nhóm tối đa 5 máy, vai PO/PM/BA/SA/BE/FE/Tester, xếp lượt bằng <code>TurnTicket</code>, gọi agent bằng @mention</td>
+        </tr>
+        <tr>
+          <td>Điểm duyệt của người</td><td>3, 4, 6</td><td><span class="tag no">Chưa có</span></td>
+          <td>Chỉ có nút Dừng và chặn quyền bằng regex</td>
+        </tr>
+        <tr>
+          <td>Hợp đồng API dùng chung</td><td>4, 5</td><td><span class="tag no">Chưa có</span></td>
+          <td>Chủ đề có file tham khảo, tối đa 8 file</td>
+        </tr>
+        <tr>
+          <td>Git và PR tự động</td><td>5, 6</td><td><span class="tag part">Có nền</span></td>
+          <td>Chế độ coding ghi lại từng bước sửa file và chạy lệnh</td>
+        </tr>
+        <tr>
+          <td>Bot Slack</td><td>1, 2, 5, 7</td><td><span class="tag part">Có nền</span></td>
+          <td>HTTP <code>POST /trigger</code> để gọi agent từ bên ngoài</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="muted" style="margin-top:12px"><span class="tag ok">Đã có</span> Chủ đề dự án, chế độ coding, dấu <code>KẾT QUẢ</code> / <code>CẦN THÊM: N</code> và file <code>ket-qua.md</code>.</p>
+
+  <h2>Đo hiệu quả</h2>
+  <p class="muted">Sau ba đến năm tính năng, so với cách làm cũ. Nếu các số này không tốt hơn thì chưa nên mở rộng cho nhiều nhóm.</p>
+  <div class="grid grid-2">
+    <div class="card metric"><div class="n">1</div><div>Thời gian từ tài liệu BA tới merge.</div></div>
+    <div class="card metric"><div class="n">2</div><div>Số giờ người bỏ ra cho mỗi tính năng.</div></div>
+    <div class="card metric"><div class="n">3</div><div>Số bug QA hoặc production phát hiện sau merge.</div></div>
+    <div class="card metric"><div class="n">4</div><div>Số lần agent bị chặn hoặc phải hỏi lại. Cao nghĩa là tài liệu BA hoặc hợp đồng chưa đủ rõ.</div></div>
+    <div class="card metric"><div class="n">5</div><div>Chi phí token cho mỗi tính năng.</div></div>
+  </div>
+
+  <footer>LAN Agents · Quy trình đích, chưa triển khai đầy đủ. Bản chữ: <code>docs/workflow.md</code>.</footer>
+
+</main>
+</body>
+</html>
