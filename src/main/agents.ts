@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { accessAnnounce, accessPrompt, AccessDenied, defaultAccess, deniedRoles, toolBlob } from "../shared/access";
+import { DECISION_END, DECISION_HEADING, DECISION_MARK } from "../shared/brief";
 import { codingRoleDuty, type CodingRole } from "../shared/group";
 import type { ProviderId, Settings } from "../shared/types";
 import { cliLaunchFile, findExecutable } from "./cliDetect";
@@ -675,6 +676,8 @@ function codingPace(input: ReplyInput): string {
     : "Chế độ coding 1-1. Bạn và agent máy kia cùng làm chủ đề. Bạn chỉ sửa code trong thư mục làm việc của máy này, rồi mô tả phần đã làm và ảnh hưởng bằng Markdown.";
   return [
     duty,
+    `Không dừng lại hỏi người. Khi phân vân (yêu cầu chưa rõ, có nhiều cách làm), tự chọn cách hợp lý nhất rồi ghi lại trong câu trả lời bằng khối: dòng ${DECISION_MARK}; mỗi điểm một mục "- Phân vân: …", kèm "Phương án: …", "Chọn: …", "Lý do: …"; kết thúc bằng dòng ${DECISION_END}.`,
+    `File kết quả và khối KẾT QUẢ phải có mục "## ${DECISION_HEADING}": gom mọi điểm ${DECISION_MARK} của tất cả agent trong hội thoại, mỗi điểm ghi điểm phân vân, các phương án, đã chọn gì, lý do, ai chốt. Không có điểm nào thì ghi rõ là không có.`,
     file
       ? input.room
         ? `Khi toàn bộ việc đã xong, ghi một file Markdown chung tại ${file}. Trước đó không tạo file chung và không gửi file cho nhóm. File code đúng vai của mình vẫn được ghi trong thư mục làm việc.`

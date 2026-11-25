@@ -15,9 +15,13 @@ import {
   CODING_TURN_MAX,
   clampTurnLimit,
   codingNeed,
+  decisionBlocks,
+  decisionSection,
   emptyBrief,
+  hasDecisionSection,
   resultText,
   sanitizeBrief,
+  type DecisionEntry,
   type ProjectBrief,
 } from "../shared/brief";
 import {
@@ -4125,6 +4129,37 @@ export class AppCore {
     return "";
   }
 
+  private withDecisions(sessionId: string, data: Buffer, finalText: string, roleOf?: (peerId: string) => string): Buffer {
+    const markdown = data.toString("utf8");
+    if (hasDecisionSection(markdown)) return data;
+    const section = decisionSection(this.decisionEntries(sessionId, finalText, roleOf));
+    return Buffer.from(`${markdown.trimEnd()}\n\n${section}\n`, "utf8");
+  }
+
+  private decisionEntries(sessionId: string, finalText: string, roleOf?: (peerId: string) => string): DecisionEntry[] {
+    const since = this.store.briefs[sessionId]?.codingSince || 0;
+    const seen = new Set<string>();
+    const entries: DecisionEntry[] = [];
+    const label = (peerId: string, name: string) => {
+      const role = roleOf?.(peerId) ?? "";
+      return role ? `${name} · ${role}` : name;
+    };
+    const collect = (who: string, text: string) => {
+      for (const block of decisionBlocks(text)) {
+        const key = block.replace(/\s+/g, " ").toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        entries.push({ who, text: block });
+      }
+    };
+    for (const line of this.store.transcripts[sessionId] ?? []) {
+      if (line.kind !== "agent" || line.pending || line.createdAt < since) continue;
+      collect(label(line.fromPeerId, line.fromName || "Agent"), line.text);
+    }
+    collect(label(this.store.peerId, this.store.settings.name), finalText);
+    return entries;
+  }
+
   private async publishPairCodingResult(peerId: string, sessionId: string, text: string): Promise<void> {
     const body = resultText(text);
     if (!body) return;
@@ -4139,10 +4174,8 @@ export class AppCore {
         if (stat.size > 0 && stat.mtimeMs > since) data = await readFileLimited(full, MAX_FILE_BYTES);
       }
       this.codingFileStamp.delete(sessionId);
-      if (!data) {
-        data = Buffer.from(body, "utf8");
-        await saveExact(folder, CODING_RESULT_FILE, data);
-      }
+      data = this.withDecisions(sessionId, data ?? Buffer.from(body, "utf8"), text);
+      await saveExact(folder, CODING_RESULT_FILE, data);
       if (fileRef(full)) allowPreview(full);
       const entry = { name: CODING_RESULT_FILE, kind: "markdown" as const, excerpt: discussExcerpt(CODING_RESULT_FILE, data) };
       brief.files = brief.files.filter((file) => file.name !== CODING_RESULT_FILE);
@@ -4173,10 +4206,11 @@ export class AppCore {
         if (stat.size > 0 && stat.mtimeMs > since) data = await readFileLimited(full, MAX_FILE_BYTES);
       }
       this.codingFileStamp.delete(sessionId);
-      if (!data) {
-        data = Buffer.from(body, "utf8");
-        await saveExact(folder, CODING_RESULT_FILE, data);
-      }
+      data = this.withDecisions(sessionId, data ?? Buffer.from(body, "utf8"), text, (peerId) => {
+        const role = codingRole(room.members.find((member) => member.peerId === peerId)?.role);
+        return role ? codingRoleLabel(role) : "";
+      });
+      await saveExact(folder, CODING_RESULT_FILE, data);
       if (fileRef(full)) allowPreview(full);
       const entry = { name: CODING_RESULT_FILE, kind: "markdown" as const, excerpt: discussExcerpt(CODING_RESULT_FILE, data) };
       brief.files = brief.files.filter((file) => file.name !== CODING_RESULT_FILE);
@@ -4192,7 +4226,7 @@ export class AppCore {
         this.sendTo(room.hostId, "group-result", {
           groupId: room.id,
           sessionId,
-          text: body.slice(0, 200_000),
+          text: data.toString("utf8").slice(0, 200_000),
         });
       }
       const others = room.members.some((member) => member.peerId !== this.store.peerId);

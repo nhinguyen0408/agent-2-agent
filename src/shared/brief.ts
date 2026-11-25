@@ -85,6 +85,66 @@ export function codingNeed(text: string): number {
   return Math.min(CODING_TURN_MAX, count);
 }
 
+export const DECISION_MARK = "TỰ CHỐT";
+export const DECISION_END = "HẾT TỰ CHỐT";
+export const DECISION_HEADING = "Các điểm agent tự chốt";
+
+export type DecisionEntry = {
+  who: string;
+  text: string;
+};
+
+const DECISION_START = /^\s*(?:#{1,6}\s*)?\**\s*TỰ CHỐT\s*:?\s*\**\s*:?\s*$/u;
+const DECISION_STOP = /^\s*(?:\**\s*HẾT TỰ CHỐT\s*\**\s*$)/u;
+const DECISION_BREAK = /^\s*(?:KẾT QUẢ(?:\s|:|：|\.|$)|CẦN THÊM:)|^#{1,6}\s/u;
+const DECISION_MORE = /^(?:\s+\S|\s*[-*+]\s|\s*\d+[.)]\s)/;
+
+export function decisionBlocks(text: string): string[] {
+  const lines = String(text ?? "").replace(/\r\n?/g, "\n").split("\n");
+  const blocks: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!DECISION_START.test(lines[index] ?? "")) continue;
+    const end = decisionEnd(lines, index + 1);
+    const body = lines.slice(index + 1, end).join("\n").trim();
+    if (body) blocks.push(body.slice(0, 4000));
+    index = end - 1;
+  }
+  return blocks;
+}
+
+function decisionEnd(lines: string[], from: number): number {
+  for (let index = from; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    if (DECISION_STOP.test(line)) return index;
+    if (DECISION_START.test(line) || DECISION_BREAK.test(line)) break;
+  }
+  for (let index = from; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    if (DECISION_STOP.test(line) || DECISION_START.test(line) || DECISION_BREAK.test(line)) return index;
+    if (line.trim() || index === from) continue;
+    let next = index + 1;
+    while (next < lines.length && !(lines[next] ?? "").trim()) next += 1;
+    const after = lines[next] ?? "";
+    if (next >= lines.length || !DECISION_MORE.test(after) || DECISION_STOP.test(after)) return index;
+  }
+  return lines.length;
+}
+
+export function hasDecisionSection(markdown: string): boolean {
+  return /^#{1,6}\s*\**\s*Các điểm (?:agent )?tự chốt/imu.test(markdown);
+}
+
+export function decisionSection(entries: DecisionEntry[]): string {
+  const head = [
+    `## ${DECISION_HEADING}`,
+    "",
+    "Mục này do app tổng hợp từ các khối TỰ CHỐT trong hội thoại, vì file kết quả chưa có mục này. Chế độ coding không dừng lại hỏi người, nên agent tự quyết các điểm dưới đây. Người cần xem lại trước khi dùng kết quả.",
+  ];
+  if (!entries.length) return [...head, "", "Agent không ghi lại điểm phân vân nào trong lúc làm."].join("\n");
+  const items = entries.map((entry, index) => [`### ${index + 1}. ${entry.who}`, "", entry.text].join("\n"));
+  return [...head, "", ...items.flatMap((item) => [item, ""])].join("\n").trimEnd();
+}
+
 function sanitizeBriefFile(input: unknown): BriefFile | null {
   if (!input || typeof input !== "object") return null;
   const raw = input as Partial<BriefFile>;
