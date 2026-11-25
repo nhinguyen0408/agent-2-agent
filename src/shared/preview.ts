@@ -1,4 +1,4 @@
-export type PreviewKind = "image" | "html" | "markdown" | "audio" | "video";
+export type PreviewKind = "image" | "html" | "markdown" | "text" | "audio" | "video";
 
 export type FileRef = {
   name: string;
@@ -26,6 +26,10 @@ const KINDS: Record<string, PreviewKind> = {
   htm: "html",
   md: "markdown",
   markdown: "markdown",
+  txt: "text",
+  log: "text",
+  csv: "text",
+  json: "text",
   mp3: "audio",
   wav: "audio",
   ogg: "audio",
@@ -49,6 +53,10 @@ const MIMES: Record<string, string> = {
   htm: "text/html; charset=utf-8",
   md: "text/markdown; charset=utf-8",
   markdown: "text/markdown; charset=utf-8",
+  txt: "text/plain; charset=utf-8",
+  log: "text/plain; charset=utf-8",
+  csv: "text/plain; charset=utf-8",
+  json: "text/plain; charset=utf-8",
   mp3: "audio/mpeg",
   wav: "audio/wav",
   ogg: "audio/ogg",

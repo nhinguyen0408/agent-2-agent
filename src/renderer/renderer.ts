@@ -1,4 +1,4 @@
-import { BRIEF_FILE_MAX, BRIEF_TURN_MAX, CODING_TURN_DEFAULT, CODING_TURN_MAX, resultText, type BriefFile, type ProjectBrief } from "../shared/brief";
+import { BRIEF_FILE_MAX, BRIEF_TURN_MAX, CODING_TURN_DEFAULT, CODING_TURN_MAX, TOPIC_QUEUE_MAX, resultText, type BriefFile, type ProjectBrief, type QueuedTopic } from "../shared/brief";
 import { mergeCodingStep, type CodingLive, type CodingStep, type CodingViewSnap } from "../shared/codingLive";
 import { CODING_ROLES, GROUP_MAX, codingRoleLabel, groupKey, mentionRanges, parseGroupKey, rewriteMentionLabels, type GroupMember, type GroupRoom, type MentionRef } from "../shared/group";
 import type { AppState, ChatLine, ChatNotice, CliReport, CliToolState, FileRef, PeerActivity, PeerView, Settings, WorkFile } from "../shared/types";
@@ -28,6 +28,8 @@ declare global {
       openBriefFile: (sessionId: string, name: string) => Promise<FileRef | null>;
       startBrief: (peerId: string) => Promise<AppState>;
       extendBrief: (peerId: string, extra?: number) => Promise<AppState>;
+      queueTopic: (peerId: string, topic: string, goal: string) => Promise<AppState>;
+      dropTopic: (peerId: string, id: string) => Promise<AppState>;
       createGroup: () => Promise<AppState>;
       inviteGroup: (groupId: string, peerId: string) => Promise<AppState>;
       leaveGroup: (groupId: string, peerId?: string) => Promise<AppState>;
@@ -248,6 +250,20 @@ function boot(host: HTMLElement): void {
                 <span id="brief-coding-copy">Chế độ coding. Mặc định 50 lượt, dừng khi có kết quả. Diff hiện trong hội thoại. Tin nhắn agent có icon để mở file log.</span>
               </label>
               <div id="brief-roles" class="brief-roles" hidden></div>
+              <div class="brief-queue">
+                <div class="brief-queue-head">
+                  <strong>Hàng đợi chủ đề</strong>
+                  <span id="queue-count" class="brief-meter"></span>
+                </div>
+                <p class="brief-queue-hint">Chủ đề hiện tại có KẾT QUẢ thì app tự chạy chủ đề đầu hàng đợi, cùng chế độ và số lượt. Mỗi lần chạy ghi một file báo cáo ket-qua-NN.md.</p>
+                <ol id="queue-list" class="queue-list"></ol>
+                <input id="queue-topic" maxlength="500" placeholder="Chủ đề kế tiếp" aria-label="Chủ đề kế tiếp" />
+                <textarea id="queue-goal" rows="3" maxlength="2000" placeholder="Kết quả mong muốn (không bắt buộc)" aria-label="Kết quả mong muốn của chủ đề kế tiếp"></textarea>
+                <div class="queue-actions">
+                  <button id="queue-add" type="button">Thêm vào hàng đợi</button>
+                  <button id="queue-run" type="button">Chạy chủ đề kế tiếp</button>
+                </div>
+              </div>
               <div class="brief-actions">
                 ${iconButton("brief-add", "paperclip", "Thêm file context: txt, Markdown, ảnh, PDF, Word, Excel")}
                 <label class="replies" data-tip="Số lượt agent được trả lời nhau, tối đa ${BRIEF_TURN_MAX}">
@@ -696,7 +712,7 @@ function boot(host: HTMLElement): void {
       return;
     }
     const kind = button.dataset.preview;
-    if (kind !== "image" && kind !== "html" && kind !== "markdown" && kind !== "audio" && kind !== "video") {
+    if (kind !== "image" && kind !== "html" && kind !== "markdown" && kind !== "text" && kind !== "audio" && kind !== "video") {
       flash("Loại file này chưa xem trước được.");
       return;
     }
@@ -849,6 +865,33 @@ function boot(host: HTMLElement): void {
     const peerId = active;
     setBriefOpen(false);
     void guard(async () => {
+      await flushBrief(peerId);
+      await window.lan.startBrief(peerId);
+    });
+  });
+  must<HTMLButtonElement>("#queue-add").addEventListener("click", () => {
+    if (!active) return;
+    const peerId = active;
+    const topic = must<HTMLInputElement>("#queue-topic");
+    const goal = must<HTMLTextAreaElement>("#queue-goal");
+    if (!topic.value.trim()) {
+      topic.focus();
+      return;
+    }
+    void guard(async () => {
+      await window.lan.queueTopic(peerId, topic.value, goal.value);
+      topic.value = "";
+      goal.value = "";
+      topic.focus();
+    });
+  });
+  must<HTMLButtonElement>("#queue-run").addEventListener("click", () => {
+    if (!active) return;
+    const peerId = active;
+    setBriefOpen(false);
+    void guard(async () => {
+      must<HTMLInputElement>("#brief-topic").value = "";
+      must<HTMLTextAreaElement>("#brief-goal").value = "";
       await flushBrief(peerId);
       await window.lan.startBrief(peerId);
     });
@@ -1544,7 +1587,10 @@ function boot(host: HTMLElement): void {
     summary.title = title;
     const fileNote = current.files.length ? ` · ${current.files.length} file` : "";
     const turnNote = turnName && current.running ? `Đến lượt ${turnName} · ` : "";
-    must<HTMLElement>("#brief-meter").textContent = `${turnNote}${briefMeter(current)}${fileNote}`;
+    const queue = state?.queues?.[sessionId] ?? [];
+    const queueNote = queue.length ? ` · ${queue.length} chủ đề chờ` : "";
+    must<HTMLElement>("#brief-meter").textContent = `${turnNote}${briefMeter(current)}${fileNote}${queueNote}`;
+    paintQueue(queue, current.running, connected);
     paintBriefFiles(sessionId, current.files, current.running);
     paintBriefDock(sessionId, current.files);
     const result = latestResult(lines);
@@ -1630,6 +1676,36 @@ function boot(host: HTMLElement): void {
   function setIfIdle(el: HTMLInputElement | HTMLTextAreaElement, value: string): void {
     if (document.activeElement === el) return;
     if (el.value !== value) el.value = value;
+  }
+
+  function paintQueue(queue: QueuedTopic[], running: boolean, connected: boolean): void {
+    must<HTMLElement>("#queue-count").textContent = `${queue.length}/${TOPIC_QUEUE_MAX}`;
+    must<HTMLButtonElement>("#queue-add").disabled = queue.length >= TOPIC_QUEUE_MAX;
+    const run = must<HTMLButtonElement>("#queue-run");
+    run.disabled = !connected || running || !queue.length;
+    run.title = queue.length ? `Bỏ chủ đề hiện tại, chạy ngay: ${queue[0].topic}` : "Hàng đợi trống";
+    const key = queue.map((item) => item.id).join("|");
+    const list = must<HTMLOListElement>("#queue-list");
+    if (list.dataset.key === key) return;
+    list.dataset.key = key;
+    list.replaceChildren();
+    for (const item of queue) {
+      const row = document.createElement("li");
+      row.className = "queue-item";
+      const text = document.createElement("span");
+      text.textContent = item.topic;
+      text.title = item.goal ? `${item.topic}\n\nKết quả mong muốn:\n${item.goal}` : item.topic;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "Bỏ";
+      remove.addEventListener("click", () => {
+        const peerId = active;
+        if (!peerId) return;
+        void guard(() => window.lan.dropTopic(peerId, item.id));
+      });
+      row.append(text, remove);
+      list.append(row);
+    }
   }
 
   function paintBriefFiles(sessionId: string, files: BriefFile[], locked: boolean): void {
@@ -2554,6 +2630,7 @@ function kindLabel(kind: PreviewKind | null): string {
   if (kind === "image") return "ảnh";
   if (kind === "html") return "html";
   if (kind === "markdown") return "markdown";
+  if (kind === "text") return "văn bản";
   if (kind === "audio") return "âm thanh";
   if (kind === "video") return "video";
   return "file";

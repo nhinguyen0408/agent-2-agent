@@ -41,6 +41,22 @@ if (!gotLock) {
   let core: AppCore | null = null;
   reportCrash = (scope, err) => core?.noteError(scope, err);
 
+  // Link trong câu trả lời agent hay file Markdown: mở bằng trình duyệt hệ thống,
+  // không mở cửa sổ Electron mới và không điều hướng cửa sổ app.
+  app.on("web-contents-created", (_event, contents) => {
+    const external = (url: string) => {
+      if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
+    };
+    contents.setWindowOpenHandler(({ url }) => {
+      external(url);
+      return { action: "deny" };
+    });
+    contents.on("will-navigate", (event, url) => {
+      event.preventDefault();
+      external(url);
+    });
+  });
+
   const expose = (channel: string, fn: (event: Electron.IpcMainInvokeEvent, ...args: any[]) => unknown) => {
     ipcMain.handle(channel, async (event, ...args) => {
       try {
@@ -363,6 +379,14 @@ if (!gotLock) {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.extendBrief(String(peerId), Number(extra) || BRIEF_EXTEND);
       });
+      expose(IPC.queueTopic, (_event, peerId: string, topic: string, goal: string) => {
+        if (!core) throw new Error("App chưa sẵn sàng");
+        return core.queueTopic(String(peerId), String(topic ?? ""), String(goal ?? ""));
+      });
+      expose(IPC.dropTopic, (_event, peerId: string, id: string) => {
+        if (!core) throw new Error("App chưa sẵn sàng");
+        return core.dropTopic(String(peerId), String(id ?? ""));
+      });
       expose(IPC.createGroup, () => {
         if (!core) throw new Error("App chưa sẵn sàng");
         return core.createGroup();
@@ -457,7 +481,7 @@ if (!gotLock) {
           filters: [
             {
               name: "Xem trước",
-              extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "html", "htm", "md", "markdown", "mp3", "wav", "ogg", "m4a", "flac", "mp4", "webm", "mov", "ogv"],
+              extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "html", "htm", "md", "markdown", "txt", "log", "csv", "json", "mp3", "wav", "ogg", "m4a", "flac", "mp4", "webm", "mov", "ogv"],
             },
           ],
         });

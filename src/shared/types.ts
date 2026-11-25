@@ -1,10 +1,10 @@
 import type { CodingLive, CodingStep, CodingViewSnap } from "./codingLive";
-import type { ProjectBrief } from "./brief";
+import type { ProjectBrief, QueuedTopic } from "./brief";
 import type { DiscussFile } from "./discuss";
 import type { GroupRoom, MentionRef, TurnTicket } from "./group";
 import type { FileRef, WorkFile } from "./preview";
 
-export type { BriefFile, ProjectBrief } from "./brief";
+export type { BriefFile, ProjectBrief, QueuedTopic } from "./brief";
 export type { DiscussFile, DiscussKind } from "./discuss";
 export type { GroupMember, GroupRoom, MentionRef, TurnTicket } from "./group";
 export type { FileRef, WorkFile } from "./preview";
@@ -48,6 +48,8 @@ export const IPC = {
   openBriefFile: "lan:open-brief-file",
   startBrief: "lan:start-brief",
   extendBrief: "lan:extend-brief",
+  queueTopic: "lan:queue-topic",
+  dropTopic: "lan:drop-topic",
   createGroup: "lan:create-group",
   inviteGroup: "lan:invite-group",
   leaveGroup: "lan:leave-group",
@@ -182,6 +184,7 @@ export type AppState = {
   unreadSessions: string[];
   transcripts: Record<string, ChatLine[]>;
   briefs: Record<string, ProjectBrief>;
+  queues: Record<string, QueuedTopic[]>;
   groups: GroupRoom[];
   nicknames: Record<string, string>;
   logs: string[];
@@ -286,6 +289,8 @@ export type LanApi = {
   openBriefFile: (sessionId: string, name: string) => Promise<FileRef | null>;
   startBrief: (peerId: string) => Promise<AppState>;
   extendBrief: (peerId: string, extra?: number) => Promise<AppState>;
+  queueTopic: (peerId: string, topic: string, goal: string) => Promise<AppState>;
+  dropTopic: (peerId: string, id: string) => Promise<AppState>;
   createGroup: () => Promise<AppState>;
   inviteGroup: (groupId: string, peerId: string) => Promise<AppState>;
   leaveGroup: (groupId: string, peerId?: string) => Promise<AppState>;

@@ -85,6 +85,92 @@ export function codingNeed(text: string): number {
   return Math.min(CODING_TURN_MAX, count);
 }
 
+export const TOPIC_QUEUE_MAX = 20;
+
+export type QueuedTopic = {
+  id: string;
+  topic: string;
+  goal: string;
+};
+
+export function sanitizeQueue(input: unknown): QueuedTopic[] {
+  const out: QueuedTopic[] = [];
+  for (const item of Array.isArray(input) ? input : []) {
+    if (!item || typeof item !== "object") continue;
+    const raw = item as Partial<QueuedTopic>;
+    const id = String(raw.id ?? "").replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 80);
+    const topic = String(raw.topic ?? "").trim().slice(0, BRIEF_TOPIC_CAP);
+    if (!id || !topic || out.some((known) => known.id === id)) continue;
+    out.push({ id, topic, goal: String(raw.goal ?? "").trim().slice(0, BRIEF_GOAL_CAP) });
+    if (out.length >= TOPIC_QUEUE_MAX) break;
+  }
+  return out;
+}
+
+export type RunStatus = "done" | "limit" | "stopped";
+
+export type RunReport = {
+  number: number;
+  topic: string;
+  goal: string;
+  coding: boolean;
+  status: RunStatus;
+  needTurns: number;
+  turnsUsed: number;
+  turnLimit: number;
+  startedAt: string;
+  endedAt: string;
+  minutes: number;
+  agents: string;
+  result: string;
+  lastReply: string;
+  decisions: string;
+  next: string;
+};
+
+const REPORT_NAME = /^ket-qua-(\d{1,4})\.md$/i;
+
+export function reportFileName(number: number): string {
+  return `ket-qua-${String(number).padStart(2, "0")}.md`;
+}
+
+export function reportNumber(name: string): number {
+  const match = REPORT_NAME.exec(name);
+  return match ? Number(match[1]) : 0;
+}
+
+export function runStatusText(status: RunStatus, needTurns: number): string {
+  if (status === "done") return "Hoàn thành";
+  if (status === "limit") return needTurns > 0 ? `Hết lượt, agent ước tính cần thêm ${needTurns} lượt` : "Hết lượt, chưa có KẾT QUẢ";
+  return "Đã dừng trước khi có KẾT QUẢ";
+}
+
+export function runReportMarkdown(report: RunReport): string {
+  const head = [
+    `# Báo cáo lần chạy ${String(report.number).padStart(2, "0")}: ${report.topic.replace(/\s+/g, " ")}`,
+    "",
+    `- **Trạng thái:** ${runStatusText(report.status, report.needTurns)}`,
+    `- **Chế độ:** ${report.coding ? "Coding" : "Trao đổi"}`,
+    `- **Bắt đầu:** ${report.startedAt}`,
+    `- **Kết thúc:** ${report.endedAt} (${report.minutes < 1 ? "dưới 1 phút" : `khoảng ${report.minutes} phút`})`,
+    `- **Số lượt agent:** ${report.turnsUsed}/${report.turnLimit}`,
+    report.agents ? `- **Agent tham gia:** ${report.agents}` : "",
+    report.next ? `- **Hàng đợi:** ${report.next}` : "",
+  ].filter((line, index) => index < 2 || line);
+  const goal = report.goal.trim() ? ["", "## Kết quả mong muốn", "", report.goal.trim()] : [];
+  const body = report.result.trim()
+    ? ["", "## Kết quả", "", report.result.trim()]
+    : [
+        "",
+        "## Kết quả",
+        "",
+        "Lần chạy này chưa có khối KẾT QUẢ.",
+        ...(report.lastReply.trim() ? ["", "Câu trả lời cuối của agent:", "", report.lastReply.trim()] : []),
+      ];
+  const decisions = report.decisions.trim() ? ["", report.decisions.trim()] : [];
+  return [...head, ...goal, ...body, ...decisions, ""].join("\n");
+}
+
 export const DECISION_MARK = "TỰ CHỐT";
 export const DECISION_END = "HẾT TỰ CHỐT";
 export const DECISION_HEADING = "Các điểm agent tự chốt";

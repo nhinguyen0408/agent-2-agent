@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { app } from "electron";
-import { sanitizeBrief, type ProjectBrief } from "../shared/brief";
+import { sanitizeBrief, sanitizeQueue, type ProjectBrief, type QueuedTopic } from "../shared/brief";
 import { sanitizeMembers, type GroupRoom } from "../shared/group";
 import { cleanAccess, defaultAccess } from "../shared/access";
 import type { ChatLine, ChatSession, CliLinks, Settings } from "../shared/types";
@@ -27,6 +27,12 @@ type Disk = {
   briefs?: Record<string, ProjectBrief>;
   groups?: GroupRoom[];
   nicknames?: Record<string, string>;
+  topicQueues?: Record<string, TopicQueue>;
+};
+
+export type TopicQueue = {
+  peerKey: string;
+  items: QueuedTopic[];
 };
 
 export function defaultSettings(profile: string): Settings {
@@ -60,6 +66,7 @@ export class Store {
   briefs: Record<string, ProjectBrief>;
   groups: GroupRoom[];
   nicknames: Record<string, string>;
+  topicQueues: Record<string, TopicQueue>;
 
   constructor(profile: string) {
     this.file = path.join(app.getPath("userData"), "config.json");
@@ -75,6 +82,7 @@ export class Store {
     this.briefs = sanitizeBriefs(disk?.briefs);
     this.groups = sanitizeGroups(disk?.groups);
     this.nicknames = sanitizeNicknames(disk?.nicknames);
+    this.topicQueues = sanitizeTopicQueues(disk?.topicQueues);
     for (const lines of Object.values(this.transcripts)) {
       for (const line of lines) {
         if (line.pending) {
@@ -96,6 +104,7 @@ export class Store {
       briefs: this.briefs,
       groups: this.groups,
       nicknames: this.nicknames,
+      topicQueues: this.topicQueues,
     };
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
     const tmp = `${this.file}.tmp`;
@@ -128,6 +137,19 @@ export function sanitizeSettings(input: Partial<Settings> & { cursorCwd?: string
     access: cleanAccess(input.access),
     autoAccept: Boolean(input.autoAccept),
   };
+}
+
+function sanitizeTopicQueues(input: unknown): Record<string, TopicQueue> {
+  if (!input || typeof input !== "object") return {};
+  const queues: Record<string, TopicQueue> = {};
+  for (const [sessionId, value] of Object.entries(input as Record<string, unknown>)) {
+    if (!/^[a-zA-Z0-9_-]{1,80}$/.test(sessionId) || !value || typeof value !== "object") continue;
+    const raw = value as Partial<TopicQueue>;
+    const peerKey = String(raw.peerKey ?? "").slice(0, 120);
+    const items = sanitizeQueue(raw.items);
+    if (peerKey && items.length) queues[sessionId] = { peerKey, items };
+  }
+  return queues;
 }
 
 function cleanDir(value: unknown): string {
